@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -208,6 +210,7 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	}
 	// 联网校验：豆瓣 / Open Library / Google Books / Bangumi 能对上书名作者，就更有把握
 	var online *Candidate
+	var onlineCover []byte
 	if mc := metaConfig(); fromInbox && mc.Enabled && mc.OnIngest {
 		octx, cancel := context.WithTimeout(ctx, 25*time.Second)
 		online = bestMatch(octx, lookupQuery{Title: id.Title, Author: id.Author, ISBN: m.ISBN, Kind: kind})
@@ -220,6 +223,14 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 				id.Confidence = 0.92
 			}
 			id.Source += " · " + online.Source + "已核对"
+			// 封面在登记之前就下载好：书出现在书库里时已经是整理完的样子，
+			// 不会有一小段时间文件还在投递目录里
+			if len(m.Cover) == 0 && online.Cover != "" {
+				cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				onlineCover, _ = fetchImage(cctx, online.Cover)
+				cancel()
+				online.Cover = "" // 下载失败也不再重试
+			}
 		}
 	}
 	if lib == nil {
@@ -274,7 +285,9 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	}
 	fileID, _ := res.LastInsertId()
 	if _, err := os.Stat(coverPath(bookID)); err != nil {
-		saveCover(bookID, m.Cover)
+		if !saveCover(bookID, m.Cover) {
+			saveCover(bookID, onlineCover)
+		}
 	}
 	if online != nil && !attached {
 		octx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -292,10 +305,12 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 		batch := "in-" + newBatch()
 		f, _ := getFile(fileID)
 		if confident {
-			if err := organizeBook(bookID, batch, "入库整理"); err != nil {
+			if err := organizeBook(bookID, batch, "入库整理"); errors.Is(err, sql.ErrNoRows) {
+				r.Msg = "入库过程中这本书被删除了"
+			} else if err != nil {
 				r.Msg = "整理失败：" + err.Error()
 			}
-		} else {
+		} else if f != nil { // 入库过程中被删除时 f 是 nil，文件已经进了回收站
 			// 把握不大：先放到书库的“_待确认”文件夹，能读，等你确认后再按规范整理
 			to := filepath.Join(lib.Path, "_待确认", name)
 			moveMu.Lock()

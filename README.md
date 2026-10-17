@@ -89,7 +89,7 @@ docker compose up -d --build
 
 用 WebView 直接打开 NAS 上的书库网页，界面和网页端一样、跟着书库一起更新；手机自己负责网络、离线、后台听书这些网页做不到的事。
 
-**安装**：从 GitHub Actions 打包出来的 `shuku-android.apk`（见下面“打包”），传到手机上点开安装（第一次要允许“安装未知应用”）。Android 8.0 及以上。
+**安装**：在仓库的 Releases 里下载 `shuku-android.apk`（GitHub Actions 打包出来的，见下面“打包”），在手机上点开安装（第一次要允许“安装未知应用”）。Android 8.0 及以上。
 
 **连接**：
 
@@ -151,8 +151,10 @@ docker compose up -d --build
 
 安装包用 GitHub Actions 打包，**只在手动运行时才打包**，不会因为推送代码自动运行：
 
-1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。可以填版本号（只用数字和点，比如 `1.0.1`），勾选“发布 Release”会同时建一个 Release。
-2. 大约 10 分钟后，在这次运行页面底部的 Artifacts 下载 `shuku-apps-…`，里面有 `shuku-android.apk`（手机）、`shuku-wear.apk`（手表）、`shuku-extension.zip`（浏览器插件）和校验值。
+1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。可以填版本号（只用数字和点，比如 `1.0.1`），留空就用 `android/gradle.properties` 里的。
+2. 一般 4～6 分钟打完，结果在仓库的 Releases 里：`shuku-android.apk`（手机）、`shuku-wear.apk`（手表）、`shuku-extension.zip`（浏览器插件）和校验值 `SHA256SUMS.txt`。手机登录 GitHub 打开 Releases 就能直接下载安装。
+
+为了省 Actions 的分钟数和存储额度：整个打包只有一个任务，手机和手表在同一次 Gradle 里并行打包，不建缓存、不上传 Artifacts（Release 附件不占 Actions 存储），超过 25 分钟自动停止。每次运行的内部版本号自动加一，新包可以直接覆盖安装。
 
 签名：默认用仓库里的 `android/signing/shuku.jks`（密码 `shuku-app`），自己用没问题。如果要公开分发，请换成自己的签名：在仓库 Settings → Secrets and variables → Actions 添加 `SHUKU_KEYSTORE_BASE64`（签名文件 `base64 -w0` 后的内容）、`SHUKU_KEYSTORE_PASSWORD`、`SHUKU_KEY_ALIAS`、`SHUKU_KEY_PASSWORD`。换签名后手机和手表都要卸载重装。
 

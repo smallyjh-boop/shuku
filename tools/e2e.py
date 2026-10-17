@@ -600,7 +600,9 @@ def test_upload_ai_delete():
     make_epub(p, "Untitled", "", [("第一章", ["方鸿渐到了上海。" * 20]), ("第二章", ["鲍小姐的故事。" * 20])])
     r = api("POST", "/api/upload?path=" + urllib.parse.quote("新书/noname_x7f3.epub"), data=open(p, "rb").read())
     check("上传到投递目录", r.json()["ok"])
-    b = wait(lambda: book_by_title("围城"), 40, 1, "AI 识别上传的书")
+    # 等入库整理结束（文件离开投递目录）再检查，免得赶上登记和移动之间的那一下
+    inbox = os.path.join(T, "inbox") + os.sep
+    b = wait(lambda: (x := book_by_title("围城")) and not x["files"][0]["path"].startswith(inbox) and x, 40, 0.5, "AI 识别上传的书")
     check("AI 把乱名文件识别成《围城》钱锺书", b and b["author"] == "钱锺书" and b["status"] == "ok", b and (b["author"], b["status"]))
     check("识别后按规则归档", b and b["files"][0]["path"].endswith("钱锺书/围城 (1947)/围城 - 钱锺书.epub"), b and b["files"][0]["path"])
     check("不支持的格式被拒绝", api("POST", "/api/upload?path=a.exe", 415, data=b"MZ").status_code == 415)
