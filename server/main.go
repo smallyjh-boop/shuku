@@ -35,6 +35,11 @@ func env(k, def string) string {
 }
 
 func main() {
+	// 生成本地字典（发布时在 GitHub Actions 里用）：shuku -build-dict 输出文件 -moe … -cedict … -ecdict …
+	if len(os.Args) > 1 && os.Args[1] == "-build-dict" {
+		buildDictCLI(os.Args[2:])
+		return
+	}
 	// 容器健康检查：shuku -health
 	if len(os.Args) > 1 && os.Args[1] == "-health" {
 		c := http.Client{Timeout: 4 * time.Second}

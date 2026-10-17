@@ -1,8 +1,9 @@
 // 流式电子书：基于 foliate-js（EPUB、MOBI、AZW3、FB2，以及服务器转换成 EPUB 的 TXT 等）
 
 import '/vendor/foliate-js/view.js'
-import { h, clear, fill } from '../ui.js'
+import { h, clear, fill, debounce } from '../ui.js'
 import { splitSentences } from './tts.js'
+import { around } from './dict.js'
 
 const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dd,dt,td,th,figcaption,pre,div'
 import { download } from '../api.js'
@@ -91,6 +92,14 @@ export class Engine {
       this.shell.tap(r.left + e.clientX, r.top + e.clientY)
     })
     doc.addEventListener('keydown', e => this.shell.onKey(e))
+    // 选中文字查字典：鼠标松开、手指抬起，或者手机上拖动选区的把手停下来以后
+    let pressing = false
+    const report = () => { if (!pressing) this.shell.onSelectText?.(this.selected(doc)) }
+    const later = debounce(report, 450)
+    doc.addEventListener('pointerdown', () => { pressing = true })
+    doc.addEventListener('pointerup', () => { pressing = false; setTimeout(report, 30) })
+    doc.addEventListener('pointercancel', () => { pressing = false; later() })
+    doc.addEventListener('selectionchange', later)
     // 在书里滚轮翻页
     let at = 0
     doc.addEventListener('wheel', e => {
@@ -145,6 +154,22 @@ export class Engine {
   }
 
   paged() { return this.fxl || this.shell.prefs.flow === 'paginated' }
+  lang() { const l = this.view?.book?.metadata?.language; return (Array.isArray(l) ? l[0] : l) || '' }
+
+  // 选中的文字、所在的那段话、在屏幕上的位置
+  selected(doc) {
+    const sel = doc.getSelection?.()
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null
+    const text = sel.toString().replace(/\s+/g, ' ').trim()
+    if (!text || text.length > 300) return null
+    const range = sel.getRangeAt(0)
+    const r = range.getBoundingClientRect()
+    const f = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 }
+    let node = range.commonAncestorContainer
+    if (node.nodeType !== 1) node = node.parentElement
+    const block = node?.closest?.(BLOCKS) || node
+    return { text, context: around(block?.textContent, text), rect: { left: r.left + f.left, right: r.right + f.left, top: r.top + f.top, bottom: r.bottom + f.top } }
+  }
   rtl() { return this.view?.book?.dir === 'rtl' }
   next() { return this.view?.next() }
   prev() { return this.view?.prev() }

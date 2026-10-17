@@ -452,6 +452,12 @@ func synthesize(ctx context.Context, text, voice string, speed float64) ([]byte,
 			voice = c.OpenAI.Voice
 		}
 	}
+	return synthesizeWith(ctx, c.Engine, text, voice, speed)
+}
+
+// 用指定的语音服务合成（查字典的发音按语言挑微软的音色，不一定是设置里选的那个）
+func synthesizeWith(ctx context.Context, engine, text, voice string, speed float64) ([]byte, error) {
+	c := ttsConfig()
 	if speed <= 0 {
 		speed = 1
 	}
@@ -461,7 +467,7 @@ func synthesize(ctx context.Context, text, voice string, speed float64) ([]byte,
 	if speed > 3 {
 		speed = 3
 	}
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%.2f|%s", c.Engine, c.OpenAI.Model, voice, speed, text)))
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%.2f|%s", engine, c.OpenAI.Model, voice, speed, text)))
 	key := hex.EncodeToString(sum[:])
 	p := ttsCachePath(key)
 	if b, err := os.ReadFile(p); err == nil {
@@ -477,7 +483,7 @@ func synthesize(ctx context.Context, text, voice string, speed float64) ([]byte,
 	}
 	var b []byte
 	var err error
-	switch c.Engine {
+	switch engine {
 	case "openai":
 		b, err = openaiSynth(ctx, c, text, voice, speed)
 	case "edge":

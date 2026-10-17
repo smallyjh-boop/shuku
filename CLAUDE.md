@@ -14,10 +14,13 @@
 ## 打包（GitHub Actions）
 
 - `.github/workflows/android.yml` 只能手动运行（workflow_dispatch），推送代码不触发；用户在意 Actions 分钟数，能一次打完就一次打完，不跑多余的任务。
-- 每次都全部打包（各端安装包要放进服务器镜像），只打 x86（NAS 是 Intel）。服务器在 `golang:1.24-bookworm` 里编译，再用根目录 `Dockerfile` 打包：`--build-context build=…` 换掉编译阶段，`--build-context base=docker-image://ghcr.io/smallyjh-boop/shuku-base:<base 段的哈希>` 换掉运行环境。试运行用宿主机网络，检查接口、网页、`/api/clients`、`/dl/…` 下载和 Calibre 转换。
-- 运行环境（Debian + mupdf/7z/djvulibre + Calibre）是 `Dockerfile` 里的 `base` 段，单独做成基础镜像，标签是这一段内容的哈希：这一段没改就不重做，NAS 升级只下载几十 MB。改 `base` 段（或者运行时勾“重新制作基础镜像”）会让 NAS 多下载几百 MB，没必要别动。
+- 每次都全部打包（各端安装包要放进服务器镜像），只打 x86（NAS 是 Intel）。服务器在 `golang:1.24-bookworm` 里编译，再用根目录 `Dockerfile` 打包：`--build-context build=…` 换掉编译阶段，`--build-context runtime=docker-image://ghcr.io/smallyjh-boop/shuku-runtime:<哈希>` 换掉运行环境。试运行用宿主机网络，检查接口、网页、`/api/clients`、`/dl/…` 下载、Calibre 转换和本地字典。
+- 安卓 App 是 WebView：阅读器每一章在 iframe 里（blob: 地址），`shouldOverrideUrlLoading` 对框架里的跳转必须放行（`!request.isForMainFrame` 直接返回 false），否则 EPUB、TXT 打不开。e2e 里的“模拟安卓 App”是桌面 Chromium 加假的原生桥，测不到这类 WebView 行为。
+- 运行环境（Debian + mupdf/7z/djvulibre + Calibre）是 `Dockerfile` 里的 `base` 段，单独做成基础镜像，标签是这一段文字的哈希（awk 取 `FROM … AS base` 到下一个 `FROM` 之间，**注释、空行也算**）：这一段没改就不重做，NAS 升级只下载几十 MB。改 `base` 段（或者勾“重新制作基础镜像”）会让 NAS 多下载几百 MB，没必要别动，说明性注释写到别的段里。
+- 本地字典在 `runtime` 段（base + `/app/dict/dict.db`），做成 `ghcr.io/smallyjh-boop/shuku-runtime`，标签按 base 标签、runtime 段文字、字典数据地址（固定版本，在 workflow 的 env 里）、`server/dict_build.go` 算。字典由 `shuku -build-dict` 在 Actions 里生成：国语辞典（g0v/moedict-data，CC BY-ND 3.0 TW，原文照存、显示时转简体）、CC-CEDICT（大陆拼音、繁简对照）、ECDICT（英文）。
 - Releases 不再放服务器镜像的 tar.gz（带 Calibre 太大，NAS 直接从 ghcr.io 拉）。
 - 安卓签名：`android/signing/shuku.jks`（手机和手表必须同一个签名、同一个包名 `app.shuku`）。
+- 手表 App 是原生界面（不是 WebView），自己能听书：`ListenService` 按句调 `POST /api/tts` 合成、手表自己播放（蓝牙耳机，或用户同意后用扬声器；书库语音不行时用手表自带语音），进度和阅读页一样换算成 `sec:` / `p:` 位置传回书库。首页另外还能遥控手机上的听书（Wearable 消息 `/shuku/tts/…`）。没有 Android SDK 时用 `android/tools/check.sh` 做类型检查。
 
 ## 在线升级（已做好）
 

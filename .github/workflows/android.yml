@@ -30,6 +30,10 @@ on:
         description: 重新制作基础镜像（Debian 和 Calibre 更新到最新，NAS 要多下载几百 MB；平时不用勾）
         type: boolean
         default: false
+      rebuild_dict:
+        description: 重新生成本地字典（拿最新的 CC-CEDICT，NAS 要多下载几十 MB；平时不用勾）
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -43,6 +47,11 @@ concurrency:
 env:
   IMAGE: ghcr.io/smallyjh-boop/shuku
   BASE_IMAGE: ghcr.io/smallyjh-boop/shuku-base
+  RUNTIME_IMAGE: ghcr.io/smallyjh-boop/shuku-runtime
+  # 本地字典的数据（固定版本）：重编国语辞典修订本（CC BY-ND 3.0 TW）、ECDICT（MIT）、CC-CEDICT（CC BY-SA 4.0，每天更新，取当时最新的）
+  MOEDICT_URL: https://raw.githubusercontent.com/g0v/moedict-data/a6dc997417507eb510fc29822bc514de2c92728c/dict-revised.json.xz
+  ECDICT_URL: https://raw.githubusercontent.com/skywind3000/ECDICT/bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b/ecdict.csv
+  CEDICT_URL: https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz
 
 jobs:
   build:
@@ -161,11 +170,43 @@ jobs:
             docker push "$B"
           fi
 
+      - name: 运行环境（基础镜像加上本地字典，没改就用做好的）
+        env:
+          REBUILD: ${{ inputs.rebuild_dict }}
+        run: |
+          set -o pipefail
+          # 标签按基础镜像、Dockerfile 里 runtime 那一段、字典数据的地址和转换程序算：都没变就一直用同一个
+          key="$BASE|$(awk '/^FROM .* AS runtime$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile)|$MOEDICT_URL|$ECDICT_URL|$CEDICT_URL|$(sha256sum server/dict_build.go | cut -c1-64)"
+          tag=$(printf '%s' "$key" | sha256sum | cut -c1-12)
+          R="$RUNTIME_IMAGE:$tag"
+          echo "RUNTIME=$R" >> "$GITHUB_ENV"
+          if [ "$REBUILD" != "true" ] && docker buildx imagetools inspect "$R" > /dev/null 2>&1; then
+            echo "用已有的运行环境 $R"
+            exit 0
+          fi
+          echo "生成本地字典，制作运行环境 $R"
+          D="$RUNNER_TEMP/dictsrc"
+          mkdir -p "$D" "$RUNNER_TEMP/ctx/out/dict"
+          curl -fsSL --retry 3 "$MOEDICT_URL" | xz -d > "$D/moe.json"
+          curl -fsSL --retry 3 "$ECDICT_URL" -o "$D/ecdict.csv"
+          cedict=""
+          if curl -fsSL --retry 3 "$CEDICT_URL" | gunzip > "$D/cedict.txt" && [ -s "$D/cedict.txt" ]; then
+            cedict="-cedict $D/cedict.txt"
+          else
+            echo "::warning::CC-CEDICT 下载失败，这次的字典里没有大陆拼音和繁简对照"
+          fi
+          ls -l "$D"
+          "$RUNNER_TEMP/ctx/out/shuku" -build-dict "$RUNNER_TEMP/ctx/out/dict/dict.db" -moe "$D/moe.json" -ecdict "$D/ecdict.csv" $cedict 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          ls -l "$RUNNER_TEMP/ctx/out/dict"
+          docker buildx build --platform linux/amd64 --target runtime --build-context base="docker-image://$BASE" --build-context build="$RUNNER_TEMP/ctx" \
+            -t "$R" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          docker push "$R"
+
       - name: 打包服务器镜像并试运行
         run: |
           set -o pipefail
-          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成基础镜像
-          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context base="docker-image://$BASE" \
+          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成做好的（带字典）
+          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context runtime="docker-image://$RUNTIME" \
             -t "$IMAGE:latest" -t "$IMAGE:v$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           # 和 NAS 上一样用宿主机网络试运行：接口、网页、各端安装包都要能取到
           docker run -d --name shuku-test --network host -e SHUKU_PORT=18080 "$IMAGE:latest" > /dev/null
@@ -188,6 +229,22 @@ jobs:
           assert d["android"]["versionCode"] == n and d["android"]["url"] == "/dl/shuku-android.apk", "手机 App"
           assert d["wear"]["versionCode"] == 100000 + n and d["wear"]["url"] == "/dl/shuku-wear.apk", "手表 App"
           assert d["extension"]["version"] == v and d["extension"]["url"] == "/dl/shuku-extension.zip", "插件"
+          EOF
+          # 本地字典：设好密码，查一个中文词、一个英文词
+          tok=$(curl -fsS -X POST http://127.0.0.1:18080/api/auth/setup -H 'Content-Type: application/json' -d '{"Password":"smoke-test-1","Device":"ci"}' 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)
+          for q in 觊觎 went; do
+            curl -fsS -G -H "Authorization: Bearer $tok" --data-urlencode "q=$q" http://127.0.0.1:18080/api/dict > "$RUNNER_TEMP/dict-$q.json" 2>/dev/null || true
+          done
+          python3 - "$RUNNER_TEMP" <<'EOF' || { ok=""; echo "本地字典不对"; }
+          import json, sys
+          zh = json.load(open(sys.argv[1] + "/dict-觊觎.json"))
+          en = json.load(open(sys.argv[1] + "/dict-went.json"))
+          print("字典：", json.dumps(zh, ensure_ascii=False)[:400])
+          print("字典：", json.dumps(en, ensure_ascii=False)[:300])
+          w = zh["words"][0]
+          assert zh["installed"] and w["pinyin"][0] == "jì yú" and "希望得到" in json.dumps(w, ensure_ascii=False), "中文"
+          assert en["words"][0]["word"] == "go", "英文"
           EOF
           for f in shuku-android.apk shuku-wear.apk shuku-extension.zip; do
             curl -fsS http://127.0.0.1:18080/dl/$f -o "$RUNNER_TEMP/dl-$f" 2>/dev/null || true

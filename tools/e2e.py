@@ -41,7 +41,7 @@ def section(name):
 
 # ---------------------------------------------------------------- 模拟服务
 
-TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG, WT_LOG = [], [], [], [], [], [], []
+TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG, WT_LOG, DICT_LOG = [], [], [], [], [], [], [], []
 WT_TOKEN = "wt-test-token"
 # 浏览器插件测试：这些网站的域名在浏览器里指向模拟服务（--host-resolver-rules），书库服务器解析不到它们
 EXT_SITES = ["www.gutenberg.org", "archive.org", "standardebooks.org", "zh.wikisource.org"]
@@ -301,6 +301,9 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, {"data": []})
         if p == "/ai/v1/chat/completions":
             j = json.loads(raw or b"{}")
+            if "读书助手" in j["messages"][0]["content"]:
+                DICT_LOG.append(j["messages"][1]["content"])
+                return self.send(200, {"choices": [{"message": {"content": "<think>想一想</think>mí màn：烟雾、气味等充满某个地方。这里是说面包的香气飘满了街道。"}}]})
             info = json.loads(j["messages"][1]["content"])
             AI_LOG.append(info)
             name = info.get("文件名", "")
@@ -395,6 +398,7 @@ def setup(fresh=True):
     subprocess.run(["go", "build", "-tags", "sqlite_fts5", "-o", os.path.join(T, "shuku-e2e-server"), "."], cwd=os.path.join(ROOT, "server"), check=True, env=env)
     if fresh:
         subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make-samples.py"), T], check=True, stdout=subprocess.DEVNULL)
+    dict_db = make_dict(os.path.join(T, "shuku-e2e-server"))
     srv = ThreadingHTTPServer(("127.0.0.1", MPORT), Mock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     env = dict(os.environ,
@@ -405,7 +409,7 @@ def setup(fresh=True):
                SHUKU_LAN_URL=BASE, SHUKU_REMOTE_URL="",
                SHUKU_CATALOG_GUTENBERG=MOCK + "/opds/root.xml", SHUKU_CATALOG_IA=MOCK + "/ia",
                SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export",
-               SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN)
+               SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN, SHUKU_DICT=dict_db)
     log = open(os.path.join(T, "server.log"), "w")
     server_proc = subprocess.Popen([os.path.join(T, "shuku-e2e-server")], cwd=T, env=env, stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: requests.get(BASE + "/api/ping", timeout=2).ok, 20, what="服务器启动")
@@ -425,6 +429,26 @@ def make_clients():
     json.dump({"version": NEW, "android": {**info["shuku-android.apk"], "versionCode": 99, "versionName": NEW},
                "wear": {**info["shuku-wear.apk"], "versionCode": 100099, "versionName": NEW},
                "extension": {**info["shuku-extension.zip"], "version": NEW}}, open(os.path.join(d, "clients.json"), "w"))
+
+
+DICT_MOE = """[
+ {"title":"瀰漫","heteronyms":[{"pinyin":"mí màn","definitions":[{"def":"煙塵、霧氣等充滿、布滿。","type":"動","example":["如：「煙霧瀰漫」。"]}]}]},
+ {"title":"晴朗","heteronyms":[{"pinyin":"qíng lǎng","definitions":[{"def":"天氣晴和明朗。"}]}]},
+ {"title":"瀰","heteronyms":[{"pinyin":"mí","definitions":[{"def":"水滿的樣子。","type":"形"}]}]},
+ {"title":"漫","heteronyms":[{"pinyin":"màn","definitions":[{"def":"水過滿而向外流。","type":"動"}]}]}
+]"""
+DICT_CEDICT = "瀰漫 弥漫 [mi2 man4] /to pervade/to fill the air/\n瀰 弥 [mi2] /to fill/\n漫 漫 [man4] /free/to overflow/\n晴朗 晴朗 [qing2 lang3] /sunny and cloudless/\n滿 满 [man3] /full/\n氣 气 [qi4] /gas/air/\n樣 样 [yang4] /manner/\n過 过 [guo4] /to cross/\n霧 雾 [wu4] /fog/\n塵 尘 [chen2] /dust/\n煙 烟 [yan1] /smoke/\n"
+DICT_ECDICT = "word,phonetic,definition,translation,pos,collins,oxford,tag,bnc,frq,exchange,detail,audio\ngo,gəʊ,v. move,vi. 去,,5,1,zk,35,35,p:went/d:gone,,\nwent,went,,go的过去式,,,,,0,0,0:go/1:p,,\nmorning,'mɔ:niŋ,n. the first part of the day,n. 早晨,,5,1,zk,100,100,s:mornings,,\n"
+
+
+def make_dict(binary):
+    d = os.path.join(T, "dictsrc")
+    os.makedirs(d, exist_ok=True)
+    for name, text in (("moe.json", DICT_MOE), ("cedict.txt", DICT_CEDICT), ("ecdict.csv", DICT_ECDICT)):
+        open(os.path.join(d, name), "w", encoding="utf-8").write(text)
+    out = os.path.join(T, "dict.db")
+    subprocess.run([binary, "-build-dict", out, "-moe", os.path.join(d, "moe.json"), "-cedict", os.path.join(d, "cedict.txt"), "-ecdict", os.path.join(d, "ecdict.csv")], check=True, stderr=subprocess.DEVNULL)
+    return out
 
 
 def teardown():
@@ -798,6 +822,34 @@ def test_update():
     check("检查更新：书库没被换掉就是最新版本", r["ok"] and "最新" in r["reason"], r)
     s = j("GET", "/api/status")
     check("状态里有版本号（网页靠它发现书库升级了）", s.get("version") == c["server"], s.get("version"))
+
+
+def test_dict():
+    section("选词查字典")
+    r = j("GET", "/api/dict?q=" + urllib.parse.quote("弥漫"))
+    w = (r.get("words") or [{}])[0]
+    check("中文：大陆拼音和释义（繁体辞典显示成简体）", r["installed"] and w.get("pinyin") == ["mí màn"] and "烟尘、雾气等充满、布满" in json.dumps(w, ensure_ascii=False), r)
+    check("中文：多个字时列出单字", [c["ch"] for c in r.get("chars", [])] == ["弥", "漫"], r.get("chars"))
+    r = j("GET", "/api/dict?q=" + urllib.parse.quote("的晴朗。"))
+    check("选多了字也能找出里面的词", (r.get("words") or [{}])[0].get("word") == "晴朗", r.get("words"))
+    r = j("GET", "/api/dict?q=went&lang=en")
+    check("英文：变形找到原形", r["words"] and r["words"][0]["word"] == "go" and "过去式" in r["words"][0].get("note", ""), r["words"])
+    r = j("GET", "/api/dict?q=" + urllib.parse.quote("こんにちは"))
+    check("其他语言：认出语言，交给 AI", r["lang"] == "ja" and not r["words"], r)
+    r = j("POST", "/api/dict/explain", json={"text": "弥漫", "context": "空气里弥漫着刚出炉面包的香气"})
+    check("没配置 AI 时说明原因", r["ok"] is False and "AI" in r["reason"], r)
+    s = j("GET", "/api/settings")
+    j("PUT", "/api/settings", json={"ai": {"enabled": True, "base_url": MOCK + "/ai/v1", "api_key": "", "model": "mock-1"}})
+    n = len(DICT_LOG)
+    r = j("POST", "/api/dict/explain", json={"text": "弥漫", "context": "空气里弥漫着刚出炉面包的香气", "title": "三体Ⅱ·黑暗森林"})
+    check("AI 结合上下文解释", r["ok"] and "香气" in r["answer"] and "think" not in r["answer"] and "上下文：空气里弥漫着" in DICT_LOG[-1], r)
+    r = j("POST", "/api/dict/explain", json={"text": "弥漫", "context": "空气里弥漫着刚出炉面包的香气", "title": "三体Ⅱ·黑暗森林"})
+    check("同样的问题第二次走缓存", r.get("cached") and len(DICT_LOG) == n + 1, r)
+    j("PUT", "/api/settings", json={"ai": s["ai"]})
+    j("PUT", "/api/settings", json={"tts": {"engine": "openai", "openai": {"base_url": MOCK + "/tts/v1", "model": "tts-1", "voice": "nova"}}})
+    a = api("POST", "/api/dict/speak", json={"text": "serendipity", "lang": "en"})
+    check("发音", a.headers["Content-Type"] == "audio/mpeg" and len(a.content) > 100)
+    check("工具状态里有本地字典", j("GET", "/api/settings")["tools"]["dict"] is True)
 
 
 def wait_job(jid):
@@ -1220,6 +1272,100 @@ def ui_tests():
         shot(pg, "19-pair")
         ctx.close()
 
+        # ---- 选词查字典、菜单关闭 ----
+        section("网页：查字典、菜单")
+        SEL = """(word) => {
+          const doc = document.querySelector('foliate-view').renderer.getContents()[0].doc
+          const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+          let n
+          while ((n = walker.nextNode())) {
+            const i = n.nodeValue.indexOf(word)
+            if (i < 0) continue
+            const r = doc.createRange(); r.setStart(n, i); r.setEnd(n, i + word.length)
+            const sel = doc.getSelection(); sel.removeAllRanges(); sel.addRange(r)
+            doc.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
+            return true
+          }
+          return false
+        }"""
+        j("PUT", "/api/settings", json={"ai": {"enabled": True, "base_url": MOCK + "/ai/v1", "api_key": "", "model": "mock-1"}})
+        ctx = context()
+        pg = ctx.new_page(); attach(pg, "dict")
+        pg.goto(BASE + f"/#/read/{b2['id']}")
+        reader_ready(pg)
+        pg.wait_for_timeout(800)
+        found = pg.evaluate(SEL, "弥漫")
+        pg.wait_for_selector(".r-dict.show .zh li", timeout=8000)
+        txt = pg.inner_text(".r-dict")
+        check("选中文字弹出字典：拼音、释义、单字", found and "mí màn" in txt and "烟尘、雾气等充满" in txt and "单字" in txt, txt[:200])
+        shot(pg, "40-dict")
+        pg.click(".r-dict .ai-btn")
+        pg.wait_for_selector(".r-dict .ai-a", timeout=8000)
+        check("字典里点 AI 解释", "香气" in pg.inner_text(".r-dict .ai-a"))
+        n = len(TTS_LOG)
+        pg.click(".r-dict .hd .icon-btn[title='发音']")
+        wait(lambda: len(TTS_LOG) > n, 10, 0.2, "发音请求")
+        check("字典里点喇叭发音", TTS_LOG[-1].get("input") == "弥漫", TTS_LOG[-1] if TTS_LOG else None)
+        pg.keyboard.press("Escape")
+        pg.wait_for_timeout(200)
+        check("Esc 关闭字典，不退出阅读器", not pg.locator(".r-dict.show").count() and pg.locator(".reader").count() == 1)
+        pg.evaluate(SEL, "弥漫")
+        pg.wait_for_selector(".r-dict.show .zh li")
+        bx = pg.locator(".r-dict").bounding_box()
+        v_before = pg.eval_on_selector(".r-prog input[type=range]", "e => e.value")
+        pg.mouse.click(1100 if bx["x"] < 600 else 300, 430)  # 点书页中间一带（不是左右翻页区），避开弹窗
+        pg.wait_for_timeout(300)
+        check("点书页关闭字典（不翻页）", not pg.locator(".r-dict.show").count() and pg.eval_on_selector(".r-prog input[type=range]", "e => e.value") == v_before)
+        # 设置面板：× 关闭、点外面关闭、Esc 关闭；目录：× 关闭、点外面关闭
+        def sheet_open():
+            pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+            pg.click(".r-top button[title='阅读设置']")
+            pg.wait_for_selector(".r-sheet.show")
+        sheet_open(); pg.click(".r-sheet-hd .icon-btn"); pg.wait_for_timeout(250)
+        check("设置菜单：点 × 关闭", not pg.locator(".r-sheet.show").count())
+        sheet_open(); pg.mouse.click(400, 300); pg.wait_for_timeout(250)
+        check("设置菜单：点外面关闭", not pg.locator(".r-sheet.show").count())
+        sheet_open(); pg.keyboard.press("Escape"); pg.wait_for_timeout(250)
+        check("设置菜单：Esc 关闭", not pg.locator(".r-sheet.show").count() and pg.locator(".reader").count() == 1)
+        pg.keyboard.press("t"); pg.wait_for_selector(".r-panel.show")
+        pg.click(".r-panel header .icon-btn"); pg.wait_for_timeout(300)
+        check("目录：点 × 关闭", not pg.locator(".r-panel.show").count())
+        pg.keyboard.press("t"); pg.wait_for_selector(".r-panel.show")
+        pg.mouse.click(1200, 400); pg.wait_for_timeout(300)
+        check("目录：点外面关闭", not pg.locator(".r-panel.show").count())
+        ctx.close()
+
+        # 书一直在打开（比如网络很慢）时，菜单也要能关
+        ctx = context(412, 900, mobile=True)
+        pg = ctx.new_page(); attach(pg, "stuck")
+        pg.route("**/api/files/**", lambda route: None)  # 卡住下载，不回复
+        pg.goto(BASE + f"/#/read/{b2['id']}")
+        pg.wait_for_selector(".reader .r-loading")
+        pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+        pg.click(".r-top button[title='阅读设置']")
+        pg.wait_for_selector(".r-sheet.show")
+        pg.mouse.click(206, 200)
+        pg.wait_for_timeout(300)
+        check("书还在打开时，点外面能关掉设置菜单", not pg.locator(".r-sheet.show").count())
+        pg.click(".r-top button[title='阅读设置']")
+        pg.wait_for_selector(".r-sheet.show")
+        cdp = ctx.new_cdp_session(pg)
+        box = pg.locator(".r-sheet-hd").bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + 10
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+        for k in range(1, 9):
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": x, "y": y + k * 25}]})
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pg.wait_for_timeout(400)
+        check("手机上往下拖关掉设置菜单", not pg.locator(".r-sheet.show").count())
+        pg.click(".r-top button[title='阅读设置']")
+        pg.wait_for_selector(".r-sheet.show")
+        pg.evaluate("() => window.shukuBack()")
+        pg.wait_for_timeout(300)
+        check("返回键先关菜单", not pg.locator(".r-sheet.show").count() and pg.locator(".reader").count() == 1)
+        ctx.close()
+        j("PUT", "/api/settings", json={"ai": {"enabled": False, "base_url": MOCK + "/ai/v1", "api_key": "", "model": "mock-1"}})
+
         # ---- 模拟安卓 App：桥接 ----
         section("网页：在安卓 App 里运行（模拟原生桥）")
         fake = """
@@ -1514,7 +1660,7 @@ def main():
             time.sleep(3600)
     try:
         setup()
-        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_fetch_discover]:
+        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_dict, test_fetch_discover]:
             try:
                 t()
             except Exception as e:

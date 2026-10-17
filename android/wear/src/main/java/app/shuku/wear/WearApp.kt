@@ -1,6 +1,8 @@
 package app.shuku.wear
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -28,6 +30,9 @@ class WearApp : Application() {
         config = Config(this)
         // 手表常常通过手机的蓝牙转发上网，探测时多等一会儿
         link = ServerLink(config, lanTimeout = 3500, remoteTimeout = 7000)
+        // 听书的通知（播放控制）
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+            NotificationChannel(CH_LISTEN, "听书", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
     }
 
     /** 令牌失效：这块手表在书库的“设备”里被移除了 */
@@ -111,6 +116,8 @@ class WearApp : Application() {
             private set
         const val ACTION_CONFIGURED = "app.shuku.wear.CONFIGURED"
         const val ACTION_TTS = "app.shuku.wear.TTS"
+        const val ACTION_LISTEN = "app.shuku.wear.LISTEN_STATE"
+        const val CH_LISTEN = "listen"
         const val DEVICE = "Wear OS 手表"
         const val OFFLINE = "连不上书库（内网和 Tailscale 都不通）"
     }

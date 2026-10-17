@@ -5,6 +5,25 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 在手表上听书：后台播放、熄屏时接着合成下一句、播放控制的通知 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <queries>
+        <!-- 手表自带语音引擎（Android 11 起需要声明） -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <!-- 去连蓝牙耳机：系统的输出设备面板、蓝牙设置 -->
+        <intent>
+            <action android:name="com.android.settings.panel.action.MEDIA_OUTPUT" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.BLUETOOTH_SETTINGS" />
+        </intent>
+    </queries>
 
     <application
         android:name=".WearApp"
@@ -31,12 +50,22 @@
             </intent-filter>
         </activity>
         <activity android:name=".ReadActivity" android:exported="false" />
+        <activity
+            android:name=".ListenActivity"
+            android:exported="false"
+            android:launchMode="singleTop" />
         <activity android:name=".TocActivity" android:exported="false" />
         <activity android:name=".BooksActivity" android:exported="false" />
         <activity
             android:name=".ConnectActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- 在手表上听书 -->
+        <service
+            android:name=".ListenService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <!-- 手机发来的消息：连接信息、听书状态 -->
         <service

@@ -321,6 +321,7 @@ function about(s) {
       line(t.calibre, 'Calibre 格式转换（DOCX、CHM、RTF 等）', '镜像里没装'),
       line(t.djvu, 'DJVU 支持', '镜像里没装'),
       line(t['7z'], '7z / CB7 漫画包', '镜像里没装'),
+      line(t.dict, '本地字典（选词查字典：中文、英文）', '镜像里没装，查字典时只能用 AI'),
       line(t.pdf_cover, '服务器生成 PDF 封面', '没有也没关系，第一次打开 PDF 时会自动生成')))
 }
 

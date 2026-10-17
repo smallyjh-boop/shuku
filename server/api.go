@@ -30,6 +30,9 @@ func routes() http.Handler {
 	// 在线升级：各端安装包（不用登录）、通知更新服务
 	mux.HandleFunc("GET /api/clients", handleClients)
 	mux.HandleFunc("GET /dl/{name}", handleDownloadClient)
+	mux.HandleFunc("GET /api/dict", a(handleDict))
+	mux.HandleFunc("POST /api/dict/explain", a(handleDictExplain))
+	mux.HandleFunc("POST /api/dict/speak", a(handleDictSpeak))
 	mux.HandleFunc("GET /api/update", a(handleUpdateInfo))
 	mux.HandleFunc("POST /api/update/check", a(handleUpdateCheck))
 	mux.HandleFunc("GET /api/auth/state", handleAuthState)
@@ -1190,7 +1193,7 @@ func toolStatus() map[string]bool {
 		}
 		return false
 	}
-	return map[string]bool{"calibre": has("ebook-convert"), "djvu": has("ddjvu"), "7z": has("7z", "7za", "7zz"), "pdf_cover": has("mutool", "pdftoppm")}
+	return map[string]bool{"calibre": has("ebook-convert"), "djvu": has("ddjvu"), "7z": has("7z", "7za", "7zz"), "pdf_cover": has("mutool", "pdftoppm"), "dict": dictInstalled()}
 }
 
 // ---------- 网页 ----------

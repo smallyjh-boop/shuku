@@ -22,13 +22,42 @@ export const FONTS = [
 const DEFAULTS = {
   theme: 'white', nightTheme: 'gray', nightMode: 'system', nightStart: '21:30', nightEnd: '07:00',
   font: 'serif', fontSize: 19, lineHeight: 1.85, paraSpace: 0.5, margin: 1, width: 720,
-  flow: 'paginated', columns: 'auto', indent: true, justify: true, animated: true,
+  flow: 'paginated', columns: 'auto', indent: true, justify: true, animated: true, dict: true,
   brightness: 1, warm: false,
   comicMode: 'single', comicFit: 'contain', comicDir: 'auto', comicQuality: 'auto',
   pdfMode: 'scroll', pdfInvert: true, pdfZoom: 1,
 }
 
 let current = null
+
+// 手机上从底部弹出的面板：内容在最上面时往下拖就关掉（拖滑块、输入框时不算）
+export function swipeDown(el, close) {
+  let y0 = null, x0 = 0, dy = 0, t0 = 0
+  const bottomSheet = () => innerWidth < 900 || el.classList.contains('sheet')
+  el.addEventListener('touchstart', e => {
+    y0 = null
+    if (!bottomSheet() || e.touches.length > 1 || e.target.closest('input, select, textarea') || el.scrollTop > 2) return
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; dy = 0; t0 = e.timeStamp
+  }, { passive: true })
+  el.addEventListener('touchmove', e => {
+    if (y0 == null) return
+    const t = e.touches[0]
+    dy = t.clientY - y0
+    if (dy <= 0 || Math.abs(t.clientX - x0) > dy) { el.style.transform = ''; if (dy < -4) y0 = null; return }
+    e.preventDefault()
+    el.style.transition = 'none'
+    el.style.transform = `translateY(${dy}px)`
+  }, { passive: false })
+  const end = e => {
+    if (y0 == null) return
+    y0 = null
+    el.style.transition = ''
+    el.style.transform = ''
+    if (dy > 90 || (dy > 30 && dy / Math.max(1, e.timeStamp - t0) > 0.5)) close()
+  }
+  el.addEventListener('touchend', end)
+  el.addEventListener('touchcancel', end)
+}
 
 export function closeReader() {
   if (!current) return
@@ -177,11 +206,15 @@ class Reader {
     this.panelAuthor = h('div', { class: 'a' })
     this.ptabs = h('div', { class: 'ptabs' })
     this.pbody = h('div', { class: 'pbody' })
-    this.panel = h('aside', { class: 'r-panel', 'aria-label': '目录' }, h('header', null, this.panelTitle, this.panelAuthor), this.ptabs, this.pbody)
+    this.panel = h('aside', { class: 'r-panel', 'aria-label': '目录' },
+      h('header', null, h('div', { class: 'grow' }, this.panelTitle, this.panelAuthor), iconBtn('close', '关闭', () => this.closeOverlays())), this.ptabs, this.pbody)
     this.sheet = h('div', { class: 'r-sheet', role: 'dialog', 'aria-label': '阅读设置' })
+    // 打开设置、目录时，点书页（包括书还没打开、只有“正在打开”的时候）就关掉
+    this.scrim = h('div', { class: 'r-scrim', onclick: () => this.closeOverlays() })
+    swipeDown(this.sheet, () => this.closeOverlays())
     this.root = h('div', { class: 'reader ui', dataset: { t: this.theme.id } },
       this.stage, this.warm, this.dim, h('div', { class: 'r-status' }, this.statusL, this.statusR),
-      top, bottom, this.panel, this.sheet, this.loading)
+      top, bottom, this.scrim, this.panel, this.sheet, this.loading)
     document.body.append(this.root)
     document.body.style.overflow = 'hidden'
 
@@ -258,7 +291,18 @@ class Reader {
 
   afterUserNav = debounce(() => this.narrator?.active && this.narrator.jumpToView(), 600)
 
+  // 选中了文字：查字典（阅读设置里可以关）
+  async onSelectText(sel) {
+    if (!sel || this.prefs.dict === false) return
+    if (!this.dict) {
+      const { DictPopup } = await import('./dict.js')
+      this.dict ||= new DictPopup(this)
+    }
+    this.dict.show(sel)
+  }
+
   destroy() {
+    this.dict?.destroy()
     this.saveProgress(true)
     this.narrator?.destroy()
     this.engine?.destroy()
@@ -272,6 +316,7 @@ class Reader {
   // ---------- 点击区域 ----------
   // 引擎把点击位置（屏幕坐标 x）交给这里：左 30% 上一页，右 30% 下一页，中间显示 / 隐藏工具栏
   tap(x, y) {
+    if (this.dict?.open) { this.dict.hide(); return }
     if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) { this.closeOverlays(); return }
     const w = innerWidth
     const rtl = this.engine?.rtl?.()
@@ -289,6 +334,11 @@ class Reader {
   closeOverlays() {
     this.sheet.classList.remove('show')
     this.panel.classList.remove('show')
+    this.syncOverlay()
+  }
+
+  syncOverlay() {
+    this.root.classList.toggle('overlay', this.sheet.classList.contains('show') || this.panel.classList.contains('show'))
   }
 
   onKey(e) {
@@ -299,6 +349,7 @@ class Reader {
     else if (k === 'ArrowLeft' || k === 'PageUp' || (k === ' ' && e.shiftKey)) { e.preventDefault(); (k === 'ArrowLeft' && rtl) ? this.engine?.next() : this.engine?.prev() }
     else if (k === 'ArrowDown' && this.engine?.paged?.()) { e.preventDefault(); this.engine.next() }
     else if (k === 'ArrowUp' && this.engine?.paged?.()) { e.preventDefault(); this.engine.prev() }
+    else if (k === 'Escape' && this.dict?.open) this.dict.hide()
     else if (k === 'Escape') { if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) this.closeOverlays(); else if (document.fullscreenElement) document.exitFullscreen(); else this.back() }
     else if (k === 't') this.togglePanel()
     else if (k === 'n') this.toggleNight()
@@ -316,6 +367,7 @@ class Reader {
 
   // ---------- 位置、进度 ----------
   onRelocate({ location, fraction, chapter, label }) {
+    this.dict?.hide()
     this.loc = { location, fraction }
     this.slider.value = Math.round((fraction || 0) * 1000)
     this.sliderPreview.textContent = pct(fraction)
@@ -392,6 +444,7 @@ class Reader {
     const show = !this.panel.classList.contains('show') || tab
     this.sheet.classList.remove('show')
     this.panel.classList.toggle('show', !!show)
+    this.syncOverlay()
     if (show) { if (tab) this.ptab = tab; this.drawPanel(); this.panel.querySelector('.cur')?.scrollIntoView({ block: 'center' }) }
   }
 
@@ -470,6 +523,7 @@ class Reader {
     this.panel.classList.remove('show')
     if (show) this.drawSheet()
     this.sheet.classList.toggle('show', show)
+    this.syncOverlay()
   }
 
   drawSheet() {
@@ -514,7 +568,8 @@ class Reader {
         p.flow === 'paginated' ? h('div', { style: { marginTop: '8px' } }, seg('columns', [['auto', '宽屏双栏'], ['1', '始终单栏']])) : null,
         h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '首行缩进')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.indent, onchange: e => this.setPref('indent', e.target.checked) }), h('i'))),
         h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '两端对齐')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.justify, onchange: e => this.setPref('justify', e.target.checked) }), h('i'))),
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '翻页动画')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.animated, onchange: e => this.setPref('animated', e.target.checked) }), h('i'))))
+        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '翻页动画')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.animated, onchange: e => this.setPref('animated', e.target.checked) }), h('i'))),
+        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '选中文字查字典'), h('div', { class: 'h', style: { fontSize: '12px', opacity: .7 } }, '弹出读音、释义，可以让 AI 结合上下文解释')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.dict !== false, onchange: e => this.setPref('dict', e.target.checked) }), h('i'))))
     } else if (kind === 'comic') {
       parts.push(h('h4', null, '阅读模式'), seg('comicMode', [['single', '单页'], ['double', '双页'], ['webtoon', '条漫']]),
         h('h4', null, '翻页方向'), seg('comicDir', [['auto', '自动'], ['ltr', '从左到右'], ['rtl', '从右到左']]),
@@ -540,7 +595,7 @@ class Reader {
         fill(ttsBox, ...(await this.narrator.sheetSection()))
       })()
     }
-    fill(this.sheet, ...parts.flat())
+    fill(this.sheet, h('div', { class: 'r-sheet-hd' }, h('span', { class: 'grab' }), h('b', null, '阅读设置'), iconBtn('close', '关闭', () => this.closeOverlays())), ...parts.flat())
   }
 
   applyPrefsSoon = debounce(() => this.applyPrefs(), 120)

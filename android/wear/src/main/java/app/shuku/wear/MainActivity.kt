@@ -19,11 +19,12 @@ import kotlin.math.roundToInt
 /**
  * 手表首页：
  *   没连接 → 请手机发连接信息（或手动输入地址和配对码）
- *   已连接 → 手机上正在听的书（可以暂停、上一句、下一句）+ 在读的书，点开就能在手表上读
+ *   已连接 → 手表上正在听的书、手机上正在听的书（可以暂停、上一句、下一句）+ 在读的书，点开就能在手表上读、听
  */
 class MainActivity : Activity() {
     private val app get() = WearApp.app
     private lateinit var col: LinearLayout
+    private var listenBox: LinearLayout? = null
     private var ttsBox: LinearLayout? = null
     private var listBox: LinearLayout? = null
     private var statusView: TextView? = null
@@ -42,6 +43,7 @@ class MainActivity : Activity() {
                     if (app.config.configured) load()
                 }
                 WearApp.ACTION_TTS -> renderTts()
+                WearApp.ACTION_LISTEN -> renderListen()
             }
         }
     }
@@ -51,6 +53,7 @@ class MainActivity : Activity() {
         val f = IntentFilter().apply {
             addAction(WearApp.ACTION_CONFIGURED)
             addAction(WearApp.ACTION_TTS)
+            addAction(WearApp.ACTION_LISTEN)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver, f)
         render()
@@ -65,6 +68,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (shownConfigured != app.config.configured) render()
+        renderListen()
         if (app.config.configured) {
             if (System.currentTimeMillis() - loadedAt > 30_000) load()
             // 请手机发一次听书状态
@@ -78,6 +82,7 @@ class MainActivity : Activity() {
     private fun render() {
         val (_, c) = Ui.page(this)
         col = c
+        listenBox = null
         ttsBox = null
         listBox = null
         statusView = null
@@ -126,6 +131,11 @@ class MainActivity : Activity() {
         col.addView(Ui.text(this, app.config.name.ifEmpty { "书库" }, 17f, bold = true, center = true, maxLines = 1))
         statusView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 2f)) }
         updateView = Ui.text(this, "", 12f, Ui.ACCENT, center = true).apply { visibility = View.GONE }.also { col.addView(it, Ui.lp(this, 6f)) }
+        listenBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }.also { col.addView(it, Ui.lp(this, 8f)) }
+        renderListen()
         ttsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -215,6 +225,42 @@ class MainActivity : Activity() {
             if (n >= 12) break
         }
         if (n == 0) box.addView(Ui.text(this, "还没有在读的书。点“找书”挑一本。", 12f, Ui.INK2))
+    }
+
+    // ---------- 手表上的听书 ----------
+
+    private fun renderListen() {
+        val box = listenBox ?: return
+        box.removeAllViews()
+        val s = ListenService.state()
+        if (!s.active) {
+            box.visibility = View.GONE
+            return
+        }
+        box.visibility = View.VISIBLE
+        box.background = Ui.pill(Ui.CARD, Ui.dp(this, 18f).toFloat())
+        val p = Ui.dp(this, 12f)
+        box.setPadding(p, Ui.dp(this, 10f), p, Ui.dp(this, 8f))
+        box.gravity = Gravity.CENTER_HORIZONTAL
+        box.isClickable = true
+        box.setOnClickListener { startActivity(Intent(this, ListenActivity::class.java)) }
+        val head = when {
+            s.needOutput -> "请连接蓝牙耳机"
+            s.playing -> "手表正在朗读"
+            else -> "朗读已暂停"
+        }
+        box.addView(Ui.text(this, head, 11f, Ui.ACCENT, center = true), Ui.lp(this))
+        box.addView(Ui.text(this, s.title, 14f, bold = true, center = true, maxLines = 1), Ui.lp(this, 2f))
+        val line = s.status.ifEmpty { s.text }
+        if (line.isNotEmpty()) box.addView(Ui.text(this, line, 12f, Ui.INK2, serif = true, center = true, maxLines = 2), Ui.lp(this, 2f))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_previous, "上一句") { ListenService.prev() })
+        row.addView(Ui.iconButton(this, if (s.playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, if (s.playing) "暂停" else "继续") { ListenService.toggle() })
+        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
+        box.addView(row, Ui.lp(this, 6f, matchWidth = false))
     }
 
     // ---------- 手机上的听书 ----------

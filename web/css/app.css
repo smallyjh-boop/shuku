@@ -520,7 +520,9 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   display: flex; flex-direction: column; user-select: none;
 }
 .r-panel.show { transform: none; }
-.r-panel header { padding: calc(14px + var(--safe-t)) 14px 0 18px; }
+.r-panel header { padding: calc(14px + var(--safe-t)) 6px 0 18px; display: flex; align-items: flex-start; gap: 6px; }
+.r-panel header .grow { flex: 1; min-width: 0; }
+.r-panel header .icon-btn { color: inherit; flex: none; margin-top: -4px; }
 .r-panel header .t { font-family: var(--serif); font-size: 17px; font-weight: 600; line-height: 1.4; }
 .r-panel header .a { font-size: 12.5px; color: var(--r-dim); margin: 2px 0 10px; }
 .r-panel .ptabs { display: flex; gap: 2px; border-bottom: 1px solid var(--r-rule); padding: 0 8px; }
@@ -545,6 +547,49 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .pages-grid img { width: 100%; height: 100%; object-fit: cover; }
 .pages-grid span { position: absolute; bottom: 2px; right: 4px; font-size: 11px; color: #fff; text-shadow: 0 0 3px #000; }
 
+/* 选词查字典 */
+.r-dict {
+  position: absolute; z-index: 45; width: 360px; max-height: 60vh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--r-ui); color: var(--r-ui-fg); border: 1px solid var(--r-rule); border-radius: 12px;
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); box-shadow: 0 20px 50px -18px rgba(0,0,0,.45);
+  padding: 10px 14px 14px; display: none; font-size: 14px; line-height: 1.65; user-select: text;
+}
+.r-dict.show { display: block; }
+.r-dict.sheet { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 52vh; border-radius: 14px 14px 0 0; border-width: 1px 0 0; padding-bottom: calc(14px + var(--safe-b)); }
+.r-dict.sheet::before { content: ""; display: block; width: 40px; height: 4px; margin: -2px auto 8px; border-radius: 2px; background: var(--r-rule); }
+.r-dict .hd { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.r-dict .hw { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.r-dict .hw b { font-family: var(--serif); font-size: 21px; font-weight: 600; word-break: break-all; }
+.r-dict .py { color: var(--r-acc); font-size: 14px; }
+.r-dict .icon-btn { color: inherit; flex: none; }
+.r-dict .ai-btn { flex: none; color: var(--r-acc); border-color: var(--r-rule); background: transparent; }
+.r-dict .muted { color: var(--r-dim); margin: 4px 0; }
+.r-dict .muted.small { font-size: 12.5px; }
+.r-dict ol { margin: 2px 0 6px; padding-left: 1.4em; }
+.r-dict li { margin: 3px 0; }
+.r-dict .pos { display: inline-block; font-size: 11.5px; color: var(--r-dim); border: 1px solid var(--r-rule); border-radius: 4px; padding: 0 4px; margin-right: 5px; line-height: 1.5; }
+.r-dict .ex { color: var(--r-dim); font-size: 13px; }
+.r-dict .rd { margin-top: 6px; font-size: 13.5px; color: var(--r-acc); display: flex; gap: 8px; align-items: baseline; }
+.r-dict .rd small { color: var(--r-dim); font-size: 11.5px; }
+.r-dict .rd b { color: var(--r-ui-fg); font-size: 15px; }
+.r-dict .more { border: 0; background: none; color: var(--r-acc); padding: 2px 0; cursor: pointer; font-size: 13px; }
+.r-dict .en { color: var(--r-dim); font-size: 13px; }
+.r-dict .chars { margin-top: 8px; border-top: 1px solid var(--r-rule); padding-top: 6px; }
+.r-dict h5 { margin: 0 0 4px; font-size: 12px; font-weight: 500; color: var(--r-dim); }
+.r-dict .ch-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.r-dict .ch-row .ch { font-family: var(--serif); font-size: 17px; flex: none; }
+.r-dict .ch-row .py { flex: none; }
+.r-dict .ch-row .def { color: var(--r-dim); font-size: 13px; }
+.r-dict .enw.sub { margin-top: 8px; border-top: 1px solid var(--r-rule); padding-top: 6px; }
+.r-dict .note { font-size: 13px; color: var(--r-acc); margin-bottom: 2px; }
+.r-dict .tr { margin: 1px 0; }
+.r-dict .src { margin-top: 8px; font-size: 11px; color: var(--r-dim); }
+.r-dict .ai:empty { display: none; }
+.r-dict .ai { margin-top: 10px; border-top: 1px solid var(--r-rule); padding-top: 8px; }
+.r-dict .ai-h { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--r-acc); margin-bottom: 2px; }
+.r-dict .ai-h svg { width: 15px; height: 15px; }
+.r-dict .ai-a { white-space: pre-wrap; }
+
 /* 阅读设置 */
 .r-sheet {
   position: absolute; right: 12px; bottom: calc(118px + var(--safe-b)); z-index: 40; width: 360px; max-height: calc(100vh - 190px); overflow-y: auto;
@@ -553,6 +598,12 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   padding: 16px 18px 18px; opacity: 0; transform: translateY(10px); pointer-events: none; transition: opacity .18s, transform .18s;
 }
 .r-sheet.show { opacity: 1; transform: none; pointer-events: auto; }
+.r-sheet-hd { display: flex; align-items: center; gap: 8px; margin: -6px -8px 6px 0; position: relative; }
+.r-sheet-hd b { flex: 1; font-size: 15px; font-weight: 600; }
+.r-sheet-hd .icon-btn { color: inherit; }
+.r-sheet-hd .grab { display: none; }
+.r-scrim { position: absolute; inset: 0; z-index: 29; display: none; }
+.reader.overlay .r-scrim { display: block; }
 .r-sheet h4 { margin: 14px 0 8px; font-size: 12.5px; font-weight: 500; color: var(--r-dim); }
 .r-sheet h4:first-child { margin-top: 0; }
 .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -604,6 +655,8 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 
 @media (max-width: 899px) {
   .r-sheet { left: 0; right: 0; bottom: 0; width: auto; max-height: 72vh; border-radius: 16px 16px 0 0; border-width: 1px 0 0; padding-bottom: calc(18px + var(--safe-b)); }
+  .r-sheet { padding-top: 22px; overscroll-behavior: contain; }
+  .r-sheet-hd .grab { display: block; position: absolute; left: 50%; top: -14px; width: 40px; height: 4px; margin-left: -20px; border-radius: 2px; background: var(--r-rule); }
   .r-tools .icon-btn span { display: none; }
   .r-prog .chap { display: none; }
 }

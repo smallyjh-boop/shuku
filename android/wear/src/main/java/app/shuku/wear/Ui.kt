@@ -11,6 +11,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -69,8 +70,8 @@ object Ui {
         if (matchWidth) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
         ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(ctx, top) }
 
-    /** 一整页：可以用表冠滚动的 ScrollView，圆表盘四周留白 */
-    fun page(a: Activity): Pair<ScrollView, LinearLayout> {
+    /** 一整页：可以用表冠滚动的 ScrollView，圆表盘四周留白。overlay：外面再套一层 FrameLayout（sv.parent），可以放浮在上面的按钮 */
+    fun page(a: Activity, overlay: Boolean = false): Pair<ScrollView, LinearLayout> {
         val round = a.resources.configuration.isScreenRound
         val m = a.resources.displayMetrics
         val col = LinearLayout(a).apply {
@@ -87,7 +88,10 @@ object Ui {
             addView(col)
         }
         rotary(sv)
-        a.setContentView(sv)
+        if (overlay) a.setContentView(FrameLayout(a).apply {
+            setBackgroundColor(BG)
+            addView(sv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }) else a.setContentView(sv)
         sv.requestFocus()
         return sv to col
     }
