@@ -1,0 +1,103 @@
+# 打包安卓 App、Wear OS 手表 App 和浏览器插件。
+# 只能手动运行：GitHub 仓库页面 → Actions → “打包 App 和插件” → Run workflow。
+# 打包好的文件在这次运行的 Artifacts 里下载；勾选“发布 Release”会同时建一个 Release。
+#
+# 签名：默认用仓库里的 android/signing/shuku.jks。想换成自己的签名，在仓库
+# Settings → Secrets and variables → Actions 里添加：
+#   SHUKU_KEYSTORE_BASE64（签名文件 base64 -w0 之后的内容）、SHUKU_KEYSTORE_PASSWORD、SHUKU_KEY_ALIAS、SHUKU_KEY_PASSWORD
+# 手机和手表必须用同一个签名，换签名后两个都要重新安装。
+name: 打包 App 和插件
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 同时发布一个 Release（附上 APK 和插件包）
+        type: boolean
+        default: false
+      version:
+        description: 版本号，只用数字和点，比如 1.0.1（留空就用 android/gradle.properties 里的）
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 签名文件
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SHUKU_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/shuku.jks"
+            echo "SHUKU_KEYSTORE_FILE=$RUNNER_TEMP/shuku.jks" >> "$GITHUB_ENV"
+            echo "使用 Secrets 里的签名"
+          else
+            echo "没有设置 SHUKU_KEYSTORE_BASE64，使用仓库里的 android/signing/shuku.jks"
+          fi
+
+      - name: 版本号
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          # 每次打包的内部版本号递增，新包可以直接覆盖安装旧包
+          sed -i "s/^shuku.versionCode=.*/shuku.versionCode=${{ github.run_number }}/" android/gradle.properties
+          if [ -n "$V" ]; then
+            sed -i "s/^shuku.versionName=.*/shuku.versionName=$V/" android/gradle.properties
+            sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$V\"/" extension/manifest.json
+          fi
+          grep '^shuku.version' android/gradle.properties
+
+      - name: 打包手机和手表 APK
+        working-directory: android
+        env:
+          SHUKU_KEYSTORE_PASSWORD: ${{ secrets.SHUKU_KEYSTORE_PASSWORD }}
+          SHUKU_KEY_ALIAS: ${{ secrets.SHUKU_KEY_ALIAS }}
+          SHUKU_KEY_PASSWORD: ${{ secrets.SHUKU_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleRelease :wear:assembleRelease
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk ../dist/shuku-android.apk
+          cp wear/build/outputs/apk/release/wear-release.apk ../dist/shuku-wear.apk
+
+      - name: 打包浏览器插件
+        run: |
+          cd extension
+          zip -r -X ../dist/shuku-extension.zip . -x '.*'
+
+      - name: 校验
+        run: |
+          cd dist
+          ls -l
+          sha256sum * | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuku-apps-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep '^shuku.versionName=' android/gradle.properties | cut -d= -f2)
+          gh release create "v$V-build${{ github.run_number }}" dist/* \
+            --title "书库 $V（第 ${{ github.run_number }} 次打包）" \
+            --notes "手机 App：shuku-android.apk；Wear OS 手表 App：shuku-wear.apk；浏览器插件：shuku-extension.zip。安装方法见 README。" \
+            --target "${{ github.sha }}"

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>连接书库</title>
+<style>
+  :root {
+    --bg: #F8F8F6; --surface: #FFFFFF; --ink: #1E2329; --ink-2: #545A62; --ink-3: #868B92;
+    --rule: #E2E2DD; --rule-strong: #CFCFC8; --accent: #2F6F8F; --accent-ink: #FFFFFF; --accent-soft: rgba(47,111,143,.10); --danger: #B23A3A;
+    --sans: system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    --serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14181E; --surface: #1B2028; --ink: #DAD6CD; --ink-2: #A9A8A2; --ink-3: #777C83; --rule: #272D36; --rule-strong: #343B46;
+      --accent: #86B6CB; --accent-ink: #0E1A21; --accent-soft: rgba(134,182,203,.12); --danger: #E07C7C; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+  main { max-width: 440px; margin: 0 auto; padding: 48px 22px 40px; }
+  h1 { font-family: var(--serif); font-size: 34px; letter-spacing: .1em; margin: 0; font-weight: 700; }
+  .lead { color: var(--ink-3); margin: 4px 0 30px; }
+  .card { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 18px 20px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 10px; font-weight: 600; }
+  ol { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; display: grid; gap: 6px; }
+  label { display: grid; gap: 6px; margin-bottom: 14px; }
+  label span { font-size: 13px; color: var(--ink-2); }
+  input { width: 100%; height: 44px; padding: 0 12px; border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--bg); color: inherit; font: inherit; outline: none; }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  input.code { letter-spacing: .2em; text-transform: uppercase; font-family: ui-monospace, monospace; font-size: 18px; }
+  .btn { display: flex; width: 100%; height: 46px; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 15px var(--sans); }
+  .btn:disabled { opacity: .6; }
+  .link { background: none; border: 0; color: var(--accent); font: inherit; padding: 0; margin-top: 12px; }
+  .err { color: var(--danger); font-size: 13.5px; min-height: 20px; margin: 0 0 10px; }
+  .offline { display: none; border-color: var(--danger); }
+  .offline p { margin: 0 0 14px; color: var(--ink-2); font-size: 14px; }
+  .hint { color: var(--ink-3); font-size: 12.5px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>书库</h1>
+  <p class="lead">连接你 NAS 上的书库</p>
+
+  <section class="card offline" id="offline">
+    <h2>连不上书库</h2>
+    <p>手机现在连不上书库，手机上也还没有可以离线看的内容。请确认在家里的 Wi-Fi 下，或者已经打开 Tailscale。</p>
+    <button class="btn" onclick="ShukuNative.retry()">重试</button>
+  </section>
+
+  <section class="card">
+    <h2>扫码连接</h2>
+    <ol>
+      <li>在电脑或 iPhone 上打开书库网页，进入“设置 → 手机、手表和浏览器插件”，点“显示配对二维码”。</li>
+      <li>用手机的相机扫一下，选择用“书库”打开，就连上了。</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2 id="title">输入地址和配对码</h2>
+    <form id="form" autocomplete="off">
+      <label><span>书库地址</span><input id="addr" inputmode="url" placeholder="http://192.168.1.10:8080" autocapitalize="off" spellcheck="false"></label>
+      <label id="codeRow"><span>配对码</span><input id="code" class="code" maxlength="9" placeholder="ABCD 2345" autocapitalize="characters"></label>
+      <label id="pwRow" hidden><span>访问密码</span><input id="pw" type="password" autocomplete="current-password"></label>
+      <p class="err" id="err"></p>
+      <button class="btn" id="go" type="submit">连接</button>
+      <button class="link" id="switch" type="button">改用访问密码登录</button>
+      <p class="hint">内网地址和 Tailscale 地址填一个就行，连上后 App 会自动在两者之间切换。</p>
+    </form>
+  </section>
+</main>
+<script>
+  var usePw = false
+  if (location.hash === '#offline' && window.ShukuNative && ShukuNative.configured()) document.getElementById('offline').style.display = 'block'
+  document.getElementById('switch').onclick = function () {
+    usePw = !usePw
+    document.getElementById('codeRow').hidden = usePw
+    document.getElementById('pwRow').hidden = !usePw
+    document.getElementById('title').textContent = usePw ? '输入地址和访问密码' : '输入地址和配对码'
+    this.textContent = usePw ? '改用配对码' : '改用访问密码登录'
+  }
+  document.getElementById('form').onsubmit = function (e) {
+    e.preventDefault()
+    var err = document.getElementById('err'), btn = document.getElementById('go')
+    var addr = document.getElementById('addr').value.trim()
+    var code = usePw ? '' : document.getElementById('code').value.replace(/\s+/g, '')
+    var pw = usePw ? document.getElementById('pw').value : ''
+    err.textContent = ''
+    if (!addr) { err.textContent = '请填写书库地址'; return }
+    if (!usePw && code.length < 8) { err.textContent = '配对码是 8 位'; return }
+    btn.disabled = true; btn.textContent = '正在连接…'
+    // 连接要访问网络，放到下一帧，先让按钮状态显示出来
+    setTimeout(function () {
+      var r = JSON.parse(ShukuNative.connect(addr, code, pw))
+      if (!r.ok) { err.textContent = r.error; btn.disabled = false; btn.textContent = '连接' }
+    }, 30)
+  }
+</script>
+</body>
+</html>

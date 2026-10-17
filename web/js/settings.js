@@ -430,6 +430,15 @@ function devices(s) {
 }
 
 // ---------- 安卓 App 自己的设置（只在 App 里显示） ----------
+// 连接手表要联网、等蓝牙，原生在后台做完后发 watch 事件
+function syncWatch(btn) {
+  btn.disabled = true
+  toast('正在把连接信息发给手表…')
+  const off = onNative('watch', r => { off(); clearTimeout(t); btn.disabled = false; toast(r.message || (r.ok ? '已把连接信息发给手表' : '连接手表失败'), r.ok ? {} : { error: true, duration: 6000 }) })
+  const t = setTimeout(() => { off(); btn.disabled = false }, 30000)
+  call('syncWatch')
+}
+
 function appSection(ctx) {
   const prefs = callJSON('prefs') || {}
   const sw = (key, label, hint) => {
@@ -459,7 +468,7 @@ function appSection(ctx) {
       sw('auto_download', '自动下载在读的书', '连着内网时，把“在读”里的书下载到手机'),
       h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '听书的声音'), h('div', { class: 'h' }, '锁屏、切到别的 App 也会继续读')), ttsSel),
       h('div', { class: 'row wrap', style: { margin: '8px 0 14px' } },
-        h('button', { class: 'btn', onclick: () => { const r = callJSON('syncWatch'); toast(r?.message || '已把连接信息发给手表') } }, icon('watch'), '连接手表'),
+        h('button', { class: 'btn', onclick: e => syncWatch(e.currentTarget) }, icon('watch'), '连接手表'),
         h('button', { class: 'btn quiet', onclick: async () => { if (await confirmDialog({ title: '断开这台手机？', message: '下载到手机的书会保留。之后需要重新扫码或输入配对码。', ok: '断开' })) call('logout') } }, '断开并重新配对')),
       h('div', { class: 'sub-title', style: { margin: '6px 0 6px' } }, '下载到手机的书'),
       dl))

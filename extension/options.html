@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>书库插件设置</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="options">
+  <main>
+    <header>
+      <img src="icons/128.png" alt="">
+      <div>
+        <h1>书库插件</h1>
+        <p>把网页上的电子书一键加入你 NAS 上的书库</p>
+      </div>
+    </header>
+
+    <section class="card" id="connect">
+      <h2>连接书库</h2>
+      <div id="state" class="status" hidden></div>
+
+      <form id="pair" autocomplete="off">
+        <p>在书库网页的“设置 → 手机、手表和浏览器插件”里点“显示配对二维码”，把下面的地址和配对码照着填。</p>
+        <label class="field"><span>书库地址（内网地址或 Tailscale 地址都行）</span>
+          <input id="addr" class="input" placeholder="例如 192.168.1.10:8080" spellcheck="false"></label>
+        <label class="field" id="code-field"><span>配对码（10 分钟内有效，只能用一次）</span>
+          <input id="code" class="input" placeholder="8 位字母和数字" spellcheck="false" style="text-transform: uppercase"></label>
+        <details id="pwd-box"><summary>没有配对码？用书库密码登录</summary>
+          <label class="field"><span>书库密码</span><input id="pwd" class="input" type="password"></label></details>
+        <div class="row"><button class="btn primary" type="submit">连接</button><span id="pair-msg" class="msg"></span></div>
+      </form>
+
+      <div id="linked" hidden>
+        <label class="field"><span>内网地址（在家时用）</span><input id="lan" class="input" spellcheck="false" placeholder="例如 http://192.168.1.10:8080"></label>
+        <label class="field"><span>Tailscale 地址（出门时用）</span><input id="remote" class="input" spellcheck="false" placeholder="例如 http://100.101.102.103:8080"></label>
+        <p class="fine">插件先试内网地址，不通再走 Tailscale，和手机 App 一样自动切换。</p>
+        <div class="row">
+          <button id="save" class="btn" type="button">保存地址</button>
+          <button id="test" class="btn" type="button">测试连接</button>
+          <button id="logout" class="btn danger" type="button">断开</button>
+          <span id="linked-msg" class="msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>加入方式</h2>
+      <label class="radio"><input type="radio" name="mode" value="auto"><b>自动（推荐）</b>
+        <small>古腾堡计划、Standard Ebooks、互联网档案馆、维基文库这些公开书库，交给书库直接下载；其他网站用浏览器下载后传到书库，能带上你在那个网站的登录状态。</small></label>
+      <label class="radio"><input type="radio" name="mode" value="browser"><b>都用浏览器下载后上传</b>
+        <small>文件先经过这台电脑。适合书库所在的 NAS 上不了外网的情况。单个文件最大 1GB。</small></label>
+      <label class="radio"><input type="radio" name="mode" value="nas"><b>都让书库下载</b>
+        <small>不占这台电脑的网络，浏览器关了也会继续下载。需要登录才能下载的网站会失败。</small></label>
+    </section>
+
+    <section class="card">
+      <h2>怎么用</h2>
+      <ul class="tips">
+        <li>在任何网页上点工具栏里的书库图标，插件会列出这个页面上的电子书链接（EPUB、MOBI、AZW3、FB2、PDF、漫画包等），同一本书的几种格式合在一起，勾选后一次加入书库。</li>
+        <li>在下载链接上点右键，选“添加到书库”。</li>
+        <li>在古腾堡计划、Standard Ebooks、互联网档案馆、维基文库的书页上，插件会给出整本书的下载。</li>
+        <li>加入后书库会自动识别、查重、补全书名作者和封面，结果在书库的“整理”里查看。</li>
+      </ul>
+      <p class="fine">插件只在你打开弹窗或使用右键菜单时读取当前页面上的链接，下载的文件只会发到你自己的书库。请只添加你有权下载的内容。</p>
+      <p class="fine" id="version"></p>
+    </section>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

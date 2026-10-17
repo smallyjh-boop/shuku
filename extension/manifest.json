@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "书库：一键加入书库",
+  "short_name": "书库",
+  "version": "1.0.0",
+  "description": "把网页上的电子书（EPUB、MOBI、AZW3、PDF、FB2、漫画包等）一键加入你 NAS 上的书库，自动在内网和 Tailscale 之间切换。",
+  "minimum_chrome_version": "116",
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "action": {
+    "default_title": "加入书库",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+  },
+  "options_page": "options.html",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["storage", "contextMenus", "scripting", "activeTab", "notifications", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["<all_urls>"]
+}

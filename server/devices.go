@@ -554,6 +554,7 @@ func handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 func routesP2(mux *http.ServeMux) {
 	a := requireAuth
 	mux.HandleFunc("GET /api/info", a(handleInfo))
+	mux.HandleFunc("GET /api/assets", handleAssets)
 	mux.HandleFunc("POST /api/pair", a(handlePairCreate))
 	mux.HandleFunc("POST /api/pair/claim", handlePairClaim)
 	mux.HandleFunc("GET /api/sessions", a(handleSessions))
@@ -573,4 +574,44 @@ func routesP2(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/catalogs/{id}", a(handleDeleteCatalog))
 	mux.HandleFunc("GET /api/catalogs/{id}/browse", a(handleCatalogBrowse))
 	mux.HandleFunc("GET /api/catalog-image", a(handleCatalogImage))
+}
+
+// ---------- 网页文件清单（App 预先缓存，离线也能打开阅读器） ----------
+
+var assetsCache struct {
+	sync.Mutex
+	at   time.Time
+	body []byte
+}
+
+func handleAssets(w http.ResponseWriter, r *http.Request) {
+	assetsCache.Lock()
+	defer assetsCache.Unlock()
+	if time.Since(assetsCache.at) > time.Minute || assetsCache.body == nil {
+		type item struct {
+			P string `json:"p"`
+			S int64  `json:"s"`
+			M int64  `json:"m"`
+		}
+		var files []item
+		h := sha256.New()
+		filepath.Walk(cfg.WebDir, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			rel, _ := filepath.Rel(cfg.WebDir, p)
+			rel = "/" + filepath.ToSlash(rel)
+			if strings.HasPrefix(filepath.Base(p), ".") || rel == "/sw.js" {
+				return nil
+			}
+			files = append(files, item{rel, info.Size(), info.ModTime().Unix()})
+			fmt.Fprintf(h, "%s|%d|%d\n", rel, info.Size(), info.ModTime().Unix())
+			return nil
+		})
+		assetsCache.body = []byte(toJSON(map[string]any{"version": hex.EncodeToString(h.Sum(nil))[:16], "files": files}))
+		assetsCache.at = time.Now()
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(assetsCache.body)
 }

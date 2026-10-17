@@ -41,7 +41,9 @@ def section(name):
 
 # ---------------------------------------------------------------- 模拟服务
 
-TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH = [], [], [], [], []
+TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG = [], [], [], [], [], []
+# 浏览器插件测试：这些网站的域名在浏览器里指向模拟服务（--host-resolver-rules），书库服务器解析不到它们
+EXT_SITES = ["www.gutenberg.org", "archive.org", "standardebooks.org", "zh.wikisource.org"]
 TONE = b""
 COVER = b""
 
@@ -159,6 +161,15 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, open(f, "rb").read(), "application/epub+zip")
         if p.startswith("/ia/services/img/"):
             return self.send(200, COVER, "image/jpeg")
+        if p == "/ia/metadata/xiyouji00wu":
+            return self.send(200, {"metadata": {"title": "西游记"}, "files": [{"name": "xyj.pdf", "format": "Text PDF"}, {"name": "xyj.epub", "format": "EPUB"}]})
+        if p == "/ia/download/xiyouji00wu/xyj.epub":
+            f = os.path.join(T, "remote", "xyj.epub")
+            make_epub(f, "西游记", "吴承恩", [("第一回", ["灵根育孕源流出，心性修持大道生。" * 20])])
+            return self.send(200, open(f, "rb").read(), "application/epub+zip")
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host in EXT_SITES or p.startswith(("/shop/", "/dl/", "/protected/")) or p in ("/get", "/fake.epub"):
+            return self.ext_site(host, p, q)
         if p.startswith("/files/"):
             FETCH_LOG.append(p)
             f = os.path.join(T, "remote", urllib.parse.unquote(p[len("/files/"):]))
@@ -167,6 +178,82 @@ class Mock(BaseHTTPRequestHandler):
                                  {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(f))})
             return self.send(404, "not found", "text/plain")
         self.send(404, {"error": "no route " + p})
+
+    def ext_site(self, host, p, q):
+        """浏览器插件测试用的网站：一个普通的电子书小站 + 几个公开书库的书页"""
+        EXT_LOG.append((host, p, self.headers.get("Referer", "")))
+
+        def page(body, title=""):
+            return self.send(200, f"<!doctype html><html><head><meta charset='utf-8'><title>{title}</title></head><body>{body}</body></html>", "text/html; charset=utf-8")
+
+        def epub(fname, title, author, ctype="application/epub+zip", cd=True):
+            f = os.path.join(T, "remote", "ext-" + fname)
+            if not os.path.exists(f):
+                make_epub(f, title, author, [("第一章", [f"{title}的正文。" * 30])])
+            hd = {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(fname)} if cd else {}
+            return self.send(200, open(f, "rb").read(), ctype, hd)
+
+        if host == "www.gutenberg.org":
+            if p == "/ebooks/1342":
+                return page("<h1>Pride and Prejudice by Jane Austen</h1><table>"
+                            "<tr><td><a href='/ebooks/1342.html.images'>Read online (web)</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.epub3.images'>EPUB3 (E-readers incl. Send-to-Kindle)</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.epub.images'>EPUB (older E-readers)</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.epub.noimages'>EPUB (no images, older E-readers)</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.kf8.images'>Kindle</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.txt.utf-8'>Plain Text UTF-8</a></td></tr>"
+                            "<tr><td><a href='/ebooks/1342.rdf'>RDF</a></td></tr></table>", "Pride and Prejudice by Jane Austen | Project Gutenberg")
+            if p == "/ebooks/1342.epub3.images":  # 真实的古腾堡会跳转到缓存文件
+                self.send_response(302)
+                self.send_header("Location", "/cache/epub/1342/pg1342-images-3.epub")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if p == "/cache/epub/1342/pg1342-images-3.epub":
+                return epub("pg1342-images-3.epub", "Pride and Prejudice", "Jane Austen", cd=False)
+        if host == "archive.org" and p == "/details/xiyouji00wu":
+            return page("<h1>西游记</h1><section><a href='/download/xiyouji00wu/xyj.epub'>EPUB</a> <a href='/download/xiyouji00wu/xyj.pdf'>PDF</a>"
+                        " <a href='/download/xiyouji00wu'>SHOW ALL</a></section>", "西游记 : 吴承恩 : Free Download, Borrow, and Streaming : Internet Archive")
+        if host == "standardebooks.org" and p == "/ebooks/jane-austen/emma":
+            d = "/ebooks/jane-austen/emma/downloads/jane-austen_emma"
+            return page(f"<h1>Emma</h1><ul><li><a href='{d}.epub'>Compatible epub</a></li><li><a href='{d}_advanced.epub'>Advanced epub</a></li>"
+                        f"<li><a href='{d}.kepub.epub'>Kobo Kepub epub</a></li><li><a href='{d}.azw3'>Amazon Kindle azw3</a></li></ul>", "Emma, by Jane Austen - Standard Ebooks")
+        if host == "zh.wikisource.org" and p.startswith("/wiki/"):
+            return self.send(200, "<!doctype html><html><head><meta charset='utf-8'><title>水滸傳 - 维基文库，自由的图书馆</title></head>"
+                                  "<body class='mediawiki ns-0'><h1 id='firstHeading'>水滸傳</h1><p>正文</p></body></html>", "text/html; charset=utf-8")
+        # 一个普通的电子书小站：同一本书两种格式、下载接口、要来源页才给下载的、其实是网页的、框架和 shadow DOM 里的链接
+        if p == "/shop/list.html":
+            return page("<h1>电子书小站</h1><ul>"
+                        "<li><a href='/dl/alice.epub'>爱丽丝漫游奇境</a> <a href='/dl/alice.mobi'>MOBI</a></li>"
+                        "<li><a href='/dl/manual.pdf'>产品说明书</a></li>"
+                        "<li><a href='/get?id=7&amp;format=epub'>下载 EPUB</a></li>"
+                        "<li><a href='/dl/notes.txt'>读书笔记</a></li>"
+                        "<li><a href='/protected/secret.epub'>秘密花园</a></li>"
+                        "<li><a href='/fake.epub'>需要登录的书</a></li>"
+                        "<li><a href='/dl/disguised.epub'>伪装的书</a></li>"
+                        "<li><a href='/about'>关于本站</a></li></ul>"
+                        "<iframe src='/shop/frame.html'></iframe><div id='host'></div>"
+                        "<script>document.getElementById('host').attachShadow({mode: 'open'}).innerHTML = \"<a href='/dl/shadow.azw3'>影子里的书</a>\"</script>", "电子书小站")
+        if p == "/shop/frame.html":
+            return page("<a href='/dl/frame-book.fb2'>框架里的书</a>")
+        if p == "/dl/alice.epub":
+            return epub("alice.epub", "爱丽丝漫游奇境", "刘易斯·卡罗尔")
+        if p == "/dl/frame-book.fb2":
+            fb2 = ("<?xml version='1.0' encoding='utf-8'?><FictionBook xmlns='http://www.gribuser.ru/xml/fictionbook/2.0'><description><title-info>"
+                   "<author><first-name>安托万</first-name><last-name>圣埃克苏佩里</last-name></author><book-title>小王子</book-title><lang>zh</lang></title-info></description>"
+                   "<body><section><title><p>第一章</p></title><p>" + "如果你驯服了我，我们就互相不可缺少了。" * 20 + "</p></section></body></FictionBook>")
+            return self.send(200, fb2, "application/x-fictionbook+xml")
+        if p == "/get" and q.get("format") == ["epub"]:
+            return epub("海底两万里.epub", "海底两万里", "儒勒·凡尔纳", ctype="application/octet-stream")
+        if p == "/protected/secret.epub":
+            if self.headers.get("Referer") != MOCK + "/shop/list.html":
+                return self.send(403, "forbidden", "text/plain")
+            return epub("secret.epub", "秘密花园", "伯内特")
+        if p == "/fake.epub":
+            return self.send(200, "<!doctype html><html><body>请先登录</body></html>", "text/html; charset=utf-8")
+        if p == "/dl/disguised.epub":  # 类型写的是文件，内容其实是网页
+            return self.send(200, "\n  <!DOCTYPE html><html><body>下载次数用完了</body></html>", "application/octet-stream")
+        return self.send(404, "not found", "text/plain")
 
     def opds(self, p, q):
         A = 'xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:dc="http://purl.org/dc/terms/"'
@@ -1092,7 +1179,7 @@ def ui_tests():
             prefs: () => JSON.stringify({ volume_keys: true, keep_screen_on: true, tts_engine: 'server' }), setPref: (k, v) => __calls.push(['setPref', k, v]),
             downloads: () => JSON.stringify(__downloads), removeDownload: id => { __downloads = [] },
             download: (id, json) => { __calls.push(['download', id, json]); __downloads = [{ id, title: JSON.parse(json).title, state: 'done', size: 2048, format: 'epub' }]; setTimeout(() => shukuNativeEvent('download', JSON.stringify({ id, state: 'done' })), 50) },
-            syncWatch: () => JSON.stringify({ message: '已发送给手表' }), logout: () => __calls.push(['logout']), ttsVoices: () => '[]',
+            syncWatch: () => { __calls.push(['syncWatch']); setTimeout(() => shukuNativeEvent('watch', JSON.stringify({ ok: true, message: '已把连接信息发给 1 块手表' })), 300) }, logout: () => __calls.push(['logout']), ttsVoices: () => '[]',
           }""" % json.dumps(TOKEN)
         ctx = browser.new_context(viewport={"width": 412, "height": 900}, device_scale_factor=2, has_touch=True, is_mobile=True, locale="zh-CN")
         ctx.add_init_script(fake)
@@ -1116,6 +1203,10 @@ def ui_tests():
         pg.wait_for_selector(".set-sec >> text=手机 App")
         check("设置里有“手机 App”一节", pg.locator(".set-sec h2", has_text="手机 App").count() == 1)
         shot(pg, "20-native-settings")
+        pg.click(".set-sec button:has-text('连接手表')")
+        check("连接手表：后台进行，按钮先禁用", pg.locator(".set-sec button:has-text('连接手表')").is_disabled() and len(calls("syncWatch")) == 1)
+        pg.wait_for_selector(".toast >> text=已把连接信息发给 1 块手表")
+        check("连接手表：结果用事件回来", pg.locator(".set-sec button:has-text('连接手表')").is_enabled())
         pg.goto(BASE + f"/#/read/{b2['id']}")
         reader_ready(pg)
         pg.wait_for_timeout(600)
@@ -1172,6 +1263,173 @@ def ui_tests():
     check("没有脚本错误", not errors, "\n      ".join(errors[:20]))
 
 
+def ext_tests():
+    """浏览器插件：在无头 Chromium 里装上插件，配对、扫描网页、加入书库、各种出错情况"""
+    from playwright.sync_api import sync_playwright
+    section("浏览器插件")
+    EXT = os.path.join(ROOT, "extension")
+    profile = os.path.join(T, "ext-profile")
+    shutil.rmtree(profile, ignore_errors=True)
+    rules = ", ".join(f"MAP {h} 127.0.0.1:{MPORT}" for h in EXT_SITES)
+    errors = []
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(profile, channel="chromium", headless=True, locale="zh-CN", viewport={"width": 1200, "height": 800},
+                                                   args=[f"--disable-extensions-except={EXT}", f"--load-extension={EXT}", f"--host-resolver-rules={rules}"])
+        try:
+            sw = ctx.service_workers[0] if ctx.service_workers else ctx.wait_for_event("serviceworker", timeout=15000)
+            ext = sw.url.split("/")[2]
+            check("插件装好，后台启动", sw.url.endswith("/background.js"))
+            ev = lambda js: sw.evaluate(js)
+            tasks = lambda: ev("async () => (await chrome.storage.session.get('tasks')).tasks || []")
+
+            def watch(pg, label):
+                pg.on("pageerror", lambda e: errors.append(f"[{label}] {e}"))
+                # 网站自己的 favicon 404、故意输错配对码的 401 不算
+                pg.on("console", lambda m: m.type == "error" and "Failed to load resource" not in m.text and errors.append(f"[{label}] console.error {m.text}"))
+                # 探测不通的 Tailscale 地址（前面的测试设成了 nas.example.ts.net）是正常的
+                pg.on("requestfailed", lambda r: r.url.endswith("/api/ping") or errors.append(f"[{label}] 请求失败 {r.url} {r.failure}"))
+                return pg
+
+            # ---- 配对 ----
+            opt = watch(ctx.new_page(), "options")
+            opt.goto(f"chrome-extension://{ext}/options.html")
+            check("设置页：没连接时显示配对表单", opt.locator("#pair").is_visible() and not opt.locator("#linked").is_visible())
+            opt.fill("#addr", f"127.0.0.1:{PORT}")
+            opt.fill("#code", "WRONG234")
+            opt.click("#pair button[type=submit]")
+            opt.wait_for_function("() => /配对码无效/.test(document.getElementById('pair-msg').textContent)", timeout=10000)
+            check("设置页：错误的配对码有提示", True)
+            code = j("POST", "/api/pair")["code"]
+            opt.fill("#code", code.lower())
+            opt.click("#pair button[type=submit]")
+            opt.wait_for_selector("#state >> text=已连接", timeout=15000)
+            cfg = ev("async () => (await chrome.storage.local.get('config')).config")
+            check("设置页：用配对码连接成功", cfg.get("token") and cfg.get("lan") == BASE, {k: v for k, v in cfg.items() if k != "token"})
+            check("书库的设备列表里有插件", any("浏览器插件" in x["device"] for x in j("GET", "/api/sessions")))
+            check("设置页：显示当前线路", "内网" in opt.inner_text("#state"))
+            check("加入方式默认“自动”", opt.locator("input[name=mode][value=auto]").is_checked())
+            opt.wait_for_timeout(300)
+            opt.screenshot(path=os.path.join(SHOTS, "30-ext-options.png"), full_page=True)
+
+            def popup_for(url, label, wait_groups=True):
+                tab = watch(ctx.new_page(), label)
+                tab.goto(url)
+                tab.wait_for_load_state("load")
+                tid = ev(f"async () => (await chrome.tabs.query({{}})).find(t => t.url === {json.dumps(tab.url)})?.id")
+                pop = watch(ctx.new_page(), label + "-popup")
+                pop.set_viewport_size({"width": 380, "height": 600})
+                pop.goto(f"chrome-extension://{ext}/popup.html?tab={tid}")
+                if wait_groups:
+                    pop.wait_for_selector(".group, .empty", timeout=10000)
+                return tab, pop
+
+            def groups(pop):
+                return pop.evaluate("() => [...document.querySelectorAll('.group')].map(g => ({ title: g.querySelector('.g-title').textContent, checked: g.querySelector('input').checked, weak: g.classList.contains('weak'), chips: [...g.querySelectorAll('.fmt')].map(b => b.textContent + (b.classList.contains('on') ? '*' : '')) }))")
+
+            def wait_tasks(n, timeout=60):
+                return wait(lambda: (lambda ts: ts if len(ts) >= n and all(t["status"] in ("done", "error") for t in ts) else None)(tasks()), timeout, 0.5, "插件任务")
+
+            # ---- 一般网站 ----
+            shop, pop = popup_for(MOCK + "/shop/list.html", "shop")
+            pop.wait_for_function("() => document.getElementById('route').textContent === '内网'", timeout=10000)
+            check("弹窗：线路显示内网", True)
+            gs = groups(pop)
+            by = {g["title"]: g for g in gs}
+            check("弹窗：找到页面上的电子书（含框架和 shadow DOM）", {"爱丽丝漫游奇境", "产品说明书", "秘密花园", "需要登录的书", "伪装的书", "框架里的书", "影子里的书", "读书笔记"} <= set(by), [g["title"] for g in gs])
+            check("弹窗：不是书的链接不列出", not any("关于" in g["title"] for g in gs))
+            check("弹窗：同一本书的两种格式合成一组，默认选 EPUB", by.get("爱丽丝漫游奇境", {}).get("chips") == ["EPUB*", "MOBI"], by.get("爱丽丝漫游奇境"))
+            check("弹窗：下载接口（?format=epub）也认得", any(g["chips"] == ["EPUB*"] and "下载" in g["title"] for g in gs), gs)
+            check("弹窗：txt 归到“其他文件”，默认不勾", by.get("读书笔记", {}).get("weak") and not by["读书笔记"]["checked"])
+            check("弹窗：书多时 PDF 默认不勾", by.get("产品说明书", {}).get("checked") is False)
+            check("弹窗：标题行数统计", "8 本书、1 个其他文件" in pop.inner_text(".found-head"), pop.inner_text(".found-head"))
+            pop.locator(".group", has_text="影子里的书").locator("input").uncheck()
+            check("弹窗：按钮显示要加入的文件数", pop.inner_text("#add") == "加入书库（6 个文件）", pop.inner_text("#add"))
+            pop.screenshot(path=os.path.join(SHOTS, "31-ext-popup.png"))
+            pop.emulate_media(color_scheme="dark")
+            pop.screenshot(path=os.path.join(SHOTS, "32-ext-popup-dark.png"))
+            pop.emulate_media(color_scheme="light")
+            pop.click("#add")
+            pop.wait_for_selector("#add >> text=已开始加入 6 个文件", timeout=5000)
+            ts = wait_tasks(6)
+            st = {(t.get("name") or t["url"].split("/")[-1]): (t["status"], t.get("error", "")) for t in ts}
+            check("加入：浏览器下载后上传（带 Content-Disposition 的中文名）", st.get("海底两万里.epub", ("",))[0] == "done", st)
+            check("加入：普通链接", st.get("alice.epub", ("",))[0] == "done", st)
+            check("加入：框架里的 FB2", st.get("frame-book.fb2", ("",))[0] == "done", st)
+            check("加入：要来源页的网站带上了 Referer", st.get("secret.epub", ("",))[0] == "done" and any(e[1] == "/protected/secret.epub" and e[2] == MOCK + "/shop/list.html" for e in EXT_LOG), st)
+            fake = next((t for t in ts if t["url"].endswith("/fake.epub")), {})
+            check("加入：链接其实是网页时报错", fake.get("status") == "error" and "网页" in fake.get("error", ""), fake)
+            dis = next((t for t in ts if t["url"].endswith("/disguised.epub")), {})
+            check("加入：类型是文件、内容是网页时也报错", dis.get("status") == "error" and "下载到的是网页" in dis.get("error", ""), dis)
+            for title in ("爱丽丝漫游奇境", "海底两万里", "秘密花园", "小王子"):
+                b = wait(lambda: book_by_title(title), 40, 1, "插件加入的书入库：" + title)
+                check(f"入库：{title}", b and b["files"], b and b.get("files"))
+            pop.wait_for_selector(".task.error >> text=让书库下载", timeout=5000)
+            check("弹窗：加入记录里显示结果", pop.locator(".task.done").count() >= 4 and pop.locator(".task.error").count() == 2)
+            pop.locator(".task.error", has_text="fake.epub").locator("text=让书库下载").click()
+            wait(lambda: (lambda t: t if t.get("mode") == "nas" and t["status"] == "error" else None)(next(x for x in tasks() if x["url"].endswith("/fake.epub"))), 30, 0.5, "让书库下载")
+            fake = next(x for x in tasks() if x["url"].endswith("/fake.epub"))
+            check("出错后“让书库下载”：书库也判断出是网页（插件里换了说法）", fake["error"].startswith("书库打开这个链接得到的是网页"), fake)
+            pop.screenshot(path=os.path.join(SHOTS, "33-ext-popup-tasks.png"))
+            pop.click("#clear")
+            pop.wait_for_function("() => document.getElementById('tasks').hidden", timeout=5000)
+            check("弹窗：清除已结束的记录", True)
+            pop.close(); shop.close()
+
+            # ---- 公开书库 ----
+            tab, pop = popup_for("http://www.gutenberg.org/ebooks/1342", "gutenberg")
+            gs = groups(pop)
+            check("古腾堡：一本书的各种格式合成一组，用书页标题", len(gs) == 1 and gs[0]["title"] == "Pride and Prejudice by Jane Austen", gs)
+            check("古腾堡：格式标签和默认选 EPUB3", gs and gs[0]["chips"] == ["EPUB3*", "EPUB", "EPUB 无图", "AZW3", "TXT"], gs and gs[0]["chips"])
+            pop.click("#add")
+            t = wait(lambda: (lambda ts: ts[-1] if ts and ts[-1]["status"] in ("done", "error") else None)(tasks()), 40, 0.5, "古腾堡")
+            check("古腾堡：书库下载不了时自动改用浏览器下载", t["status"] == "done" and t.get("mode") == "browser" and t.get("triedBrowser"), t)
+            check("古腾堡：文件名没意义时用书名", t.get("name") == "Pride and Prejudice by Jane Austen.epub", t.get("name"))
+            check("古腾堡：入库", wait(lambda: book_by_title("Pride and Prejudice"), 40, 1, "古腾堡入库"))
+            pop.close(); tab.close()
+
+            tab, pop = popup_for("http://archive.org/details/xiyouji00wu", "ia")
+            gs = groups(pop)
+            check("互联网档案馆：整本加入的选项", gs and gs[0]["title"] == "西游记" and gs[0]["chips"] == ["EPUB*", "整本（自动选格式）", "PDF"], gs)
+            pop.click(".fmt >> text=EPUB")
+            pop.click(".fmt >> text=整本（自动选格式）")
+            pop.click("#add")
+            t = wait(lambda: (lambda ts: ts[-1] if ts and ts[-1]["url"].startswith("ia:") and ts[-1]["status"] in ("done", "error") else None)(tasks()), 40, 0.5, "互联网档案馆")
+            check("互联网档案馆：交给书库下载", t["status"] == "done" and t.get("mode") == "nas" and t.get("name") == "西游记.epub", t)
+            b = wait(lambda: book_by_title("西游记"), 40, 1, "西游记入库")
+            check("互联网档案馆：入库", b and b["author"] == "吴承恩", b and b.get("author"))
+            pop.close(); tab.close()
+
+            tab, pop = popup_for("http://standardebooks.org/ebooks/jane-austen/emma", "se")
+            gs = groups(pop)
+            check("Standard Ebooks：几种格式合成一组，默认选兼容版 EPUB", gs and gs[0]["title"] == "Emma" and gs[0]["chips"] == ["EPUB*", "EPUB 新版", "KEPUB", "AZW3"], gs)
+            pop.close(); tab.close()
+
+            tab, pop = popup_for("http://zh.wikisource.org/wiki/%E6%B0%B4%E6%BB%B8%E5%82%B3", "ws")
+            gs = groups(pop)
+            check("维基文库：作品页给出整部作品的 EPUB", gs and gs[0]["title"] == "水滸傳" and gs[0]["chips"] == ["整部作品 EPUB*"], gs)
+            pop.close(); tab.close()
+
+            tab, pop = popup_for("about:blank", "blank")
+            check("浏览器自带页面：提示读不到", "浏览器自带的页面" in pop.inner_text("#main"))
+            pop.close(); tab.close()
+
+            # ---- 设置：加入方式、断开 ----
+            opt.click("input[name=mode][value=nas]")
+            opt.wait_for_timeout(300)
+            check("设置页：切换加入方式", ev("async () => (await chrome.storage.local.get('config')).config.mode") == "nas")
+            opt.click("input[name=mode][value=auto]")
+            opt.on("dialog", lambda d: d.accept())
+            opt.click("#logout")
+            opt.wait_for_selector("#pair", state="visible", timeout=10000)
+            check("设置页：断开后书库里的登录也注销了", not any("浏览器插件" in x["device"] for x in j("GET", "/api/sessions")))
+            tab, pop = popup_for(MOCK + "/shop/list.html", "after-logout", wait_groups=False)
+            pop.wait_for_selector(".note >> text=先连接你的书库", timeout=5000)
+            check("断开后弹窗提示先连接", True)
+        finally:
+            ctx.close()
+    check("插件页面没有脚本错误", not errors, "\n".join(errors[:8]))
+
+
 def main():
     global TOKEN
     if "--serve" in sys.argv:  # 用上次的测试数据启动服务器和模拟服务，方便手动调试
@@ -1193,6 +1451,11 @@ def main():
                 ui_tests()
             except Exception as e:
                 check("网页检查执行出错", False, f"{e}\n{traceback.format_exc(limit=4)}")
+        if not ONLY_API or "--ext" in sys.argv:
+            try:
+                ext_tests()
+            except Exception as e:
+                check("插件检查执行出错", False, f"{e}\n{traceback.format_exc(limit=4)}")
     finally:
         teardown()
     passed = sum(1 for r in results if r[1] is True)

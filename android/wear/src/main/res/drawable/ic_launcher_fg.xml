@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 线装书：书衣上一张竖排题签（108dp 画布，中间 72dp 是安全区） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- 书 -->
+    <path android:fillColor="#F6F3EA" android:fillAlpha="0.16" android:pathData="M34,28h42a4,4 0,0 1,4 4v44a4,4 0,0 1,-4 4h-42z" />
+    <!-- 订线 -->
+    <path android:strokeColor="#F6F3EA" android:strokeAlpha="0.55" android:strokeWidth="1.2" android:pathData="M38,30v48" />
+    <!-- 题签 -->
+    <path android:fillColor="#F6F3EA" android:pathData="M45,34h13v32h-13z" />
+    <path android:strokeColor="#9A3D33" android:strokeWidth="1" android:fillColor="#00000000" android:pathData="M46.5,35.5h10v29h-10z" />
+    <!-- 题签上的“字” -->
+    <path android:fillColor="#22262B" android:pathData="M49,40h5v2.2h-5zM49,45h5v2.2h-5zM49,50h5v2.2h-5zM49,55h5v2.2h-5z" />
+</vector>
