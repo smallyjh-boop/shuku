@@ -5,7 +5,7 @@
 当前进度：
 
 - 第一阶段（NAS 服务端 + 网页端）、第二阶段（联网补全、书内搜索、听书、阅读统计、OPDS）：已完成。
-- 第三阶段（安卓 App、Wear OS 手表 App、浏览器插件、“发现”页）：已完成，安装包在仓库的 Releases 里（GitHub Actions 打包，见[打包安卓 App](#打包安卓-app-和手表-app)）。
+- 第三阶段（安卓 App、Wear OS 手表 App、浏览器插件、“发现”页）：已完成。所有安装文件（NAS 服务器镜像、安卓 App、手表 App、浏览器插件）都在仓库的 Releases 里，安装见[部署到威联通](#部署到威联通)。
 
 ## 现在能做什么
 
@@ -27,7 +27,7 @@
 - **书内搜索**：给正文建索引，书架搜索框输入两个字以上，就列出哪本书的哪一章提到过，点一下直接跳到原文。支持 EPUB、TXT、MOBI、AZW3、FB2、PDF（有文字层的）；繁体简体互搜。
 - **联网补全**：从豆瓣读书、Open Library、Google Books、Bangumi（漫画）查封面、简介、年份、ISBN、出版社。入库时自动核对书名作者，对得上就直接归档；详情页“联网查找”列出候选，挑一个填进去；“设置 → 联网补全”可以一键补全已有的书。只补空着的信息，不覆盖你改过的内容。NAS 连不上外网时自动暂停，不拖慢入库。
 - **阅读统计**：今天、本周读了多久，连续阅读天数，今年读完几本，近 30 天每天的时长，读得最多的书。多设备一起算。
-- **OPDS**：KOReader、静读天下、Librera、Panels、Yomu 等阅读器添加 `http://NAS:8080/opds`（用户名随意，密码是书库密码），就能浏览、搜索、下载书库里的书。
+- **OPDS**：KOReader、静读天下、Librera、Panels、Yomu 等阅读器添加 `http://NAS的IP:8090/opds`（用户名随意，密码是书库密码），就能浏览、搜索、下载书库里的书。
 - **内外网自动切换**：填好内网地址和 Tailscale 地址后，打开时同时探测，内网通走内网，不通走 Tailscale；切换网络、请求失败时自动重新选择。网页、安卓 App、手表、浏览器插件都是这样。
 - **发现**：在“发现”页浏览、搜索公开书库，一键加入书库：维基文库（中文古籍、近代作品，整部作品生成 EPUB）、古腾堡计划、互联网档案馆（可以直接下载的书）、Standard Ebooks。还能添加任何 OPDS 书源（Calibre-Web、COPS、Kavita 等，支持用户名密码）。
 - **从链接添加**：书架页“添加”里粘贴下载链接，书库在 NAS 上直接下载入库（最多同时 3 个，单个最大 4GB）。链接打开的是网页时会说明原因。需要登录才能下载的网站，用浏览器插件。
@@ -36,9 +36,24 @@
 
 ## 部署到威联通
 
+所有安装文件都在 GitHub 仓库的 **Releases** 里（仓库页面右边栏“Releases”，或者 `https://github.com/smallyjh-boop/shuku/releases`，要先登录 GitHub）。最新的一个里有：
+
+| 文件 | 装在哪 |
+| --- | --- |
+| `shuku-server-amd64.tar.gz` | Intel / AMD 处理器的威联通（大多数 x86 型号） |
+| `shuku-server-arm64.tar.gz` | ARM 处理器的威联通（比如 TS-x33、TS-x28A 这类） |
+| `shuku-compose.yml` | 在 Container Station 里创建应用程序时粘贴的内容 |
+| `shuku-android.apk` | 安卓手机 |
+| `shuku-wear.apk` | Wear OS 手表 |
+| `shuku-extension.zip` | 电脑上的 Chrome / Edge |
+
+不知道 NAS 是哪种处理器：控制台 → 系统 → 系统状态 → 系统信息，看“CPU”一栏；Intel、AMD 选 amd64，ARM、Annapurna Labs、Realtek 选 arm64（32 位 ARM 的老型号这两个镜像都用不了）。
+
 ### 1. 准备文件夹
 
-在 File Station 里建好这些文件夹（名字随意，下面 docker-compose 里对应改）：
+1. 在 App Center 安装 **Container Station**（装好后会自动建一个 `Container` 共享文件夹）。
+2. 控制台 → 权限 → 共享文件夹 →“创建”一个共享文件夹，比如叫 `Books`。**一定要先建成共享文件夹**，否则数据会写进系统分区。
+3. 在 File Station 里，`Books` 下面建三个文件夹：`投递`、`图书`、`漫画`；`Container` 下面建一个 `shuku`。
 
 | NAS 上的文件夹 | 用途 |
 | --- | --- |
@@ -49,34 +64,36 @@
 
 已经有书的话，直接把现有的书库文件夹挂载成 `/books`，启动后会原地登记，不会移动；之后可以在“整理”里一键按规范整理（可撤销）。
 
-### 2. 启动
+### 2. 导入镜像、创建应用程序
 
-把整个 `shuku` 文件夹复制到 NAS（比如 `/share/Container/shuku-src`），SSH 登录 NAS：
+1. Container Station →**映像**→**导入**，选下载的 `shuku-server-amd64.tar.gz`（或 arm64 那个），可以直接从电脑选。导入后能看到 `localhost/shuku`。注意要在“映像”里导入，不是“容器”。
+2. Container Station →**应用程序**→**创建**（旧版 Container Station 是“创建”→“创建应用程序”），应用程序名称填 `shuku`，把 `shuku-compose.yml` 的全部内容粘贴进去：
+   - 共享文件夹不叫 `Books` 的，改 `volumes` 里冒号**左边**的路径；
+   - `TZ=Asia/Bangkok` 是时区，在中国改成 `Asia/Shanghai`；
+   - 点“验证 YAML”，再点“创建”。
+3. 浏览器打开 `http://NAS的IP:8090`，设置访问密码，就能用了。
 
-```sh
-cd /share/Container/shuku-src
-# 先按实际情况修改 docker-compose.yml 里的文件夹路径和地址
-docker compose up -d --build
-```
+端口用 8090 是因为威联通自己的管理页面占用了 8080。8090 也被占用的话，把 `"8090:8080"` 左边的数字换一个。
 
-也可以在 Container Station → 应用程序 → 创建，粘贴 `docker-compose.yml` 的内容（需要把 `build.context` 改成源码所在的绝对路径）。
+**升级**：Releases 里有新版本时，下载新的镜像文件，在“映像”里导入（会覆盖 `localhost/shuku:latest`），再到“应用程序”里删除 shuku、用同样的内容重新创建一次（或 SSH 执行 `docker compose up -d`）。数据都在 `/share/Container/shuku` 和书库文件夹里，删除应用程序不会删掉它们。
 
-第一次构建会下载 Go 和 Debian 基础镜像，大约 5～10 分钟。完成后浏览器打开 `http://NAS的IP:8080`，设置访问密码即可。
-
-需要转换 DOCX、CHM、RTF 等格式时，把 `docker-compose.yml` 里的 `FULL: "0"` 改成 `"1"` 再构建一次（镜像会大约 600MB）。
+**自己从源码构建**（一般用不到）：把整个仓库复制到 NAS，SSH 进去执行 `docker build -t localhost/shuku:latest .`，再按上面第 2 步创建应用程序。需要转换 DOCX、CHM、RTF 等冷门格式时，构建时加 `--build-arg FULL=1`（带 Calibre，镜像会大约 600MB）。
 
 ### 3. Tailscale（出门访问）
 
-1. 在威联通 App Center 安装 **Tailscale**，登录你的账号。NAS 会得到一个 `100.x.x.x` 地址和 MagicDNS 名称（例如 `nas.tail1234.ts.net`）。
-2. 手机、电脑也装上 Tailscale 并登录同一个账号。
-3. 建议给书库开 HTTPS（iPhone 只有 https 才能把书库“添加到主屏幕”当 App 用）。SSH 到 NAS 执行：
-   ```sh
-   tailscale serve --bg --https=443 http://127.0.0.1:8080
-   ```
-   之后用 `https://nas.tail1234.ts.net` 访问。
+1. 在威联通 App Center 安装 **Tailscale**，打开后登录你的账号、点“Connect”。NAS 会得到一个 `100.x.x.x` 地址和 MagicDNS 名称（例如 `nas.tail1234.ts.net`）。
+2. 手机、电脑也装上 Tailscale 并登录同一个账号。这时在外面就能用 `http://100.x.x.x:8090` 打开书库了。
+3. 建议再给书库开 HTTPS（iPhone 只有 https 才能把书库“添加到主屏幕”当 App 用）：
+   1. 打开 Tailscale 管理后台的 DNS 页面（`https://login.tailscale.com/admin/dns`），打开 MagicDNS 和 HTTPS Certificates。
+   2. 控制台 → 网络和文件服务 → Telnet / SSH，打开 SSH。电脑上打开 PowerShell，`ssh admin@NAS的IP` 登录（出现菜单的话按 `Q` 再按 `Y` 进入命令行），执行：
+      ```sh
+      TS=$(getcfg SHARE_DEF defVolMP -f /etc/config/def_share.info)/.qpkg/Tailscale/tailscale
+      $TS serve --bg --https=443 http://127.0.0.1:8090
+      ```
+   3. 之后用 `https://nas.tail1234.ts.net`（换成你的 MagicDNS 名称）访问。
 4. 在书库“设置 → 网络”里填：
-   - 内网地址：`http://192.168.x.x:8080`
-   - Tailscale 地址：`https://nas.tail1234.ts.net`
+   - 内网地址：`http://192.168.x.x:8090`
+   - Tailscale 地址：`https://nas.tail1234.ts.net`（没开 HTTPS 就填 `http://100.x.x.x:8090`）
    点“检测两个地址”确认都能连上。
 
 **说明**：浏览器不允许 https 页面去请求 http 地址。所以 iPhone 上用 https 的 Tailscale 地址打开时，会一直走 Tailscale——在家时 Tailscale 会自动走局域网直连，速度不受影响。电脑用 http 内网地址打开时，两条线路之间可以自动切换。安卓 App、手表和浏览器插件不受这个限制，都能自动切换。
@@ -89,7 +106,7 @@ docker compose up -d --build
 
 用 WebView 直接打开 NAS 上的书库网页，界面和网页端一样、跟着书库一起更新；手机自己负责网络、离线、后台听书这些网页做不到的事。
 
-**安装**：在仓库的 Releases 里下载 `shuku-android.apk`（GitHub Actions 打包出来的，见下面“打包”），在手机上点开安装（第一次要允许“安装未知应用”）。Android 8.0 及以上。
+**安装**：在仓库的 Releases 里下载 `shuku-android.apk`，在手机上点开安装（第一次要允许“安装未知应用”）。Android 8.0 及以上。
 
 **连接**：
 
@@ -109,7 +126,7 @@ docker compose up -d --build
 
 ## Wear OS 手表
 
-**安装**：手表 App 没上架应用商店，要用电脑的 adb 装（Wear OS 3 及以上）：
+**安装**：手表 App 没上架应用商店，要用电脑的 adb 装（Wear OS 3 及以上）。adb 在 Google 的 [SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) 里，下载 Windows 版解压就能用：
 
 1. 手表上：设置 → 系统 → 关于 → 连点“版本号”7 次打开开发者选项；开发者选项里打开“ADB 调试”和“无线调试”。
 2. 电脑和手表连同一个 Wi-Fi。在无线调试里点“配对新设备”，电脑上执行 `adb pair 手表IP:配对端口`，输入配对码；再执行 `adb connect 手表IP:端口`。
@@ -147,14 +164,14 @@ docker compose up -d --build
 
 插件只在你打开弹窗或使用右键菜单时读取当前页面上的链接，下载的文件只发到你自己的书库。请只添加你有权下载的内容。
 
-## 打包安卓 App 和手表 App
+## 打包（GitHub Actions）
 
-安装包用 GitHub Actions 打包，**只在手动运行时才打包**，不会因为推送代码自动运行：
+NAS 服务器镜像、安卓 App、手表 App 和浏览器插件都用 GitHub Actions 打包，**只在手动运行时才打包**，不会因为推送代码自动运行：
 
-1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。可以填版本号（只用数字和点，比如 `1.0.1`），留空就用 `android/gradle.properties` 里的。
-2. 一般 4～6 分钟打完，结果在仓库的 Releases 里：`shuku-android.apk`（手机）、`shuku-wear.apk`（手表）、`shuku-extension.zip`（浏览器插件）和校验值 `SHA256SUMS.txt`。手机登录 GitHub 打开 Releases 就能直接下载安装。
+1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。“打包什么”选全部、只打包 App 和插件、或者只打包 NAS 服务器；可以填版本号（只用数字和点，比如 `1.0.1`），留空就用 `android/gradle.properties` 里的。
+2. 全部打包大约 8～10 分钟，结果在仓库的 Releases 里（文件见上面“部署到威联通”的表格），另有校验值 `SHA256SUMS.txt`。手机登录 GitHub 打开 Releases 就能直接下载 APK。
 
-为了省 Actions 的分钟数和存储额度：整个打包只有一个任务，手机和手表在同一次 Gradle 里并行打包，不建缓存、不上传 Artifacts（Release 附件不占 Actions 存储），超过 25 分钟自动停止。每次运行的内部版本号自动加一，新包可以直接覆盖安装。
+为了省 Actions 的分钟数和存储额度：整个打包只有一个任务；手机和手表在同一次 Gradle 里并行打包；服务器的 x86 和 ARM 两个版本在 Debian 里同时交叉编译，不用模拟器编译；不建缓存、不上传 Artifacts（Release 附件不占 Actions 存储），超过 30 分钟自动停止。只改了一边时，只打包那一边更省。服务器镜像打包后会先试运行，接口和网页都能打开才发布。每次运行的内部版本号自动加一，新的 APK 可以直接覆盖安装。
 
 签名：默认用仓库里的 `android/signing/shuku.jks`（密码 `shuku-app`），自己用没问题。如果要公开分发，请换成自己的签名：在仓库 Settings → Secrets and variables → Actions 添加 `SHUKU_KEYSTORE_BASE64`（签名文件 `base64 -w0` 后的内容）、`SHUKU_KEYSTORE_PASSWORD`、`SHUKU_KEY_ALIAS`、`SHUKU_KEY_PASSWORD`。换签名后手机和手表都要卸载重装。
 
@@ -188,7 +205,7 @@ android/       安卓 App（app/）和 Wear OS 手表 App（wear/），共用 co
   tools/       不装 Android SDK 也能做的代码检查（check.sh）
 extension/     Chrome / Edge 浏览器插件
 tools/         测试工具：生成乱名测试书、端到端检查（e2e.py）
-.github/       打包 App 和插件的 GitHub Actions（只能手动运行）
+.github/       打包服务器镜像、App 和插件的 GitHub Actions（只能手动运行）
 Dockerfile
 docker-compose.yml
 ```
@@ -221,6 +238,15 @@ SHUKU_DATA=./data SHUKU_INBOX=./inbox SHUKU_WEB=../web SHUKU_LIBRARIES="图书:$
 - 豆瓣、Open Library、Google Books、Bangumi 联网查找（详情页“联网查找”）
 - AI 识别（`设置 → 识别与整理 → 用示例测试`）
 - “发现”页连真实的维基文库、古腾堡计划、互联网档案馆、Standard Ebooks
-- Docker 镜像构建
+- 服务器镜像在 GitHub Actions 上构建并试运行过，但还没在威联通上实际导入运行
 - 安卓 App 和手表 App：已在 GitHub Actions 上打包成功（两个 APK 同一个签名、包名都是 `app.shuku`），网页和原生之间的接口用模拟的原生桥测过；但还没在真机上运行过（离线、后台听书、手表通信、表冠滚动等）
 - 浏览器插件在真实网站上的表现（在无头 Chromium 里用模拟网站测过扫描、配对、下载上传、来源页、各种出错情况）
+
+## 待办
+
+- **各端自动升级**（先记下，检查完 bug 后一起做）：NAS 服务器、安卓 App、Wear OS 手表 App、浏览器插件都能发现新版本并升级。要定下来的问题：
+  - 新版本从哪里取：仓库是私有的，直接查 GitHub Releases 需要令牌；也可以只让 NAS 去查，再由 NAS 把安装包转给手机、手表和插件。
+  - 安卓 App、手表 App：下载新的 APK 后调用系统安装（签名一致才能覆盖安装；手表上可能需要由手机推送）。
+  - 浏览器插件：现在是“加载已解压的扩展程序”，Chrome 不会自动更新，需要提示下载新版并重新加载，或者改成别的分发方式。
+  - NAS 服务器：在网页里提示有新版本；镜像替换要 Container Station 操作，或者提供一键更新的脚本。
+

@@ -24,7 +24,8 @@ type Config struct {
 
 var cfg Config
 
-const version = "0.1.0"
+// 版本号：发布时由 GitHub Actions 用 -ldflags "-X main.version=..." 写入，和 App 的版本号一致
+var version = "1.0.0"
 
 func env(k, def string) string {
 	if v := strings.TrimSpace(os.Getenv(k)); v != "" {

@@ -23,7 +23,7 @@
       <form id="pair" autocomplete="off">
         <p>在书库网页的“设置 → 手机、手表和浏览器插件”里点“显示配对二维码”，把下面的地址和配对码照着填。</p>
         <label class="field"><span>书库地址（内网地址或 Tailscale 地址都行）</span>
-          <input id="addr" class="input" placeholder="例如 192.168.1.10:8080" spellcheck="false"></label>
+          <input id="addr" class="input" placeholder="例如 192.168.1.10:8090" spellcheck="false"></label>
         <label class="field" id="code-field"><span>配对码（10 分钟内有效，只能用一次）</span>
           <input id="code" class="input" placeholder="8 位字母和数字" spellcheck="false" style="text-transform: uppercase"></label>
         <details id="pwd-box"><summary>没有配对码？用书库密码登录</summary>
@@ -32,8 +32,8 @@
       </form>
 
       <div id="linked" hidden>
-        <label class="field"><span>内网地址（在家时用）</span><input id="lan" class="input" spellcheck="false" placeholder="例如 http://192.168.1.10:8080"></label>
-        <label class="field"><span>Tailscale 地址（出门时用）</span><input id="remote" class="input" spellcheck="false" placeholder="例如 http://100.101.102.103:8080"></label>
+        <label class="field"><span>内网地址（在家时用）</span><input id="lan" class="input" spellcheck="false" placeholder="例如 http://192.168.1.10:8090"></label>
+        <label class="field"><span>Tailscale 地址（出门时用）</span><input id="remote" class="input" spellcheck="false" placeholder="例如 http://100.101.102.103:8090"></label>
         <p class="fine">插件先试内网地址，不通再走 Tailscale，和手机 App 一样自动切换。</p>
         <div class="row">
           <button id="save" class="btn" type="button">保存地址</button>

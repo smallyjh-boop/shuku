@@ -2,3 +2,6 @@
 tools
 **/*.db
 server/shuku
+android
+extension
+dist

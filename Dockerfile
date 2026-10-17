@@ -1,6 +1,8 @@
 # 书库 Shuku —— NAS 电子书管理与阅读
-# 普通版：docker build -t shuku .
-# 完整版（带 Calibre，可转换 DOCX/CHM/RTF 等，镜像大约大 600MB）：docker build --build-arg FULL=1 -t shuku:full .
+# 一般不用自己构建：GitHub Actions 打包好的镜像在 Releases 里（shuku-server-amd64/arm64.tar.gz），在 Container Station 导入即可。
+# 自己构建普通版：docker build -t localhost/shuku:latest .
+# 完整版（带 Calibre，可转换 DOCX/CHM/RTF 等，镜像大约大 600MB）：docker build --build-arg FULL=1 -t localhost/shuku:latest .
+# 发布时 Actions 先在同样的 golang:1.24-bookworm 里编译好 x86 和 ARM 两个版本，再用 --build-context build=... 替换下面的编译阶段。
 
 FROM golang:1.24-bookworm AS build
 WORKDIR /src

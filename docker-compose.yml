@@ -1,38 +1,29 @@
-# 威联通 Container Station：应用程序 → 创建 → 粘贴本文件（或 SSH 进 NAS 后 docker compose up -d --build）
-# 左边是 NAS 上的文件夹，按你的实际共享文件夹改；右边是容器里的路径，不要改
+# 书库 Shuku —— 威联通 Container Station 用
+#
+# 1. 先在 Container Station →“映像”→“导入”里导入镜像文件（Releases 里下载）：
+#      Intel / AMD 处理器的 NAS 用 shuku-server-amd64.tar.gz，ARM 处理器的用 shuku-server-arm64.tar.gz
+# 2. Container Station →“创建”→“创建应用程序”，名称填 shuku，把这整个文件粘贴进去 →“创建”
+#
+# 下面 volumes 里冒号左边是 NAS 上的文件夹，按你的实际共享文件夹改（要先在控制台里建好共享文件夹）；
+# 冒号右边是容器里的路径，不要改。
+# 自己从源码构建（SSH）：docker build -t localhost/shuku:latest . && docker compose up -d
 
 services:
   shuku:
-    build:
-      context: .
-      args:
-        FULL: "0"            # 改成 "1" 可以转换 DOCX、CHM、RTF 等冷门格式（镜像会大很多）
-    image: shuku:latest
+    image: localhost/shuku:latest
     container_name: shuku
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 浏览器打开 http://NAS的IP:8090。威联通系统自己的管理页面占用 8080，所以左边不要用 8080
+      - "8090:8080"
     environment:
-      - TZ=Asia/Shanghai
+      # 时区，影响“今天读了多久”等统计。在中国用 Asia/Shanghai
+      - TZ=Asia/Bangkok
       # 书库目录：名称:容器内路径:类型（book 图书 / comic 漫画）。只在第一次启动时生效，之后在网页“设置 → 书库目录”里改
       - SHUKU_LIBRARIES=图书:/books:book,漫画:/comics:comic
-      # 内网地址和 Tailscale 地址，客户端据此自动切换（也可以之后在网页设置里填）
-      - SHUKU_LAN_URL=http://192.168.1.10:8080
-      - SHUKU_REMOTE_URL=https://nas.your-tailnet.ts.net
-      # AI 识别书名（OpenAI 兼容接口，也可以之后在网页设置里填）
-      # - SHUKU_AI_BASE_URL=https://api.deepseek.com/v1
-      # - SHUKU_AI_API_KEY=sk-xxxx
-      # - SHUKU_AI_MODEL=deepseek-chat
+      # 内网地址、Tailscale 地址、AI 识别都在装好后的网页“设置”里填，这里不用改
     volumes:
-      - /share/Container/shuku:/data          # 数据库、封面、缓存（放 SSD 更快）
+      - /share/Container/shuku:/data          # 数据库、封面、缓存
       - /share/Books/投递:/inbox                # 投递目录：把书丢进来自动入库
       - /share/Books/图书:/books                # 整理好的电子书
       - /share/Books/漫画:/comics               # 整理好的漫画
-
-  # 想完全不出网，可以在 NAS 上跑本地模型（需要较强的 CPU / 显卡）
-  # ollama:
-  #   image: ollama/ollama
-  #   container_name: ollama
-  #   restart: unless-stopped
-  #   volumes:
-  #     - /share/Container/ollama:/root/.ollama

@@ -40,7 +40,7 @@ function appearance(ctx) {
 
 // ---------- 网络 ----------
 function network(s) {
-  const lan = h('input', { class: 'input', value: s.network?.lan_url || '', placeholder: 'http://192.168.1.10:8080' })
+  const lan = h('input', { class: 'input', value: s.network?.lan_url || '', placeholder: 'http://192.168.1.10:8090' })
   const remote = h('input', { class: 'input', value: s.network?.remote_url || '', placeholder: 'https://nas.tail1234.ts.net' })
   const status = h('div', { class: 'stack', style: { gap: '6px', marginTop: '4px' } })
   const cur = h('div', { class: 'status-line' })
@@ -79,7 +79,7 @@ function network(s) {
   }
   return sec('网络', '在家时走内网，出门自动切到 Tailscale。两个地址都填上，网页端和手机、手表客户端会自动选能连上的那个，内网优先。',
     h('div', { class: 'stack' },
-      h('label', { class: 'field' }, h('span', null, '内网地址'), lan, h('small', null, 'NAS 在局域网里的地址和端口，比如 http://192.168.1.10:8080')),
+      h('label', { class: 'field' }, h('span', null, '内网地址'), lan, h('small', null, 'NAS 在局域网里的地址和端口，比如 http://192.168.1.10:8090')),
       h('label', { class: 'field' }, h('span', null, 'Tailscale 地址'), remote, h('small', null, 'NAS 在 Tailscale 里的地址。用 MagicDNS 名称（nas.xxx.ts.net）或 100.x.x.x 都行；开了 tailscale serve 的话填 https 地址，iPhone 才能把书库添加到主屏幕')),
       cur,
       h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: saveNet }, '保存'), h('button', { class: 'btn', onclick: test }, icon('wifi'), '检测两个地址')),

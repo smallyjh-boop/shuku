@@ -1,8 +1,9 @@
-# 打包安卓 App、Wear OS 手表 App 和浏览器插件，打包好的文件发布成一个 Release。
+# 打包：NAS 服务器镜像（x86 和 ARM）、安卓 App、Wear OS 手表 App、浏览器插件，打包好的文件发布成一个 Release。
 # 只能手动运行：GitHub 仓库页面 → Actions → “打包 App 和插件” → Run workflow。平时推送代码不会打包。
 #
 # 为了省 Actions 分钟数和存储：只有一个任务，不建缓存（一次性打包时缓存反而多花时间），
-# 不上传 Artifacts（Release 附件不占 Actions 存储额度），超过 25 分钟自动停止。一般 4～6 分钟打完。
+# 不上传 Artifacts（Release 附件不占 Actions 存储额度），超过 30 分钟自动停止。
+# 全部打包大约 8～10 分钟；只改了一边时可以只打包 App 或只打包服务器，更省。
 #
 # 签名：默认用仓库里的 android/signing/shuku.jks。想换成自己的签名，在仓库
 # Settings → Secrets and variables → Actions 里添加：
@@ -13,6 +14,14 @@ name: 打包 App 和插件
 on:
   workflow_dispatch:
     inputs:
+      what:
+        description: 打包什么
+        type: choice
+        options:
+          - 全部
+          - 只打包手机、手表 App 和浏览器插件
+          - 只打包 NAS 服务器
+        default: 全部
       version:
         description: 版本号，只用数字和点，比如 1.0.1（留空就用 android/gradle.properties 里的）
         type: string
@@ -26,34 +35,22 @@ concurrency:
   group: shuku-build
   cancel-in-progress: false
 
+env:
+  APPS: "${{ inputs.what != '只打包 NAS 服务器' }}"
+  SERVER: "${{ inputs.what != '只打包手机、手表 App 和浏览器插件' }}"
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: 签名文件
-        env:
-          KEYSTORE_BASE64: ${{ secrets.SHUKU_KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/shuku.jks"
-            echo "SHUKU_KEYSTORE_FILE=$RUNNER_TEMP/shuku.jks" >> "$GITHUB_ENV"
-            echo "使用 Secrets 里的签名"
-          else
-            echo "没有设置 SHUKU_KEYSTORE_BASE64，使用仓库里的 android/signing/shuku.jks"
-          fi
-
       - name: 版本号
         env:
-          V: ${{ inputs.version }}
+          INPUT_V: ${{ inputs.version }}
         run: |
+          V="$INPUT_V"
           if [ -n "$V" ] && ! echo "$V" | grep -Eq '^[0-9]+(\.[0-9]+){0,3}$'; then
             echo "::error::版本号只能用数字和点，比如 1.0.1：$V"
             exit 1
@@ -66,8 +63,31 @@ jobs:
           fi
           grep '^shuku.version' android/gradle.properties
           echo "V=$(grep '^shuku.versionName=' android/gradle.properties | cut -d= -f2)" >> "$GITHUB_ENV"
+          mkdir -p dist
+
+      # ---------- 手机、手表 App 和浏览器插件 ----------
+
+      - uses: actions/setup-java@v4
+        if: env.APPS == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 签名文件
+        if: env.APPS == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SHUKU_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/shuku.jks"
+            echo "SHUKU_KEYSTORE_FILE=$RUNNER_TEMP/shuku.jks" >> "$GITHUB_ENV"
+            echo "使用 Secrets 里的签名"
+          else
+            echo "没有设置 SHUKU_KEYSTORE_BASE64，使用仓库里的 android/signing/shuku.jks"
+          fi
 
       - name: 打包手机和手表 APK
+        if: env.APPS == 'true'
         working-directory: android
         env:
           SHUKU_KEYSTORE_PASSWORD: ${{ secrets.SHUKU_KEYSTORE_PASSWORD }}
@@ -78,36 +98,107 @@ jobs:
           chmod +x gradlew
           # 两个 App 在一次 Gradle 里并行打包；不开守护进程、不建缓存
           ./gradlew --no-daemon --parallel --console=plain --stacktrace \
-            :app:assembleRelease :wear:assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"
-          mkdir -p ../dist
+            :app:assembleRelease :wear:assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
           cp app/build/outputs/apk/release/app-release.apk ../dist/shuku-android.apk
           cp wear/build/outputs/apk/release/wear-release.apk ../dist/shuku-wear.apk
+
+      - name: 打包浏览器插件
+        if: env.APPS == 'true'
+        run: |
+          cd extension
+          zip -r -X -q ../dist/shuku-extension.zip . -x '.*'
+
+      # ---------- NAS 服务器镜像 ----------
+
+      - name: 编译 NAS 服务器（x86 和 ARM）
+        if: env.SERVER == 'true'
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ctx/amd64/out" "$RUNNER_TEMP/ctx/arm64/out"
+          # 在和运行环境同样的 Debian bookworm 里编译（glibc 一致）；ARM 版用交叉编译器，比模拟快得多
+          docker run --rm -e V="$V" -v "$PWD/server:/src" -v "$RUNNER_TEMP/ctx:/ctx" -w /src golang:1.24-bookworm bash -ec '
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross > /dev/null
+            flags="-s -w -X main.version=$V"
+            # 两个版本同时编译（SQLite 的 C 代码编译是单线程的，并行能省下不少时间）
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -mod=vendor -tags sqlite_fts5 -trimpath -ldflags "$flags" -o /ctx/amd64/out/shuku . &
+            p1=$!
+            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -mod=vendor -tags sqlite_fts5 -trimpath -ldflags "$flags" -o /ctx/arm64/out/shuku . &
+            p2=$!
+            wait $p1
+            wait $p2
+          ' 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          file "$RUNNER_TEMP"/ctx/*/out/shuku
+
+      - uses: docker/setup-qemu-action@v3
+        if: env.SERVER == 'true'
+        with:
+          platforms: arm64
+
+      - name: 打包 NAS 服务器镜像并试运行
+        if: env.SERVER == 'true'
+        run: |
+          set -o pipefail
+          for arch in amd64 arm64; do
+            # 用根目录的 Dockerfile 做运行环境，编译阶段换成上一步编译好的程序
+            docker buildx build --platform "linux/$arch" --build-context build="$RUNNER_TEMP/ctx/$arch" \
+              -t localhost/shuku:latest -t "localhost/shuku:$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+            # 试运行：容器能启动、接口有响应才算打包成功
+            docker run -d --name shuku-test --platform "linux/$arch" -p 18080:8080 localhost/shuku:latest > /dev/null
+            ok=""
+            for i in $(seq 1 60); do
+              r=$(curl -fsS http://127.0.0.1:18080/api/ping 2>/dev/null || true)
+              case "$r" in *'"shuku"'*) ok=1; break ;; esac
+              sleep 2
+            done
+            echo "接口：$r"
+            # 网页也要能打开
+            page=$(curl -fsS http://127.0.0.1:18080/ 2>/dev/null || true)
+            case "$page" in *'<title>书库</title>'*) echo "网页：正常" ;; *) ok=""; echo "网页打不开" ;; esac
+            docker logs shuku-test 2>&1 | tail -n 20 | tee -a "$RUNNER_TEMP/build.log"
+            docker rm -f shuku-test > /dev/null
+            if [ -z "$ok" ]; then echo "::error::$arch 版镜像启动后没有响应"; exit 1; fi
+            docker save localhost/shuku:latest "localhost/shuku:$V" | gzip -6 > "dist/shuku-server-$arch.tar.gz"
+          done
+          cp docker-compose.yml dist/shuku-compose.yml
+
+      # ---------- 出错时 ----------
 
       - name: 打包出错时把出错的地方写进注释
         if: failure()
         run: |
-          f="$RUNNER_TEMP/gradle.log"
+          f="$RUNNER_TEMP/build.log"
           [ -f "$f" ] || exit 0
-          { grep -E "^e: |error:|What went wrong|Could not|FAILURE" -A6 "$f" | head -n 120; echo "------ 最后 40 行 ------"; tail -n 40 "$f"; } > "$RUNNER_TEMP/err.txt"
+          { grep -E "^e: |error:|ERROR|What went wrong|Could not|FAILURE" -A6 "$f" | head -n 120; echo "------ 最后 40 行 ------"; tail -n 40 "$f"; } > "$RUNNER_TEMP/err.txt"
           echo "::error title=打包出错::$(sed -e 's/%/%25/g' -e 's/\r//g' "$RUNNER_TEMP/err.txt" | awk '{printf "%s%%0A", $0}')"
 
-      - name: 打包浏览器插件
-        run: |
-          cd extension
-          zip -r -X -q ../dist/shuku-extension.zip . -x '.*'
+      # ---------- 发布 ----------
 
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          sha256sum *.apk *.zip | tee SHA256SUMS.txt
+          sha256sum * | tee SHA256SUMS.txt
           ls -l
-          gh release create "v$V-build${{ github.run_number }}" shuku-android.apk shuku-wear.apk shuku-extension.zip SHA256SUMS.txt \
+          {
+            if [ -f shuku-server-amd64.tar.gz ]; then
+              echo "**NAS 服务器**（威联通 Container Station）"
+              echo "- shuku-server-amd64.tar.gz：Intel / AMD 处理器的 NAS"
+              echo "- shuku-server-arm64.tar.gz：ARM 处理器的 NAS"
+              echo "- shuku-compose.yml：Container Station →“创建应用程序”时粘贴的内容"
+              echo
+            fi
+            if [ -f shuku-android.apk ]; then
+              echo "**手机、手表和电脑**"
+              echo "- shuku-android.apk：安卓手机 App（Android 8.0 及以上，点开安装）"
+              echo "- shuku-wear.apk：Wear OS 手表 App（Wear OS 3 及以上，用 adb 安装；和手机 App 同一个签名）"
+              echo "- shuku-extension.zip：Chrome / Edge 浏览器插件（解压后“加载已解压的扩展程序”）"
+              echo
+            fi
+            echo "SHA256SUMS.txt 是校验值。安装方法见 README。"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "v$V-build${{ github.run_number }}" * \
             --title "书库 $V（第 ${{ github.run_number }} 次打包）" \
             --target "${{ github.sha }}" \
-            --notes "- 手机 App：shuku-android.apk（Android 8.0 及以上，点开安装）
-          - Wear OS 手表 App：shuku-wear.apk（Wear OS 3 及以上，用 adb 安装）
-          - 浏览器插件：shuku-extension.zip（解压后在 Chrome / Edge 的扩展程序页面“加载已解压的扩展程序”）
-
-          手机和手表是同一个签名，可以互相通信。安装方法见 README。"
+            --notes-file "$RUNNER_TEMP/notes.md"
