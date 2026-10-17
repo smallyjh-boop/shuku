@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +123,10 @@ func urlQ(s string) string { return url.QueryEscape(s) }
 
 func fakeEdgeServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("Sec-MS-GEC") == "" || r.Header.Get("Origin") == "" {
+		q := r.URL.Query()
+		// 现在的服务端只认 v2 令牌（<16 位>-<64 位>）和 2- 开头的版本号
+		if !regexp.MustCompile(`^[0-9A-F]{16}-[0-9A-F]{64}$`).MatchString(q.Get("Sec-MS-GEC")) || !strings.HasPrefix(q.Get("Sec-MS-GEC-Version"), "2-") ||
+			q.Get("TrustedClientToken") == "" || q.Get("ConnectionId") == "" || r.Header.Get("Origin") == "" || !strings.HasPrefix(r.Header.Get("Cookie"), "muid=") {
 			http.Error(w, "forbidden", 403)
 			return
 		}
@@ -191,7 +195,7 @@ func TestEdgeProtocol(t *testing.T) {
 	if err != nil || string(b) != "ID3-part1-part2" {
 		t.Fatalf("%q %v", b, err)
 	}
-	if g := edgeGEC(); len(g) != 64 || strings.ToUpper(g) != g {
+	if g := edgeGEC(); len(g) != 81 || strings.ToUpper(g) != g || g[16] != '-' {
 		t.Error(g)
 	}
 }

@@ -3,14 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
-	"image"
 	"encoding/json"
 	"fmt"
+	"image"
 	"io"
 	"mime"
-	"os/exec"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +19,9 @@ import (
 )
 
 var appCtx context.Context = context.Background()
+
+// 删除的书移到书库里的这个文件夹，扫描时跳过
+const trashDir = "_回收站"
 
 func routes() http.Handler {
 	mux := http.NewServeMux()
@@ -369,7 +372,7 @@ func handleDeleteBook(w http.ResponseWriter, r *http.Request) {
 			lib = libraryByID(f.LibraryID)
 		}
 		if lib != nil {
-			relocate(f, filepath.Join(lib.Path, "_回收站", filepath.Base(f.Path)), batch, "删除《"+b.Title+"》")
+			relocate(f, filepath.Join(lib.Path, trashDir, filepath.Base(f.Path)), batch, "删除《"+b.Title+"》")
 		}
 	}
 	moveMu.Unlock()

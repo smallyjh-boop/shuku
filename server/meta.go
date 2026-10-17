@@ -333,7 +333,7 @@ func fb2Meta(b []byte) Meta {
 	var doc struct {
 		Desc struct {
 			Title struct {
-				Genres []string `xml:"genre"`
+				Genres  []string `xml:"genre"`
 				Authors []struct {
 					First  string `xml:"first-name"`
 					Middle string `xml:"middle-name"`

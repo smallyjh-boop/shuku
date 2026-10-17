@@ -26,10 +26,13 @@ export const ctx = {
 // ---------- 深浅色 ----------
 
 const darkMQ = matchMedia('(prefers-color-scheme: dark)')
+// 阅读器里手动开了夜间模式（10 小时内有效）时，书架也用深色
+function readerNightOn() {
+  try { const o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null'); return !!(o && o.on && Date.now() - o.at < 10 * 3600e3) } catch { return false }
+}
 export function applyAppearance() {
   const mode = ctx.appPrefs.appearance
-  const night = localStorage.getItem('shuku.night') === '1'
-  const dark = night || mode === 'dark' || (mode === 'system' && darkMQ.matches)
+  const dark = readerNightOn() || mode === 'dark' || (mode === 'system' && darkMQ.matches)
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   $('#theme-color').content = dark ? '#14181E' : '#F8F8F6'
 }
@@ -153,6 +156,7 @@ async function route() {
     return
   }
   readerMod?.closeReader?.()
+  applyAppearance()
   lastNonReader = hash
   if (!shell || !document.body.contains(shell)) buildShell()
   renderNav()
@@ -220,8 +224,10 @@ async function start() {
   initUploads(ctx)
   route()
   pollStatus()
-  setInterval(pollStatus, 6000)
+  // 重新登录时 start() 会再调用一次，计时器只建一个
+  pollTimer ||= setInterval(pollStatus, 6000)
 }
+let pollTimer = 0
 
 async function boot() {
   applyAppearance()

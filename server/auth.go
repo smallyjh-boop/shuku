@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -113,8 +114,22 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 var failMu sync.Mutex
 var fails = map[string][]time.Time{}
 
+// 客户端地址：经过本机反向代理（tailscale serve 等）时取 X-Forwarded-For 里的第一个
+func clientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	if p := net.ParseIP(ip); p != nil && p.IsLoopback() {
+		if xf := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); xf != "" {
+			return xf
+		}
+	}
+	return ip
+}
+
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := strings.Split(r.RemoteAddr, ":")[0]
+	ip := clientIP(r)
 	failMu.Lock()
 	recent := fails[ip][:0]
 	for _, t := range fails[ip] {
@@ -172,6 +187,11 @@ var handoffs = map[string]time.Time{}
 func handleHandoff(w http.ResponseWriter, r *http.Request) {
 	code := randToken(16)
 	handoffMu.Lock()
+	for c, t := range handoffs { // 顺手清掉过期的
+		if time.Since(t) > 2*time.Minute {
+			delete(handoffs, c)
+		}
+	}
 	handoffs[code] = time.Now()
 	handoffMu.Unlock()
 	writeJSON(w, 200, map[string]string{"code": code})

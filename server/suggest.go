@@ -261,7 +261,7 @@ func computeSuggestions() []Suggestion {
 			Title:  fmt.Sprintf("系列《%s》的 %d 本书分散在 %d 个文件夹", bs[0].series, len(bs), len(dirs)),
 			Detail: "建议按命名规则归到同一个系列文件夹",
 			Items:  items, Count: len(bs),
-			apply:  func(batch string) (int, error) { return organizeMany(ids, batch, "归拢系列") },
+			apply: func(batch string) (int, error) { return organizeMany(ids, batch, "归拢系列") },
 		})
 	}
 
@@ -296,7 +296,7 @@ func computeSuggestions() []Suggestion {
 			Title:  fmt.Sprintf("《%s》登记了 %d 次（%s）", bs[0].title, len(bs), strings.Join(fmts, "、")),
 			Detail: "建议合并成一本书，保留全部格式，阅读进度取最新的",
 			Items:  items, Count: len(bs),
-			apply:  func(batch string) (int, error) { return mergeBooks(target, others, batch) },
+			apply: func(batch string) (int, error) { return mergeBooks(target, others, batch) },
 		})
 	}
 
@@ -373,7 +373,7 @@ func computeSuggestions() []Suggestion {
 			Title:  fmt.Sprintf("%d 本书没有按命名规则存放", len(ns)),
 			Detail: "建议按「设置 → 书库」里的命名模板统一整理。可在操作记录里一键撤销",
 			Items:  nsItems, Count: len(ns),
-			apply:  func(batch string) (int, error) { return organizeMany(ns, batch, "按规范整理") },
+			apply: func(batch string) (int, error) { return organizeMany(ns, batch, "按规范整理") },
 		})
 	}
 

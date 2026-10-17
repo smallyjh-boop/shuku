@@ -19,7 +19,8 @@
       var p = JSON.parse(localStorage.getItem('shuku.app') || '{}')
       var mode = p.appearance || 'system'
       var dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
-      if (localStorage.getItem('shuku.night') === '1') dark = true
+      var o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null')
+      if (o && o.on && Date.now() - o.at < 36e6) dark = true
       document.documentElement.dataset.theme = dark ? 'dark' : 'light'
     } catch (e) {}
   })()

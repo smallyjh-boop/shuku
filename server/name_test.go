@@ -54,3 +54,16 @@ func TestSplitChapters(t *testing.T) {
 		t.Errorf("%+v", chs)
 	}
 }
+
+func TestCopyName(t *testing.T) {
+	for _, n := range []string{"sanTi1 - 副本.epub", "a (1).epub", "b（2）.txt", "x - Copy.pdf", "y_copy.mobi", "三体 - 拷贝.epub"} {
+		if !isCopyName("/inbox/" + n) {
+			t.Error("应识别为副本：", n)
+		}
+	}
+	for _, n := range []string{"sanTi1.epub", "copyright.epub", "三体(2008).epub", "第1卷.cbz"} {
+		if isCopyName("/inbox/" + n) {
+			t.Error("不是副本：", n)
+		}
+	}
+}

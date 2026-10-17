@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/jpeg"
 	_ "image/gif"
+	"image/jpeg"
 	_ "image/png"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +399,8 @@ func processInbox(ctx context.Context) {
 	inbox.pending = total
 	inbox.mu.Unlock()
 	sortNatural(ready)
+	// 同一个文件有多份时，先处理不带“副本”“(1)”的那份，重复的副本移到 _重复
+	sort.SliceStable(ready, func(i, j int) bool { return !isCopyName(ready[i]) && isCopyName(ready[j]) })
 	for _, p := range ready {
 		if ctx.Err() != nil {
 			return
@@ -443,6 +447,10 @@ func processInbox(ctx context.Context) {
 		removeEmptyParents(filepath.Dir(p))
 	}
 }
+
+var copyNameRe = regexp.MustCompile(`(?i)(副本|拷贝|复制|[ _-]copy\b|\(\d\)|（\d）|\[\d\])[^/\\]*$`)
+
+func isCopyName(p string) bool { return copyNameRe.MatchString(filepath.Base(p)) }
 
 func ifs(c bool, a, b string) string {
 	if c {
@@ -528,7 +536,8 @@ func scanLibraries(ctx context.Context) {
 				return nil
 			}
 			if e.IsDir() {
-				if p != lib.Path && skipName(e.Name()) {
+				// 回收站里是删掉的书，不再登记
+				if p != lib.Path && (skipName(e.Name()) || e.Name() == trashDir) {
 					return filepath.SkipDir
 				}
 				return nil

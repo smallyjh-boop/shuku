@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -21,8 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"math"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -265,21 +264,17 @@ const edgeToken = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
 
 var (
 	edgeWSS      = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1"
-	edgeVersion  = "130.0.2849.68"
+	edgeVersion  = "143.0.3650.75" // 和 edge-tts 保持一致；可以用环境变量 SHUKU_EDGE_VERSION 覆盖
 	edgeSkewMu   sync.Mutex
 	edgeSkewSecs int64
 )
 
-// Sec-MS-GEC：按 5 分钟取整的 Windows 时间戳 + 令牌 的 SHA256
+// Sec-MS-GEC 令牌：按 5 分钟取整的时间 + 固定令牌，v2 算法见 edge_drm.go
 func edgeGEC() string {
 	edgeSkewMu.Lock()
 	skew := edgeSkewSecs
 	edgeSkewMu.Unlock()
-	t := time.Now().Unix() + skew + 11644473600
-	t -= t % 300
-	ticks := uint64(t) * 10000000
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d%s", ticks, edgeToken)))
-	return strings.ToUpper(hex.EncodeToString(sum[:]))
+	return edgeGECv2(time.Now().Unix() + skew)
 }
 
 func edgeDate() string {
@@ -311,13 +306,14 @@ func edgeSynthOnce(ctx context.Context, text, voice string, speed float64) ([]by
 		edgeVersion = v
 	}
 	connID := hex.EncodeToString(randBytes(16))
-	u := fmt.Sprintf("%s?TrustedClientToken=%s&Sec-MS-GEC=%s&Sec-MS-GEC-Version=1-%s&ConnectionId=%s", edgeWSS, edgeToken, edgeGEC(), edgeVersion, connID)
+	u := fmt.Sprintf("%s?TrustedClientToken=%s&ConnectionId=%s&Sec-MS-GEC=%s&Sec-MS-GEC-Version=2-%s", edgeWSS, edgeToken, connID, edgeGEC(), edgeVersion)
 	major := strings.Split(edgeVersion, ".")[0]
 	h := http.Header{}
 	h.Set("Pragma", "no-cache")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
 	h.Set("User-Agent", fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36 Edg/%s.0.0.0", major, major))
+	h.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	h.Set("Accept-Language", "en-US,en;q=0.9")
 	h.Set("Cookie", "muid="+strings.ToUpper(hex.EncodeToString(randBytes(16)))+";")
 	ws, resp, err := wsDial(ctx, u, h)

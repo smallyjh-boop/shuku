@@ -33,20 +33,20 @@ var (
 )
 
 type Candidate struct {
-	Source      string   `json:"source"`
-	Title       string   `json:"title"`
-	OrigTitle   string   `json:"original_title"`
-	Author      string   `json:"author"`
-	Translator  string   `json:"translator"`
-	Year        int      `json:"year"`
-	Publisher   string   `json:"publisher"`
-	ISBN        string   `json:"isbn"`
-	Description string   `json:"description"`
-	Cover       string   `json:"cover"`
-	Tags        []string `json:"tags"`
-	Language    string   `json:"language"`
-	Link        string   `json:"link"`
-	Score       float64  `json:"score"`
+	Source      string                                  `json:"source"`
+	Title       string                                  `json:"title"`
+	OrigTitle   string                                  `json:"original_title"`
+	Author      string                                  `json:"author"`
+	Translator  string                                  `json:"translator"`
+	Year        int                                     `json:"year"`
+	Publisher   string                                  `json:"publisher"`
+	ISBN        string                                  `json:"isbn"`
+	Description string                                  `json:"description"`
+	Cover       string                                  `json:"cover"`
+	Tags        []string                                `json:"tags"`
+	Language    string                                  `json:"language"`
+	Link        string                                  `json:"link"`
+	Score       float64                                 `json:"score"`
 	detail      func(ctx context.Context, c *Candidate) // 需要时再取详情（简介、ISBN）
 }
 
@@ -711,6 +711,9 @@ func handleEnrichBook(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	if cands == nil {
 		cands = []*Candidate{}
+	}
+	if errs == nil {
+		errs = []string{}
 	}
 	writeJSON(w, 200, map[string]any{"candidates": cands, "errors": errs})
 }

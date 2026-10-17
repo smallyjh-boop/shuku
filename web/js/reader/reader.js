@@ -109,7 +109,7 @@ class Reader {
     this.loading.remove()
     this.applyPrefs()
     this.drawPanel()
-    this.ttsBtn.hidden = !this.engine.ttsSegments
+    this.ttsBtn.hidden = this.ttsTool.hidden = !this.engine.ttsSegments // 漫画没有文字，不显示听书
     // 从书内搜索结果跳过来：定位到那一章并找到那句话
     const q = this.params.get('q')
     if (q && this.engine.find) {
@@ -119,7 +119,7 @@ class Reader {
     this.startTimeTracking()
     // 第一次打开时短暂显示工具栏，让人知道在哪
     this.showUI(true)
-    this.uiTimer = setTimeout(() => this.showUI(false), 1800)
+    this.uiTimer = setTimeout(() => { if (!this.panel.classList.contains('show') && !this.sheet.classList.contains('show')) this.showUI(false) }, 1800)
   }
 
   fail(msg) {
@@ -156,7 +156,7 @@ class Reader {
         tool('list', '目录', () => this.togglePanel()),
         tool('back', '上一页', () => this.engine?.prev()),
         tool('next', '下一页', () => this.engine?.next()),
-        tool('headphones', '听书', () => this.toggleNarration()),
+        (this.ttsTool = tool('headphones', '听书', () => this.toggleNarration())),
         tool('expand', '全屏', () => this.fullscreen()),
         tool('type', '设置', () => this.toggleSheet())))
     this.panelTitle = h('div', { class: 't' })
@@ -340,8 +340,8 @@ class Reader {
 
   toggleNight() {
     const night = !this.theme.dark
+    // 手动切换在 10 小时内有效；书架界面也会跟着变深，避免从阅读器退出时被白屏晃眼
     localStorage.setItem('shuku.nightOverride', JSON.stringify({ on: night, at: Date.now() }))
-    localStorage.setItem('shuku.night', night ? '1' : '0')
     this.applyTheme()
     this.drawSheet()
     toast(night ? '已切换到夜间模式' : '已切换到日间模式', { duration: 1400 })
@@ -349,6 +349,7 @@ class Reader {
 
   // ---------- 侧栏：目录、书签、搜索 ----------
   togglePanel(tab) {
+    clearTimeout(this.uiTimer) // 刚打开书时工具栏会自动隐藏，用户已经在操作就不要再收起面板
     const show = !this.panel.classList.contains('show') || tab
     this.sheet.classList.remove('show')
     this.panel.classList.toggle('show', !!show)
@@ -425,6 +426,7 @@ class Reader {
 
   // ---------- 阅读设置 ----------
   toggleSheet() {
+    clearTimeout(this.uiTimer)
     const show = !this.sheet.classList.contains('show')
     this.panel.classList.remove('show')
     if (show) this.drawSheet()

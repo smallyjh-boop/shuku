@@ -261,13 +261,18 @@ func epubSections(p string) ([]Section, error) {
 }
 
 func pdfSections(p string) ([]Section, error) {
-	bin, err := exec.LookPath("mutool")
-	if err != nil {
-		return nil, fmt.Errorf("服务器没有安装 mutool，PDF 跳过全文索引")
-	}
 	ctx, cancel := context.WithTimeout(appCtx, 3*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "draw", "-q", "-F", "txt", "-o", "-", p).Output()
+	var out []byte
+	var err error
+	// 两种工具输出的文字都用换页符分隔每一页
+	if bin, e := exec.LookPath("mutool"); e == nil {
+		out, err = exec.CommandContext(ctx, bin, "draw", "-q", "-F", "txt", "-o", "-", p).Output()
+	} else if bin, e := exec.LookPath("pdftotext"); e == nil {
+		out, err = exec.CommandContext(ctx, bin, "-q", "-enc", "UTF-8", p, "-").Output()
+	} else {
+		return nil, fmt.Errorf("服务器没有安装 mutool 或 pdftotext，PDF 跳过全文索引")
+	}
 	if err != nil && len(out) == 0 {
 		return nil, fmt.Errorf("提取 PDF 文字失败")
 	}
