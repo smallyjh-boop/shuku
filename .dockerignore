@@ -1,0 +1,4 @@
+.git
+tools
+**/*.db
+server/shuku
