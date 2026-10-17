@@ -1,11 +1,17 @@
-# 书库 Shuku —— 威联通 Container Station 用
+# 书库 Shuku —— 威联通 Container Station 用（和 NAS 上其他程序一样用宿主机网络）
 #
-# 1. 先在 Container Station →“映像”→“导入”里导入镜像文件（Releases 里下载）：
-#      Intel / AMD 处理器的 NAS 用 shuku-server-amd64.tar.gz，ARM 处理器的用 shuku-server-arm64.tar.gz
-# 2. Container Station →“应用程序”→“创建”（旧版是“创建”→“创建应用程序”），名称填 shuku，把这整个文件粘贴进去 →“创建”
+# 1. Container Station →“映像”→“导入”，导入 Releases 里的 shuku-server-amd64.tar.gz
+#    （TS-453D 是 Intel 处理器，用 amd64；ARM 处理器的 NAS 才用 arm64）
+# 2. Container Station →“应用程序”→“创建”（旧版是“创建”→“创建应用程序”），名称填 shuku，
+#    把这整个文件粘贴进去 →“创建”
 #
-# 下面 volumes 里冒号左边是 NAS 上的文件夹，按你的实际共享文件夹改（要先在控制台里建好共享文件夹）；
-# 冒号右边是容器里的路径，不要改。
+# 网络：network_mode: host，书库直接监听 NAS 的 27200 端口，不经过 Docker 的端口转发
+# （威联通上 Docker 的端口转发不通，用桥接网络的容器访问不到、也上不了网）。
+# NAS 上已经占用的端口：8080（QTS）、8720/8721/8730（泰好说）、8780/8781（极速 GTD）、8790（3D 运营管理系统）、
+# 8791（运营分析系统）、18765（3D 选品工具）、27180/27190（流水账房个人版/公司版）。
+# 27200 也被占用的话，把 SHUKU_PORT 和下面两个地址里的端口一起改。
+#
+# volumes 里冒号左边是 NAS 上的文件夹（先在控制台里建好共享文件夹 Books），冒号右边是容器里的路径，不要改。
 # 自己从源码构建（SSH）：docker build -t localhost/shuku:latest . && docker compose up -d
 
 services:
@@ -13,15 +19,16 @@ services:
     image: localhost/shuku:latest
     container_name: shuku
     restart: unless-stopped
-    ports:
-      # 浏览器打开 http://NAS的IP:8090。威联通系统自己的管理页面占用 8080，所以左边不要用 8080
-      - "8090:8080"
+    network_mode: host                         # 直接用 NAS 的网络，不做端口映射
     environment:
-      # 时区，影响“今天读了多久”等统计。在中国用 Asia/Shanghai
-      - TZ=Asia/Bangkok
+      - SHUKU_PORT=27200                       # 浏览器打开 http://192.168.31.200:27200
+      - TZ=Asia/Bangkok                        # 时区，影响“今天读了多久”等统计
       # 书库目录：名称:容器内路径:类型（book 图书 / comic 漫画）。只在第一次启动时生效，之后在网页“设置 → 书库目录”里改
       - SHUKU_LIBRARIES=图书:/books:book,漫画:/comics:comic
-      # 内网地址、Tailscale 地址、AI 识别都在装好后的网页“设置”里填，这里不用改
+      # 内网地址和 Tailscale 地址：手机、手表、插件连上后自动在两者之间切换（之后也可以在网页“设置 → 网络”里改）
+      - SHUKU_LAN_URL=http://192.168.31.200:27200
+      - SHUKU_REMOTE_URL=http://100.81.34.58:27200
+      # AI 识别的 Key 在装好后的网页“设置 → 识别与整理”里填，不用写在这里
     volumes:
       - /share/Container/shuku:/data          # 数据库、封面、缓存
       - /share/Books/投递:/inbox                # 投递目录：把书丢进来自动入库

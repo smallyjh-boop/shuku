@@ -17,8 +17,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tzdata mupdf-tools p7zip-full djvulibre-bin \
  && if [ "$FULL" = "1" ]; then apt-get install -y --no-install-recommends calibre; fi \
  && rm -rf /var/lib/apt/lists/*
-ENV TZ=Asia/Shanghai \
-    SHUKU_PORT=8080 \
+# 威联通上要用宿主机网络（network_mode: host）运行，书库直接监听 SHUKU_PORT；默认 27200，避开 QTS 自己的 8080
+ENV TZ=Asia/Bangkok \
+    SHUKU_PORT=27200 \
     SHUKU_DATA=/data \
     SHUKU_INBOX=/inbox \
     SHUKU_WEB=/app/web \
@@ -26,6 +27,6 @@ ENV TZ=Asia/Shanghai \
 COPY --from=build /out/shuku /app/shuku
 COPY web/ /app/web/
 VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 27200
 HEALTHCHECK --interval=60s --timeout=5s CMD ["/app/shuku", "-health"]
 ENTRYPOINT ["/app/shuku"]

@@ -144,7 +144,8 @@ jobs:
             docker buildx build --platform "linux/$arch" --build-context build="$RUNNER_TEMP/ctx/$arch" \
               -t localhost/shuku:latest -t "localhost/shuku:$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
             # 试运行：容器能启动、接口有响应才算打包成功
-            docker run -d --name shuku-test --platform "linux/$arch" -p 18080:8080 localhost/shuku:latest > /dev/null
+            # 和 NAS 上一样用宿主机网络，书库直接监听 SHUKU_PORT
+            docker run -d --name shuku-test --platform "linux/$arch" --network host -e SHUKU_PORT=18080 localhost/shuku:latest > /dev/null
             ok=""
             for i in $(seq 1 60); do
               r=$(curl -fsS http://127.0.0.1:18080/api/ping 2>/dev/null || true)

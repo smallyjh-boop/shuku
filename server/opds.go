@@ -1,7 +1,7 @@
 package main
 
 // OPDS 1.2 书目：KOReader、静读天下、Panels、Librera 等阅读器可以直接浏览、搜索、下载书库里的书
-// 地址：http(s)://NAS:8090/opds（威联通上映射的端口）   用户名随意，密码就是书库密码
+// 地址：http(s)://NAS:27200/opds（SHUKU_PORT，威联通上用宿主机网络直接监听）   用户名随意，密码就是书库密码
 
 import (
 	"crypto/sha256"

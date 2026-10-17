@@ -15,7 +15,7 @@ class ConnectActivity : Activity() {
         super.onCreate(savedInstanceState)
         val (_, col) = Ui.page(this)
         col.addView(Ui.text(this, "手动连接", 16f, bold = true, center = true))
-        val addr = edit(col, "书库地址，如 192.168.1.10:8090", app.config.lan.ifEmpty { app.config.remote }.removePrefix("http://"),
+        val addr = edit(col, "书库地址，如 192.168.1.10:27200", app.config.lan.ifEmpty { app.config.remote }.removePrefix("http://"),
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
         val code = edit(col, "配对码", "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
         col.addView(Ui.text(this, "配对码在网页的“设置 → 手机、手表和浏览器插件 → 显示配对二维码”里，10 分钟内有效。", 11f, Ui.INK2, center = true), Ui.lp(this, 6f))
