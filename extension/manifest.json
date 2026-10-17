@@ -13,6 +13,6 @@
   },
   "options_page": "options.html",
   "background": { "service_worker": "background.js", "type": "module" },
-  "permissions": ["storage", "contextMenus", "scripting", "activeTab", "notifications", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["storage", "contextMenus", "scripting", "activeTab", "notifications", "declarativeNetRequestWithHostAccess", "alarms"],
   "host_permissions": ["<all_urls>"]
 }

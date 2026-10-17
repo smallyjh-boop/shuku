@@ -107,11 +107,15 @@ CREATE TABLE IF NOT EXISTS ignored_suggestions (key TEXT PRIMARY KEY, created_at
 
 func openDB(path string) error {
 	var err error
-	db, err = sql.Open("sqlite3", "file:"+path+"?_busy_timeout=10000&_journal_mode=WAL&_foreign_keys=on&_synchronous=NORMAL")
+	// _txlock=immediate：事务一开始就拿写锁，不会读到一半升级写锁失败
+	db, err = sql.Open("sqlite3", "file:"+path+"?_busy_timeout=30000&_journal_mode=WAL&_foreign_keys=on&_synchronous=NORMAL&_txlock=immediate")
 	if err != nil {
 		return err
 	}
-	db.SetMaxOpenConns(1)
+	// WAL 模式下读和写可以同时进行。以前只给 1 个连接，入库、建全文索引占着连接时，
+	// 网页的查询全都排队，书多的时候整个书库像卡死一样
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	if _, err = db.Exec(schema); err != nil {
 		return err
 	}

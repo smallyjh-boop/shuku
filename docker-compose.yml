@@ -1,25 +1,33 @@
 # 书库 Shuku —— 威联通 Container Station 用（和 NAS 上其他程序一样用宿主机网络）
 #
-# 1. Container Station →“映像”→“导入”，导入 Releases 里的 shuku-server-amd64.tar.gz
-#    （TS-453D 是 Intel 处理器，用 amd64；ARM 处理器的 NAS 才用 arm64）
-# 2. Container Station →“应用程序”→“创建”（旧版是“创建”→“创建应用程序”），名称填 shuku，
-#    把这整个文件粘贴进去 →“创建”
+# 安装：Container Station →“应用程序”→“创建”（旧版是“创建”→“创建应用程序”），名称填 shuku，把这整个文件粘贴进去 →“创建”。
+# 已经装过：在“应用程序”里 shuku 的菜单点“编辑”，换成这个文件 →“更新”。书、数据库、设置都在下面的文件夹里，不会丢。
+#
+# 镜像在 ghcr.io/smallyjh-boop/shuku（私有）。NAS 已经用泰好说、记忆训练营那个 GitHub 只读令牌登录过 ghcr.io，不用再登录。
+#
+# 在线升级：NAS 上已有的更新服务（taihaoshuo-updater）每分钟检查一次带下面 labels 的容器，
+# GitHub Actions 打包出新版本后一分钟内自动换上；网页“设置 → 版本与升级”里点“检查更新”可以立即检查。
+# 手机 App、手表 App、浏览器插件的新安装包也打在镜像里，各端从书库检查更新、下载。
 #
 # 网络：network_mode: host，书库直接监听 NAS 的 27200 端口，不经过 Docker 的端口转发
 # （威联通上 Docker 的端口转发不通，用桥接网络的容器访问不到、也上不了网）。
-# NAS 上已经占用的端口：8080（QTS）、8720/8721/8730（泰好说）、8780/8781（极速 GTD）、8790（3D 运营管理系统）、
+# NAS 上已经占用的端口：8080（QTS）、8720/8721/8730/8741（泰好说和它的更新服务）、8780/8781（极速 GTD）、8790（3D 运营管理系统）、
 # 8791（运营分析系统）、18765（3D 选品工具）、27180/27190（流水账房个人版/公司版）。
 # 27200 也被占用的话，把 SHUKU_PORT 和下面两个地址里的端口一起改。
 #
 # volumes 里冒号左边是 NAS 上的文件夹（先在控制台里建好共享文件夹 books，注意是小写），冒号右边是容器里的路径，不要改。
-# 自己从源码构建（SSH）：docker build -t localhost/shuku:latest . && docker compose up -d
+#
+# 没法从 ghcr.io 下载时：Container Station →“映像”→“导入” Releases 里的 shuku-server-amd64.tar.gz
+# （导入后的名字就是 ghcr.io/smallyjh-boop/shuku:latest），再用这个文件创建。
 
 services:
   shuku:
-    image: localhost/shuku:latest
+    image: ghcr.io/smallyjh-boop/shuku:latest
     container_name: shuku
     restart: unless-stopped
     network_mode: host                         # 直接用 NAS 的网络，不做端口映射
+    labels:
+      - com.centurylinklabs.watchtower.enable=true   # 让 NAS 上已有的更新服务（taihaoshuo-updater）自动升级书库
     environment:
       - SHUKU_PORT=27200                       # 浏览器打开 http://192.168.31.200:27200
       - TZ=Asia/Bangkok                        # 时区，影响“今天读了多久”等统计
@@ -28,6 +36,9 @@ services:
       # 内网地址和 Tailscale 地址：手机、手表、插件连上后自动在两者之间切换（之后也可以在网页“设置 → 网络”里改）
       - SHUKU_LAN_URL=http://192.168.31.200:27200
       - SHUKU_REMOTE_URL=http://100.81.34.58:27200
+      # 网页上“检查更新”用它通知更新服务马上检查；令牌和 taihaoshuo-updater 的 WATCHTOWER_HTTP_API_TOKEN 一样
+      - SHUKU_UPDATE_URL=http://127.0.0.1:8741
+      - SHUKU_UPDATE_TOKEN=caa8aec67739a959035e4cc81b249305
       # AI 识别的 Key 在装好后的网页“设置 → 识别与整理”里填，不用写在这里
     volumes:
       - /share/Container/shuku:/data          # 数据库、封面、缓存

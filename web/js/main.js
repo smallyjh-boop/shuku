@@ -201,9 +201,11 @@ addEventListener('hashchange', route)
 // ---------- 后台动态：入库完成后提示并刷新 ----------
 
 let lastEvent = 0
+let lastRefresh = 0, refreshPending = false, wasBusy = false, upgradeNoticed = false
 async function pollStatus() {
   try {
     const s = await api('/api/status')
+    const busy = !!(s.inbox.pending || s.scan.running)
     const side = $('#side-status')
     if (side) {
       const parts = []
@@ -213,11 +215,25 @@ async function pollStatus() {
     }
     if (lastEvent && s.last_event > lastEvent) {
       const evs = await api('/api/events?since=' + lastEvent)
-      for (const e of evs.slice(0, 4).reverse()) {
-        toast(e.message, e.book_id ? { action: { label: '查看', run: () => ctx.openBook(e.book_id) } } : {})
-      }
+      // 一次放进很多书时，只提示最新的几条，其余的合成一条，不刷屏
+      const show = evs.length > 4 ? evs.slice(0, 3) : evs
+      for (const e of show.slice().reverse()) toast(e.message, e.book_id ? { action: { label: '查看', run: () => ctx.openBook(e.book_id) } } : {})
+      if (evs.length > show.length) toast(`另外还处理好了 ${evs.length - show.length} 个文件`)
       await ctx.refreshFacets()
+      refreshPending = true
+    }
+    // 书架刷新：入库进行中最多 20 秒刷新一次；往下翻着看时先不刷新，免得跳回顶部；处理完再刷新一次
+    const due = !busy || Date.now() - lastRefresh > 20000 || (wasBusy && !busy)
+    if (refreshPending && due && scrollY < 600) {
+      refreshPending = false
+      lastRefresh = Date.now()
       currentView?.refresh?.()
+    }
+    wasBusy = busy
+    // 书库升级了（NAS 上的更新服务换了新版本）：提示刷新页面
+    if (s.version && ctx.settings?.version && s.version !== ctx.settings.version && !upgradeNoticed) {
+      upgradeNoticed = true
+      toast(`书库已升级到 ${s.version}`, { action: { label: '刷新', run: () => location.reload() }, duration: 600000 })
     }
     lastEvent = s.last_event
   } catch {}

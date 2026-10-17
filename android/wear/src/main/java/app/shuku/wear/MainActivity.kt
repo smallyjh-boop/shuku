@@ -27,6 +27,7 @@ class MainActivity : Activity() {
     private var ttsBox: LinearLayout? = null
     private var listBox: LinearLayout? = null
     private var statusView: TextView? = null
+    private var updateView: TextView? = null
     private var shownConfigured: Boolean? = null
     private var loadedAt = 0L
     private var loading = false
@@ -124,6 +125,7 @@ class MainActivity : Activity() {
     private fun home() {
         col.addView(Ui.text(this, app.config.name.ifEmpty { "书库" }, 17f, bold = true, center = true, maxLines = 1))
         statusView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 2f)) }
+        updateView = Ui.text(this, "", 12f, Ui.ACCENT, center = true).apply { visibility = View.GONE }.also { col.addView(it, Ui.lp(this, 6f)) }
         ttsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -170,7 +172,10 @@ class MainActivity : Activity() {
                 app.flushPending()
                 app.json("/api/books?reading=1&limit=20")
             }
+            // 书库上有新的手表 App 时提示（手表不能自己装，要在手机上点“更新手表”）
+            val wear = if (res.isSuccess) runCatching { app.json("/api/clients", 8000).optJSONObject("wear") }.getOrNull() else null
             ui {
+                showUpdate(wear)
                 loading = false
                 val e = res.exceptionOrNull()
                 if (e is WearApp.Unauthorized) {
@@ -188,6 +193,14 @@ class MainActivity : Activity() {
                 showBooks(items)
             }
         }
+    }
+
+    private fun showUpdate(w: JSONObject?) {
+        val v = updateView ?: return
+        if (w != null && w.optInt("versionCode") > BuildConfig.VERSION_CODE) {
+            v.text = "手表 App 有新版本 ${w.optString("versionName")}。在手机书库 App 的“设置 → 版本与升级”里点“更新手表”"
+            v.visibility = View.VISIBLE
+        } else v.visibility = View.GONE
     }
 
     private fun showBooks(items: JSONArray) {

@@ -8,7 +8,7 @@ Google Books、Bangumi、AI、语音接口），然后从接口和网页两方�
 结果：终端里逐项打印，汇总写到 $E2E_DIR/report.txt，截图在 $E2E_DIR/shots/
 需要：Go、Python 的 requests / Pillow / reportlab / playwright，以及 ffmpeg（可选，生成试听用的 MP3）
 """
-import glob, io, json, os, re, shutil, signal, subprocess, sys, threading, time, traceback, urllib.parse, zipfile
+import glob, hashlib, io, json, os, re, shutil, signal, subprocess, sys, threading, time, traceback, urllib.parse, zipfile
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -41,7 +41,8 @@ def section(name):
 
 # ---------------------------------------------------------------- 模拟服务
 
-TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG = [], [], [], [], [], []
+TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG, WT_LOG = [], [], [], [], [], [], []
+WT_TOKEN = "wt-test-token"
 # 浏览器插件测试：这些网站的域名在浏览器里指向模拟服务（--host-resolver-rules），书库服务器解析不到它们
 EXT_SITES = ["www.gutenberg.org", "archive.org", "standardebooks.org", "zh.wikisource.org"]
 TONE = b""
@@ -289,6 +290,9 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, TONE, "audio/mpeg")
         if p == "/tts-bad/v1/audio/speech":
             return self.send(500, {"error": "engine down"})
+        if p == "/watchtower/v1/update":
+            WT_LOG.append(self.headers.get("Authorization", ""))
+            return self.send(200 if self.headers.get("Authorization") == "Bearer " + WT_TOKEN else 401, b"", "text/plain")
         if p == "/bgm/v0/search/subjects":
             j = json.loads(raw or b"{}")
             if "进击" in j.get("keyword", ""):
@@ -385,6 +389,7 @@ def setup(fresh=True):
         os.makedirs(SHOTS)
         os.makedirs(os.path.join(T, "remote"))
     make_assets()
+    make_clients()
     print("构建服务端…", flush=True)
     env = dict(os.environ, GOPROXY="off", GOFLAGS="-mod=vendor")
     subprocess.run(["go", "build", "-tags", "sqlite_fts5", "-o", os.path.join(T, "shuku-e2e-server"), "."], cwd=os.path.join(ROOT, "server"), check=True, env=env)
@@ -399,10 +404,27 @@ def setup(fresh=True):
                SHUKU_GOOGLE_BASE=MOCK + "/google", SHUKU_BANGUMI_BASE=MOCK + "/bgm", SHUKU_EDGE_WSS="ws://127.0.0.1:9/none",
                SHUKU_LAN_URL=BASE, SHUKU_REMOTE_URL="",
                SHUKU_CATALOG_GUTENBERG=MOCK + "/opds/root.xml", SHUKU_CATALOG_IA=MOCK + "/ia",
-               SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export")
+               SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export",
+               SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN)
     log = open(os.path.join(T, "server.log"), "w")
     server_proc = subprocess.Popen([os.path.join(T, "shuku-e2e-server")], cwd=T, env=env, stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: requests.get(BASE + "/api/ping", timeout=2).ok, 20, what="服务器启动")
+
+
+NEW = "9.9.9.99"  # 书库里“新版本”的各端安装包
+
+
+def make_clients():
+    d = os.path.join(T, "clients")
+    os.makedirs(d, exist_ok=True)
+    files = {"shuku-android.apk": b"PK-android-" + os.urandom(64), "shuku-wear.apk": b"PK-wear-" + os.urandom(64), "shuku-extension.zip": b"PK-ext-" + os.urandom(64)}
+    info = {}
+    for name, data in files.items():
+        open(os.path.join(d, name), "wb").write(data)
+        info[name] = {"file": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    json.dump({"version": NEW, "android": {**info["shuku-android.apk"], "versionCode": 99, "versionName": NEW},
+               "wear": {**info["shuku-wear.apk"], "versionCode": 100099, "versionName": NEW},
+               "extension": {**info["shuku-extension.zip"], "version": NEW}}, open(os.path.join(d, "clients.json"), "w"))
 
 
 def teardown():
@@ -755,6 +777,29 @@ def test_clients():
     check("清空回收站", j("GET", "/api/trash")["files"] == 0)
 
 
+def test_update():
+    global TOKEN
+    section("在线升级")
+    saved, TOKEN = TOKEN, ""
+    r = api("GET", "/api/clients")
+    c = r.json()
+    check("版本信息不用登录、能跨域读", r.headers.get("Access-Control-Allow-Origin") == "*" and c["server"] and c["app"] == "shuku", c)
+    check("各端的版本和下载地址", c["android"]["versionCode"] == 99 and c["android"]["url"] == "/dl/shuku-android.apk" and c["wear"]["versionCode"] == 100099 and c["extension"]["version"] == NEW, c)
+    apk = api("GET", "/dl/shuku-android.apk")
+    check("下载手机 App（校验值对得上）", hashlib.sha256(apk.content).hexdigest() == c["android"]["sha256"] and "android.package-archive" in apk.headers["Content-Type"], apk.headers.get("Content-Type"))
+    check("别的文件不能下载", api("GET", "/dl/clients.json", 404).status_code == 404)
+    check("版本与升级要登录", api("GET", "/api/update", 401).status_code == 401)
+    TOKEN = saved
+    u = j("GET", "/api/update")
+    check("版本与升级：服务器版本、已开启一键升级", u["version"] == c["server"] and u["updater"] is True and u["clients"]["android"]["versionName"] == NEW, u)
+    n = len(WT_LOG)
+    r = j("POST", "/api/update/check")
+    check("检查更新：带着令牌通知更新服务", WT_LOG[n:] == ["Bearer " + WT_TOKEN], WT_LOG[n:])
+    check("检查更新：书库没被换掉就是最新版本", r["ok"] and "最新" in r["reason"], r)
+    s = j("GET", "/api/status")
+    check("状态里有版本号（网页靠它发现书库升级了）", s.get("version") == c["server"], s.get("version"))
+
+
 def wait_job(jid):
     def done():
         js = [x for x in j("GET", "/api/fetch") if x["id"] == jid]
@@ -927,6 +972,13 @@ def ui_tests():
         pg.wait_for_timeout(1500)
         status = pg.locator(".set-sec", has_text="听书").locator(".muted.small-text").first.inner_text()
         check("设置里试听（自定义语音接口）", status == "", status)
+        up = pg.locator(".set-sec", has_text="版本与升级")
+        up.locator("text=书库服务器").wait_for()
+        check("设置里有“版本与升级”", up.locator("a[href$='/dl/shuku-android.apk']").count() == 1 and up.locator("a[href$='/dl/shuku-wear.apk']").count() == 1 and up.locator("a[href$='/dl/shuku-extension.zip']").count() == 1, up.inner_text())
+        n = len(WT_LOG)
+        up.locator("button:has-text('检查更新')").click()
+        up.locator("text=已经是最新版本").wait_for(timeout=10000)
+        check("网页上点“检查更新”", len(WT_LOG) == n + 1 and up.locator("button:has-text('检查更新')").is_enabled())
         pg.set_viewport_size({"width": 1366, "height": 3000})
         shot(pg, "06-settings")
         pg.set_viewport_size({"width": 1366, "height": 860})
@@ -1181,6 +1233,7 @@ def ui_tests():
             prefs: () => JSON.stringify({ volume_keys: true, keep_screen_on: true, tts_engine: 'server' }), setPref: (k, v) => __calls.push(['setPref', k, v]),
             downloads: () => JSON.stringify(__downloads), removeDownload: id => { __downloads = [] },
             download: (id, json) => { __calls.push(['download', id, json]); __downloads = [{ id, title: JSON.parse(json).title, state: 'done', size: 2048, format: 'epub' }]; setTimeout(() => shukuNativeEvent('download', JSON.stringify({ id, state: 'done' })), 50) },
+            appInfo: () => JSON.stringify({ versionName: '1.0.0.5', versionCode: 5 }), updateApp: () => __calls.push(['updateApp']), updateWatchApp: () => __calls.push(['updateWatchApp']), openExternal: u => __calls.push(['openExternal', u]),
             syncWatch: () => { __calls.push(['syncWatch']); setTimeout(() => shukuNativeEvent('watch', JSON.stringify({ ok: true, message: '已把连接信息发给 1 块手表' })), 300) }, logout: () => __calls.push(['logout']), ttsVoices: () => '[]',
           }""" % json.dumps(TOKEN)
         ctx = browser.new_context(viewport={"width": 412, "height": 900}, device_scale_factor=2, has_touch=True, is_mobile=True, locale="zh-CN")
@@ -1209,6 +1262,20 @@ def ui_tests():
         check("连接手表：后台进行，按钮先禁用", pg.locator(".set-sec button:has-text('连接手表')").is_disabled() and len(calls("syncWatch")) == 1)
         pg.wait_for_selector(".toast >> text=已把连接信息发给 1 块手表")
         check("连接手表：结果用事件回来", pg.locator(".set-sec button:has-text('连接手表')").is_enabled())
+        up = pg.locator(".set-sec", has_text="版本与升级")
+        up.locator("text=本机 1.0.0.5").wait_for()
+        check("App 里显示本机版本和最新版本", f"最新 {NEW}" in up.inner_text(), up.inner_text())
+        up.locator("button:text-is('更新')").click()
+        up.locator("button:text-is('更新手表')").click()
+        check("App 里点“更新”“更新手表”交给原生", len(calls("updateApp")) == 1 and len(calls("updateWatchApp")) == 1, [c[0] for c in pg.evaluate("() => __calls")][-4:])
+        # 加上在线升级之前的 App：没有 appInfo，交给手机浏览器下载新版
+        pg.evaluate("() => { delete ShukuNative.appInfo; delete ShukuNative.updateApp; delete ShukuNative.updateWatchApp; location.hash = '#/stats' }")
+        pg.wait_for_selector(".tiles .tile")
+        pg.evaluate("() => { location.hash = '#/settings' }")
+        up = pg.locator(".set-sec", has_text="版本与升级")
+        up.locator("button:has-text('下载新版')").click()
+        ext_calls = calls("openExternal")
+        check("旧版 App：用手机浏览器下载新版", ext_calls and ext_calls[-1][1] == BASE + "/dl/shuku-android.apk" and "还不会自己更新" in up.inner_text(), ext_calls)
         pg.goto(BASE + f"/#/read/{b2['id']}")
         reader_ready(pg)
         pg.wait_for_timeout(600)
@@ -1335,6 +1402,10 @@ def ext_tests():
             shop, pop = popup_for(MOCK + "/shop/list.html", "shop")
             pop.wait_for_function("() => document.getElementById('route').textContent === '内网'", timeout=10000)
             check("弹窗：线路显示内网", True)
+            pop.wait_for_selector("#update-note", timeout=10000)
+            note = pop.inner_text("#update-note")
+            check("弹窗：书库上有新版插件时提示", f"插件有新版本 {NEW}" in note and pop.locator("#update-note button:has-text('已覆盖，重新加载')").count() == 1, note)
+            check("插件图标上显示“新”", wait(lambda: ev("() => chrome.action.getBadgeText({})") == "新", 10, 0.3, "图标显示“新”"))
             gs = groups(pop)
             by = {g["title"]: g for g in gs}
             check("弹窗：找到页面上的电子书（含框架和 shadow DOM）", {"爱丽丝漫游奇境", "产品说明书", "秘密花园", "需要登录的书", "伪装的书", "框架里的书", "影子里的书", "读书笔记"} <= set(by), [g["title"] for g in gs])
@@ -1443,7 +1514,7 @@ def main():
             time.sleep(3600)
     try:
         setup()
-        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_fetch_discover]:
+        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_fetch_discover]:
             try:
                 t()
             except Exception as e:

@@ -96,6 +96,9 @@ body.popup { width: 380px; min-height: 220px; max-height: 590px; display: flex; 
 .note b { display: block; color: var(--ink); font-family: var(--serif); font-size: 14px; margin-bottom: 2px; }
 .note .btn { margin-top: 8px; }
 .note.warn { background: rgba(178, 58, 58, .08); }
+.note .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.note .row .btn { margin-top: 0; }
+.note .hint { margin-top: 4px; }
 
 .found-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 6px; color: var(--ink-2); }
 .check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }

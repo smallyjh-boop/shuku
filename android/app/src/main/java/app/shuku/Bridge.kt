@@ -20,6 +20,16 @@ class Bridge(private val activity: MainActivity) {
 
     @JavascriptInterface fun version(): String = BuildConfig.VERSION_NAME
 
+    // ---------- 在线升级 ----------
+
+    @JavascriptInterface fun appInfo(): String = JSONObject().put("versionName", BuildConfig.VERSION_NAME).put("versionCode", BuildConfig.VERSION_CODE).toString()
+
+    /** “设置 → 版本与升级”里的“更新” */
+    @JavascriptInterface fun updateApp() = activity.runOnUiThread { Updater.checkNow(activity) }
+
+    /** “更新手表”：下载手表安装包，交给 Wear OS 工具箱 */
+    @JavascriptInterface fun updateWatchApp() = activity.runOnUiThread { Updater.updateWatch(activity) }
+
     @JavascriptInterface fun deviceName(): String = MainActivity.deviceName()
 
     // ---------- 存储（替代 localStorage，内网、Tailscale 两个地址共用） ----------

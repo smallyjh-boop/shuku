@@ -221,3 +221,33 @@ export function fmtBytes(n) {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
   return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + ' ' + u[i]
 }
+
+// ---------- 插件的新版本 ----------
+// 新的插件包跟着书库服务器一起发布（/api/clients、/dl/shuku-extension.zip）。
+// “已解压”的插件 Chrome 不会自动更新：提示下载新版本，解压覆盖原来的文件夹后点“重新加载”
+
+export function newerVersion(a, b) {
+  const pa = String(a || '').split('.').map(Number), pb = String(b || '').split('.').map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d) return d > 0
+  }
+  return false
+}
+
+/** 检查书库上有没有更新的插件。有就返回 { version, url }，并记下来（图标上显示“新”） */
+export async function checkExtensionUpdate() {
+  const r = await resolveRoute()
+  if (!r) return (await chrome.storage.local.get('update')).update || null
+  try {
+    const res = await fetchT(r.base + '/api/clients', {}, 8000)
+    const j = res.ok ? await res.json() : null
+    const e = j && j.extension
+    const cur = chrome.runtime.getManifest().version
+    const update = e && newerVersion(e.version, cur) ? { version: e.version, url: r.base + e.url, at: Date.now() } : null
+    await chrome.storage.local.set({ update })
+    return update
+  } catch {
+    return (await chrome.storage.local.get('update')).update || null
+  }
+}

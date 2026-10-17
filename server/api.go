@@ -27,6 +27,11 @@ func routes() http.Handler {
 	mux := http.NewServeMux()
 	a := requireAuth
 	mux.HandleFunc("GET /api/ping", handlePing)
+	// 在线升级：各端安装包（不用登录）、通知更新服务
+	mux.HandleFunc("GET /api/clients", handleClients)
+	mux.HandleFunc("GET /dl/{name}", handleDownloadClient)
+	mux.HandleFunc("GET /api/update", a(handleUpdateInfo))
+	mux.HandleFunc("POST /api/update/check", a(handleUpdateCheck))
 	mux.HandleFunc("GET /api/auth/state", handleAuthState)
 	mux.HandleFunc("POST /api/auth/setup", handleSetup)
 	mux.HandleFunc("POST /api/auth/login", handleLogin)
@@ -823,7 +828,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	scanState.Unlock()
 	var lastEvent int64
 	db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM events`).Scan(&lastEvent)
-	writeJSON(w, 200, map[string]any{"inbox": inboxStatus(), "scan": sc, "last_event": lastEvent, "ai": aiReady(), "enrich": enrichStatus(), "fulltext": fulltextStatus()})
+	writeJSON(w, 200, map[string]any{"inbox": inboxStatus(), "scan": sc, "last_event": lastEvent, "ai": aiReady(), "enrich": enrichStatus(), "fulltext": fulltextStatus(), "version": version})
 }
 
 func handleScan(w http.ResponseWriter, r *http.Request) {

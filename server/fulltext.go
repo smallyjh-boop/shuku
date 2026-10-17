@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -496,33 +497,58 @@ func indexFile(f *File) (int, error) {
 		return 0, err
 	}
 	removeFileIndex(f.ID)
-	tx, err := db.Begin()
-	if err != nil {
+	// 分批提交：每批几十块，写锁只占一小会儿，入库和网页上的修改不用等一整本书索引完。
+	// 中途出错时已经写进去的块留着没关系：没写 ft_files，下次会先清掉再重建
+	const batch = 64
+	var tx *sql.Tx
+	commit := func() error {
+		if tx == nil {
+			return nil
+		}
+		err := tx.Commit()
+		tx = nil
+		time.Sleep(10 * time.Millisecond) // 让别的写操作插进来
+		return err
+	}
+	fail := func(err error) (int, error) {
+		if tx != nil {
+			tx.Rollback()
+		}
 		return 0, err
 	}
 	n := 0
 	total := 0
 	for _, s := range secs {
 		for part, ch := range chunksOf(s.Text) {
+			if tx == nil {
+				if tx, err = db.Begin(); err != nil {
+					return 0, err
+				}
+			}
 			total += utf8.RuneCountInString(ch)
 			res, err := tx.Exec(`INSERT INTO ft_chunks(book_id,file_id,sec,part,label) VALUES(?,?,?,?,?)`, f.BookID, f.ID, s.Sec, part, s.Label)
 			if err != nil {
-				tx.Rollback()
-				return 0, err
+				return fail(err)
 			}
 			id, _ := res.LastInsertId()
 			if _, err := tx.Exec(`INSERT INTO ft(rowid, body) VALUES(?,?)`, id, strings.Join(tokenizeCJK(ch), " ")); err != nil {
-				tx.Rollback()
-				return 0, err
+				return fail(err)
 			}
 			n++
+			if n%batch == 0 {
+				if err := commit(); err != nil {
+					return fail(err)
+				}
+			}
 		}
 		if total > 20_000_000 { // 单本最多索引 2000 万字
 			break
 		}
 	}
-	tx.Exec(`INSERT INTO ft_files(file_id,hash,chunks,status,indexed_at) VALUES(?,?,?,?,?) ON CONFLICT(file_id) DO UPDATE SET hash=excluded.hash,chunks=excluded.chunks,status=excluded.status,indexed_at=excluded.indexed_at`, f.ID, f.Hash, n, "ok", now())
-	if err := tx.Commit(); err != nil {
+	if err := commit(); err != nil {
+		return fail(err)
+	}
+	if _, err := db.Exec(`INSERT INTO ft_files(file_id,hash,chunks,status,indexed_at) VALUES(?,?,?,?,?) ON CONFLICT(file_id) DO UPDATE SET hash=excluded.hash,chunks=excluded.chunks,status=excluded.status,indexed_at=excluded.indexed_at`, f.ID, f.Hash, n, "ok", now()); err != nil {
 		return 0, err
 	}
 	saveSections(f, secs)

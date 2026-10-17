@@ -18,7 +18,7 @@ export async function renderSettings(main, ctx) {
   main.append(wrap)
   let s
   try { s = await api('/api/settings'); ctx.settings = s } catch (e) { fill(wrap, h('p', null, e.message)); return }
-  fill(wrap, isNative ? appSection(ctx) : null, appearance(ctx), network(s), devices(s), await libraries(s), recognition(s, ctx), onlineMeta(s, ctx), narration(s, ctx), fulltextSec(s), opdsSec(s), account(s, ctx), about(s))
+  fill(wrap, isNative ? appSection(ctx) : null, appearance(ctx), network(s), devices(s), await libraries(s), recognition(s, ctx), onlineMeta(s, ctx), narration(s, ctx), fulltextSec(s), opdsSec(s), account(s, ctx), updateSec(s), about(s))
 }
 
 const sec = (title, desc, ...children) => h('section', { class: 'set-sec' }, h('h2', null, title), desc ? h('p', null, desc) : null, ...children)
@@ -240,6 +240,79 @@ function account(s, ctx) {
 }
 
 // ---------- 关于 ----------
+// ---------- 版本与升级 ----------
+// 服务器由 NAS 上的更新服务（Watchtower）自动升级；手机、手表 App 和插件的新安装包跟着服务器镜像一起到，从书库下载
+const newer = (a, b) => {
+  const pa = String(a || '').split('.').map(Number), pb = String(b || '').split('.').map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0 }
+  return false
+}
+
+function updateSec(s) {
+  const box = h('div', { class: 'stack', style: { gap: '8px' } }, h('p', { class: 'muted small-text', style: { margin: 0 } }, '正在读取版本信息…'))
+  const row = (ic, label, sub, ...actions) => h('div', { class: 'dev-row' }, icon(ic), h('div', { class: 'grow' }, h('div', null, label), sub ? h('small', null, sub) : null), ...actions)
+  const link = (item, text) => h('a', { class: 'btn small quiet', href: (net.base || '') + item.url, download: '' }, icon('download'), text)
+  ;(async () => {
+    let info
+    try { info = await api('/api/update') } catch (e) { fill(box, h('p', { class: 'muted small-text' }, e.message)); return }
+    const c = info.clients || {}
+    const msg = h('div', { class: 'muted small-text' }, info.updater
+      ? 'NAS 上的更新服务每分钟检查一次，发布新版本后自动升级。'
+      : '还没开启自动升级：按说明用新的 compose（带更新服务的地址和令牌）重建一次书库。')
+    const btn = h('button', { class: 'btn small' }, icon('refresh'), '检查更新')
+    btn.onclick = () => checkServer(btn, msg, info.version)
+    const rows = [row('stack', `书库服务器 ${info.version}`, null, btn), msg]
+    const app = isNative ? callJSON('appInfo') : null
+    // 加上在线升级之前的 App 没有 appInfo，也不会自己更新：交给手机浏览器下载新版，装一次以后就能自动更新
+    const oldApp = isNative && !app
+    const viaBrowser = (item, text) => h('button', { class: 'btn small primary', onclick: () => call('openExternal', (net.base || location.origin) + item.url) }, icon('download'), text)
+    if (c.android) {
+      if (app) {
+        const old = (app.versionCode || 0) < c.android.versionCode
+        rows.push(row('phone', '手机 App', `本机 ${app.versionName || ''}，最新 ${c.android.versionName}`,
+          old ? h('button', { class: 'btn small primary', onclick: () => call('updateApp') }, '更新') : h('span', { class: 'muted small-text' }, '已是最新')))
+      } else if (oldApp) {
+        rows.push(row('phone', '手机 App', `最新 ${c.android.versionName}。现在这个 App 还不会自己更新：点“下载新版”，用手机浏览器下载后装上（直接覆盖，书和设置都保留），以后就能自动更新`, viaBrowser(c.android, '下载新版')))
+      } else rows.push(row('phone', '安卓手机 App', `最新 ${c.android.versionName}。手机浏览器打开这一页点下载，装好后 App 会自己检查更新`, link(c.android, '下载')))
+    }
+    if (c.wear) {
+      rows.push(app
+        ? row('watch', '手表 App', `最新 ${c.wear.versionName}。点“更新手表”会下载安装包，再交给 Wear OS 工具箱装到手表上`, h('button', { class: 'btn small', onclick: () => call('updateWatchApp') }, '更新手表'))
+        : oldApp
+          ? row('watch', '手表 App', `最新 ${c.wear.versionName}。用手机浏览器下载后，用 Wear OS 工具箱装到手表上（手机 App 更新以后可以直接点“更新手表”）`, viaBrowser(c.wear, '下载'))
+          : row('watch', 'Wear OS 手表 App', `最新 ${c.wear.versionName}。用 Wear OS 工具箱或电脑的 adb 安装`, link(c.wear, '下载')))
+    }
+    if (c.extension) rows.push(row('puzzle', '浏览器插件', `最新 ${c.extension.version}。插件发现新版本时，图标上会显示“新”，按插件里的提示更新`, link(c.extension, '下载')))
+    if (!c.android && !c.wear && !c.extension) rows.push(h('p', { class: 'muted small-text', style: { margin: 0 } }, '这个书库里没有各端安装包（自己构建的镜像不带），可以到 GitHub 的 Releases 下载。'))
+    fill(box, ...rows)
+  })()
+  return sec('版本与升级', '服务器、网页自动升级；手机、手表 App 和浏览器插件从这里取新版本。', box)
+}
+
+async function checkServer(btn, msg, cur) {
+  btn.disabled = true
+  msg.textContent = '正在检查新版本……有新版本时会自动下载并重启书库，大约一两分钟。'
+  try {
+    // 能收到回复就说明书库没被换掉：已是最新，或者更新服务有问题（原因在回复里）
+    const r = await api('/api/update/check', { method: 'POST', retry: false })
+    msg.textContent = r.reason; btn.disabled = false; return
+  } catch (e) {
+    if (e.status) { msg.textContent = e.message; btn.disabled = false; return }
+    // 连接断开：书库正在被换成新版本
+  }
+  msg.textContent = '书库正在升级重启，稍等……'
+  for (let i = 0; i < 90; i++) {
+    await new Promise(r => setTimeout(r, 2000))
+    try {
+      const r = await api('/api/clients', { retry: false })
+      if (r.server && r.server !== cur) { msg.textContent = `已升级到 ${r.server}，正在刷新……`; setTimeout(() => location.reload(), 800); return }
+      if (i > 15 && r.server === cur) { msg.textContent = '已经是最新版本'; btn.disabled = false; return }
+    } catch {}
+  }
+  msg.textContent = '书库还没重启好，过一会儿刷新页面看看'
+  btn.disabled = false
+}
+
 function about(s) {
   const t = s.tools || {}
   const line = (ok, label, hint) => h('div', { class: 'status-line' }, h('span', { class: 'dot ' + (ok ? 'ok' : '') }), label, ok ? null : h('span', { class: 'muted small-text' }, '　' + hint))

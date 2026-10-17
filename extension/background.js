@@ -4,7 +4,7 @@
 //   让书库下载：把链接交给书库（POST /api/fetch），NAS 自己下载，浏览器关了也不影响
 // 默认“自动”：公开书库让书库下载，其他网站用浏览器下载。
 
-import { api, getConfig, isConfigured, isPublicLibrary, extOf, isBookName, extFromType, fileExt, filenameFromDisposition, safeFileName, AuthError } from './lib/shuku.js'
+import { api, getConfig, isConfigured, isPublicLibrary, extOf, isBookName, extFromType, fileExt, filenameFromDisposition, safeFileName, AuthError, checkExtensionUpdate } from './lib/shuku.js'
 import { formatOfURL } from './lib/detect.js'
 
 const PARALLEL = 2
@@ -14,6 +14,7 @@ const ACTIVE = ['queued', 'downloading', 'uploading', 'fetching']
 
 let tasks = []
 let running = 0
+let hasUpdate = false
 const aborts = new Map() // 任务 id → 取消下载的函数（不能放进任务里，任务要存进 storage）
 const ready = init()
 
@@ -47,7 +48,8 @@ function persist(now = false) {
     tasks = tasks.slice(-KEEP)
     chrome.storage.session.set({ tasks })
     const n = tasks.filter(t => ACTIVE.includes(t.status)).length
-    chrome.action.setBadgeText({ text: n ? String(n) : '' })
+    // 没有正在加入的书时，插件有新版本就在图标上显示“新”
+    chrome.action.setBadgeText({ text: n ? String(n) : hasUpdate ? '新' : '' })
     // 上传大文件时没有别的动静，定时调一下扩展接口，免得浏览器以为后台闲着把它停掉
     if (n && !keepAlive) keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000)
     if (!n && keepAlive) { clearInterval(keepAlive); keepAlive = 0 }
@@ -360,6 +362,22 @@ chrome.runtime.onInstalled.addListener(details => {
   if (details.reason === 'install') chrome.runtime.openOptionsPage()
 })
 chrome.runtime.onStartup.addListener(() => chrome.action.setBadgeBackgroundColor({ color: '#2F6F8F' }))
+
+// ---------- 插件的新版本：浏览器启动时、之后每 6 小时检查一次 ----------
+
+async function checkUpdate() {
+  const c = await getConfig()
+  if (!isConfigured(c)) return
+  hasUpdate = !!(await checkExtensionUpdate())
+  persist(true)
+}
+// 后台每次被唤醒都会跑到这里：已经有这个定时就别重建，免得一直推迟
+chrome.alarms.get('check-update').then(a => { if (!a) chrome.alarms.create('check-update', { delayInMinutes: 1, periodInMinutes: 360 }) })
+chrome.alarms.onAlarm.addListener(a => { if (a.name === 'check-update') checkUpdate() })
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area === 'local' && 'update' in ch) { hasUpdate = !!ch.update.newValue; persist(true) }
+})
+chrome.storage.local.get('update').then(s => { hasUpdate = !!s.update; persist(true) })
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== 'add-link' || !info.linkUrl) return

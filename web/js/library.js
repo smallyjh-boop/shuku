@@ -79,10 +79,13 @@ export function renderLibrary(main, opts, ctx) {
     if (loading || done) return
     loading = true
     const my = gen
-    sentinel.textContent = '加载中…'
+    const first = offset === 0
+    // 刷新时先留着原来的书，新数据到了再一次换掉，书架不会闪成空白
+    if (!first || !grid.childElementCount) sentinel.textContent = '加载中…'
     try {
       const r = await api('/api/books?' + query({ offset, limit: 90 }))
       if (my !== gen) return
+      if (first) clear(grid)
       total = r.total
       for (const b of r.items) grid.append(bookCard(b, ctx))
       offset += r.items.length
@@ -122,7 +125,6 @@ export function renderLibrary(main, opts, ctx) {
   function reload() {
     gen++
     offset = 0; total = 0; done = false; loading = false
-    clear(grid)
     loadMore()
   }
 

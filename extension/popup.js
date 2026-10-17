@@ -1,6 +1,6 @@
 // 弹窗：列出当前页面上的电子书链接，勾选后一次加入书库；下面是加入记录。
 
-import { getConfig, isConfigured, resolveRoute, routeLabel, fmtBytes } from './lib/shuku.js'
+import { getConfig, isConfigured, resolveRoute, routeLabel, fmtBytes, checkExtensionUpdate } from './lib/shuku.js'
 import { scanPage } from './lib/detect.js'
 
 const $ = id => document.getElementById(id)
@@ -32,6 +32,18 @@ let justAdded = 0
 
 init()
 
+// 插件有新版本：下载新的插件包，解压覆盖原来的文件夹，再重新加载
+function showUpdate(u) {
+  if (!u || document.getElementById('update-note')) return
+  const steps = h('div', { class: 'hint' }, '下载后解压，覆盖原来的插件文件夹（当初“加载已解压的扩展程序”时选的那个），再点“重新加载”。')
+  $('main').prepend(h('div', { class: 'note', id: 'update-note' },
+    h('b', null, `插件有新版本 ${u.version}`),
+    `现在是 ${chrome.runtime.getManifest().version}。`, steps,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', onclick: () => chrome.tabs.create({ url: u.url }) }, '下载新版本'),
+      h('button', { class: 'btn', type: 'button', onclick: () => chrome.runtime.reload() }, '已覆盖，重新加载'))))
+}
+
 async function init() {
   $('settings').onclick = () => chrome.runtime.openOptionsPage()
   $('open').onclick = openLibrary
@@ -56,6 +68,7 @@ async function init() {
     setRoute(routeLabel(r), r ? 'on' : 'off')
     updateAction()
     if (!r) $('main').prepend(h('div', { class: 'note warn' }, h('b', null, '连不上书库'), '内网和 Tailscale 地址都不通。确认书库开着，电脑在家里的网络或者打开了 Tailscale。'))
+    else checkExtensionUpdate().then(showUpdate)
   })
   await scanning
   renderFound()

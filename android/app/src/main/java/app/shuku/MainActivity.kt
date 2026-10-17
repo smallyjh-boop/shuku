@@ -76,6 +76,7 @@ class MainActivity : Activity() {
             val was = app.link.base
             if (app.link.probe() != was) Events.emit("network", "{}")
             app.progress.flush()
+            if (app.link.online) Updater.checkQuietly(this)
         }
     }
 
@@ -112,6 +113,7 @@ class MainActivity : Activity() {
                 app.progress.flush()
                 app.webCache.precache()
                 app.downloads.autoDownload()
+                Updater.checkQuietly(this)
             }
         }
     }

@@ -247,23 +247,29 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	// 同一本书的其他格式：书名和作者都一致就挂到同一个书目下
 	var bookID int64
 	attached := false
-	if id.Title != "" {
-		rows, _ := db.Query(`SELECT id,title,author FROM books WHERE kind=?`, kind)
-		for rows != nil && rows.Next() {
-			var bid int64
-			var t, a string
-			rows.Scan(&bid, &t, &a)
-			if normTitle(t) == normTitle(id.Title) && normTitle(a) == normTitle(id.Author) && (kind != "comic") {
-				var hasFmt int
-				db.QueryRow(`SELECT COUNT(*) FROM files WHERE book_id=? AND format=?`, bid, fi.Format).Scan(&hasFmt)
-				if hasFmt == 0 {
-					bookID, attached = bid, true
-					break
+	if id.Title != "" && kind != "comic" {
+		// 先把书名作者对得上的书目都取出来、关掉查询，再逐个看缺不缺这种格式。
+		// 不能边遍历边查：以前这样写，数据库连接被占着时就互相等待，整个书库卡死
+		var same []int64
+		rows, err := db.Query(`SELECT id,title,author FROM books WHERE kind=?`, kind)
+		if err == nil {
+			for rows.Next() {
+				var bid int64
+				var t, a string
+				rows.Scan(&bid, &t, &a)
+				if normTitle(t) == normTitle(id.Title) && normTitle(a) == normTitle(id.Author) {
+					same = append(same, bid)
 				}
 			}
-		}
-		if rows != nil {
 			rows.Close()
+		}
+		for _, bid := range same {
+			var hasFmt int
+			db.QueryRow(`SELECT COUNT(*) FROM files WHERE book_id=? AND format=?`, bid, fi.Format).Scan(&hasFmt)
+			if hasFmt == 0 {
+				bookID, attached = bid, true
+				break
+			}
 		}
 	}
 	ts := now()
