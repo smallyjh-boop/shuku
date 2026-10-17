@@ -543,7 +543,7 @@ def test_reading():
     check("文件支持分段下载（Range）", len(r.content) == 100 and r.headers.get("Content-Range", "").startswith("bytes 0-99/"))
     alive = book_by_title("活着")
     info = j("GET", f"/api/books/{alive['id']}/read")
-    check("TXT 转成 EPUB 阅读", info["reader"] == "foliate" and info["url"].endswith("/epub"), info)
+    check("TXT 转成 EPUB 阅读", info["reader"] == "foliate" and "/epub?v=" in info["url"], info)
     z = zipfile.ZipFile(io.BytesIO(api("GET", info["url"]).content))
     docs = [n for n in z.namelist() if n.endswith(".xhtml") and "nav" not in n]
     check("TXT 按章节切分（5 章）", len(docs) >= 5, z.namelist())

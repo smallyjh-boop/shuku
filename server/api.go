@@ -442,6 +442,10 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 	switch f.Reader {
 	case "epub-converted":
 		reader, url = "foliate", fmt.Sprintf("/api/files/%d/epub", f.ID)
+		if f.Format == "txt" {
+			// 带上分章规则的版本：规则改了以后，浏览器缓存、手机上下载过的旧版本就不会再用
+			url += fmt.Sprintf("?v=%d", txtSplitVersion)
+		}
 	case "pdf-converted":
 		reader, url = "pdf", fmt.Sprintf("/api/files/%d/pdf", f.ID)
 	}

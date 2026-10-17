@@ -4,6 +4,7 @@
 # 已经装过：在“应用程序”里 shuku 的菜单点“编辑”，换成这个文件 →“更新”。书、数据库、设置都在下面的文件夹里，不会丢。
 #
 # 镜像在 ghcr.io/smallyjh-boop/shuku（私有）。NAS 已经用泰好说、记忆训练营那个 GitHub 只读令牌登录过 ghcr.io，不用再登录。
+# 镜像里带 Calibre（DOCX、CHM、RTF 等转换用），第一次下载几百 MB，之后每次升级只下载几十 MB。
 #
 # 在线升级：NAS 上已有的更新服务（taihaoshuo-updater）每分钟检查一次带下面 labels 的容器，
 # GitHub Actions 打包出新版本后一分钟内自动换上；网页“设置 → 版本与升级”里点“检查更新”可以立即检查。
@@ -16,9 +17,6 @@
 # 27200 也被占用的话，把 SHUKU_PORT 和下面两个地址里的端口一起改。
 #
 # volumes 里冒号左边是 NAS 上的文件夹（先在控制台里建好共享文件夹 books，注意是小写），冒号右边是容器里的路径，不要改。
-#
-# 没法从 ghcr.io 下载时：Container Station →“映像”→“导入” Releases 里的 shuku-server-amd64.tar.gz
-# （导入后的名字就是 ghcr.io/smallyjh-boop/shuku:latest），再用这个文件创建。
 
 services:
   shuku:

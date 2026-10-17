@@ -14,7 +14,9 @@
 ## 打包（GitHub Actions）
 
 - `.github/workflows/android.yml` 只能手动运行（workflow_dispatch），推送代码不触发；用户在意 Actions 分钟数，能一次打完就一次打完，不跑多余的任务。
-- 每次都全部打包（各端安装包要放进服务器镜像），只打 x86（NAS 是 Intel）。服务器在 `golang:1.24-bookworm` 里编译，再用根目录 `Dockerfile` 的运行阶段（`--build-context build=…`）打包，试运行用宿主机网络，检查接口、网页、`/api/clients` 和 `/dl/…` 下载。
+- 每次都全部打包（各端安装包要放进服务器镜像），只打 x86（NAS 是 Intel）。服务器在 `golang:1.24-bookworm` 里编译，再用根目录 `Dockerfile` 打包：`--build-context build=…` 换掉编译阶段，`--build-context base=docker-image://ghcr.io/smallyjh-boop/shuku-base:<base 段的哈希>` 换掉运行环境。试运行用宿主机网络，检查接口、网页、`/api/clients`、`/dl/…` 下载和 Calibre 转换。
+- 运行环境（Debian + mupdf/7z/djvulibre + Calibre）是 `Dockerfile` 里的 `base` 段，单独做成基础镜像，标签是这一段内容的哈希：这一段没改就不重做，NAS 升级只下载几十 MB。改 `base` 段（或者运行时勾“重新制作基础镜像”）会让 NAS 多下载几百 MB，没必要别动。
+- Releases 不再放服务器镜像的 tar.gz（带 Calibre 太大，NAS 直接从 ghcr.io 拉）。
 - 安卓签名：`android/signing/shuku.jks`（手机和手表必须同一个签名、同一个包名 `app.shuku`）。
 
 ## 在线升级（已做好）

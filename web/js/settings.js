@@ -318,9 +318,9 @@ function about(s) {
   const line = (ok, label, hint) => h('div', { class: 'status-line' }, h('span', { class: 'dot ' + (ok ? 'ok' : '') }), label, ok ? null : h('span', { class: 'muted small-text' }, '　' + hint))
   return sec('关于', `书库 ${s.version}。EPUB、MOBI、AZW3、FB2、PDF、TXT、CBZ、CBR 不需要额外组件就能读。`,
     h('div', { class: 'stack', style: { gap: '8px' } },
-      line(t.calibre, 'Calibre 格式转换（DOCX、CHM、RTF 等）', '使用 full 版镜像即可'),
-      line(t.djvu, 'DJVU 支持', '使用 full 版镜像即可'),
-      line(t['7z'], '7z / CB7 漫画包', '使用 full 版镜像即可'),
+      line(t.calibre, 'Calibre 格式转换（DOCX、CHM、RTF 等）', '镜像里没装'),
+      line(t.djvu, 'DJVU 支持', '镜像里没装'),
+      line(t['7z'], '7z / CB7 漫画包', '镜像里没装'),
       line(t.pdf_cover, '服务器生成 PDF 封面', '没有也没关系，第一次打开 PDF 时会自动生成')))
 }
 

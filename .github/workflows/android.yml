@@ -3,7 +3,10 @@
 #
 # 在线升级：手机 App、手表 App、插件的安装包和服务器打在同一个镜像里。镜像推到
 # ghcr.io/smallyjh-boop/shuku:latest 后，NAS 上的更新服务（taihaoshuo-updater，Watchtower）一分钟内自动换上，
-# 各端再从书库检查到新版本。所以每次都全部打包（大约 5 分钟）。
+# 各端再从书库检查到新版本。所以每次都全部打包（大约 6 分钟）。
+#
+# 运行环境（Debian + Calibre 等转换工具，几百 MB）单独做成基础镜像 ghcr.io/smallyjh-boop/shuku-base，
+# Dockerfile 里 base 那一段没改就一直用同一个：每次升级 NAS 只下载程序、网页和安装包这几十 MB。
 #
 # 为了省 Actions 分钟数和存储：只有一个任务；只打 x86 版（NAS 是 Intel 处理器）；不建缓存、不上传 Artifacts；
 # ghcr.io 上只留最近 3 个版本；超过 30 分钟自动停止。
@@ -23,6 +26,10 @@ on:
         description: 版本号，只用数字和点，最多三段，比如 1.1 或 1.0.1（留空就用 android/gradle.properties 里的）
         type: string
         default: ""
+      rebuild_base:
+        description: 重新制作基础镜像（Debian 和 Calibre 更新到最新，NAS 要多下载几百 MB；平时不用勾）
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -35,6 +42,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/smallyjh-boop/shuku
+  BASE_IMAGE: ghcr.io/smallyjh-boop/shuku-base
 
 jobs:
   build:
@@ -135,11 +143,29 @@ jobs:
             2>&1 | tee -a "$RUNNER_TEMP/build.log"
           file "$RUNNER_TEMP/ctx/out/shuku"
 
+      - name: 基础镜像（Debian 和 Calibre 等转换工具，没改就用做好的）
+        env:
+          REBUILD: ${{ inputs.rebuild_base }}
+        run: |
+          set -o pipefail
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # 标签按 Dockerfile 里 base 那一段的内容算：那一段没改，就一直用同一个基础镜像
+          tag=$(awk '/^FROM .* AS base$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile | sha256sum | cut -c1-12)
+          B="$BASE_IMAGE:$tag"
+          echo "BASE=$B" >> "$GITHUB_ENV"
+          if [ "$REBUILD" != "true" ] && docker buildx imagetools inspect "$B" > /dev/null 2>&1; then
+            echo "用已有的基础镜像 $B"
+          else
+            echo "制作基础镜像 $B"
+            docker buildx build --platform linux/amd64 --target base -t "$B" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+            docker push "$B"
+          fi
+
       - name: 打包服务器镜像并试运行
         run: |
           set -o pipefail
-          # 用根目录的 Dockerfile 做运行环境，编译阶段换成上一步的程序和各端安装包
-          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" \
+          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成基础镜像
+          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context base="docker-image://$BASE" \
             -t "$IMAGE:latest" -t "$IMAGE:v$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           # 和 NAS 上一样用宿主机网络试运行：接口、网页、各端安装包都要能取到
           docker run -d --name shuku-test --network host -e SHUKU_PORT=18080 "$IMAGE:latest" > /dev/null
@@ -169,13 +195,21 @@ jobs:
           done
           docker logs shuku-test 2>&1 | tail -n 20 | tee -a "$RUNNER_TEMP/build.log"
           docker rm -f shuku-test > /dev/null
+          # Calibre：把一个 RTF 转成 EPUB（和书库转换时的参数一样）
+          mkdir -p "$RUNNER_TEMP/conv"
+          printf '%s\n' '{\rtf1\ansi\deff0{\fonttbl{\f0 Times;}}\f0\pard Shuku test {\b bold}.\par Second paragraph.\par}' > "$RUNNER_TEMP/conv/t.rtf"
+          if docker run --rm --network none -v "$RUNNER_TEMP/conv:/t" --entrypoint ebook-convert "$IMAGE:latest" \
+              /t/t.rtf /t/t.epub --no-default-epub-cover > "$RUNNER_TEMP/conv/log.txt" 2>&1 && [ -s "$RUNNER_TEMP/conv/t.epub" ]; then
+            echo "Calibre：正常"
+          else
+            ok=""; echo "Calibre 转换失败"; tail -n 30 "$RUNNER_TEMP/conv/log.txt" | tee -a "$RUNNER_TEMP/build.log"
+          fi
+          docker image ls "$IMAGE" --format '{{.Repository}}:{{.Tag}} {{.Size}}'
           if [ -z "$ok" ]; then echo "::error::服务器镜像试运行没通过"; exit 1; fi
-          docker save "$IMAGE:latest" "$IMAGE:v$V" | gzip -6 > dist/shuku-server-amd64.tar.gz
           cp docker-compose.yml dist/shuku-compose.yml
 
       - name: 推送镜像到 ghcr.io（NAS 上的更新服务从这里取新版本）
         run: |
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker push "$IMAGE:v$V"
           docker push "$IMAGE:latest"
 
@@ -205,7 +239,7 @@ jobs:
           - shuku-android.apk：安卓手机 App（Android 8.0 及以上）
           - shuku-wear.apk：Wear OS 手表 App（Wear OS 3 及以上；手机 App 里“更新手表”会下载好交给 Wear OS 工具箱）
           - shuku-extension.zip：Chrome / Edge 浏览器插件（解压后“加载已解压的扩展程序”）
-          - shuku-server-amd64.tar.gz、shuku-compose.yml：手动安装服务器时用（一般不需要）
+          - shuku-compose.yml：第一次安装服务器时在 Container Station 里粘贴的配置
 
           SHA256SUMS.txt 是校验值。安装方法见 README。
           EOF

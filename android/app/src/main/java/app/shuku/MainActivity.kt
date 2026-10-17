@@ -207,8 +207,8 @@ class MainActivity : Activity() {
         if (!ours) return null
         val path = uri.path ?: "/"
         if (path.startsWith("/api/") || path.startsWith("/offline-files/")) {
-            // 已经下载到手机的书：直接用手机上的文件
-            app.store.serveLocal(path)?.let { return it }
+            // 已经下载到手机的书：直接用手机上的文件（联网时要和书库现在的版本一样）
+            app.store.serveLocal(path, if (bridge.jsOffline) null else uri.getQueryParameter("v") ?: "")?.let { return it }
             // 断网：用手机上的书冒充书库
             if (bridge.jsOffline && o == page) return app.store.emulate(path, uri)
             return null

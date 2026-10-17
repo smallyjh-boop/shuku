@@ -50,9 +50,22 @@ export class Engine {
       await view.init({ showTextStart: true })
       await view.renderer.goTo({ index: +sec[1], anchor: Math.min(1, +sec[2] || 0) }).catch(() => {})
     }
-    else if (target) await view.init({ lastLocation: target }).catch(() => view.init({ showTextStart: true }))
+    else if (target) {
+      await view.init({ lastLocation: target }).catch(() => view.init({ showTextStart: true }))
+      await this.checkRestored(saved)
+    }
     else if (saved?.percent > 0) { await view.init({ showTextStart: true }); await view.goToFraction(saved.percent) }
     else await view.init({ showTextStart: true })
+  }
+
+  // 书的结构变了（比如 TXT 按新规则重新分了章）：记下的位置会落到别的章节去，改按百分比找回大概的位置
+  async checkRestored(saved) {
+    const p = +saved?.percent
+    const got = this.last?.section?.current
+    if (!(p > 0) || got == null) return
+    const fr = this.view.getSectionFractions?.() || []
+    const want = fr.findIndex((f, i) => i < fr.length - 1 && p >= f && p < fr[i + 1])
+    if (want >= 0 && Math.abs(want - got) > 1) await this.view.goToFraction(p).catch(() => {})
   }
 
   onDocLoad(doc) {

@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -555,8 +556,56 @@ func indexFile(f *File) (int, error) {
 	return n, nil
 }
 
+// TXT 的分章规则改过：章节分得不一样了的书，全文索引和章节缓存要重建，
+// 搜索结果、手表才能对上新的章节。只在升级后做一次，只读 TXT 文件、不动书
+func migrateTxtSplit(ctx context.Context) {
+	want := strconv.Itoa(txtSplitVersion)
+	if getSetting("txt_split_version", "1") == want {
+		return
+	}
+	type txtFile struct {
+		id         int64
+		path, hash string
+	}
+	var list []txtFile
+	rows, err := db.Query(`SELECT id, path, hash FROM files WHERE format='txt'`)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var x txtFile
+		if rows.Scan(&x.id, &x.path, &x.hash) == nil {
+			list = append(list, x)
+		}
+	}
+	rows.Close()
+	changed := 0
+	for _, x := range list {
+		if ctx.Err() != nil {
+			return // 下次启动接着做
+		}
+		b, err := os.ReadFile(x.path)
+		if err != nil {
+			continue
+		}
+		if text, _ := decodeText(b); txtSplitChanged(text) {
+			db.Exec(`DELETE FROM ft_files WHERE file_id=?`, x.id)
+			if len(x.hash) >= 2 {
+				os.Remove(textCachePath(&File{Hash: x.hash}))
+			}
+			changed++
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	setSetting("txt_split_version", want)
+	if changed > 0 {
+		log.Printf("TXT 分章规则更新：%d 本书重新分章，全文索引会重建", changed)
+	}
+}
+
 func fulltextLoop(ctx context.Context) {
 	time.Sleep(5 * time.Second)
+	migrateTxtSplit(ctx)
 	for {
 		if fulltextEnabled() {
 			fulltextPass(ctx)

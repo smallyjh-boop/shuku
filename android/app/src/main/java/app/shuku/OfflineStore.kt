@@ -60,11 +60,17 @@ class OfflineStore(private val app: ShukuApp) {
 
     // ---------- 联网时：已经下载的书直接用手机上的文件，打开更快、不费流量 ----------
 
-    fun serveLocal(path: String): WebResourceResponse? {
+    /**
+     * version：网页请求的地址里 v= 的值（TXT 转换规则的版本）。联网时传进来，和下载时的不一样就不用手机上的旧文件，
+     * 去书库取新的；断网时传 null，手机上有什么用什么
+     */
+    fun serveLocal(path: String, version: String? = null): WebResourceResponse? {
         Regex("^/api/files/(\\d+)/(raw|epub|pdf)$").find(path)?.let { m ->
             val id = bookOfFile(m.groupValues[1].toInt()) ?: return null
             val info = readInfo(id) ?: return null
-            if (info.optString("orig_url").substringBefore('?') != path) return null
+            val orig = info.optString("orig_url")
+            if (orig.substringBefore('?') != path) return null
+            if (version != null && version != (Regex("[?&]v=([^&]*)").find(orig)?.groupValues?.get(1) ?: "")) return null
             val f = bookFile(id) ?: return null
             return fileResponse(f, f.extension)
         }

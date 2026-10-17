@@ -14,10 +14,10 @@
 - **整理建议**：相似文件夹（“刘慈欣”和“刘 慈欣”）、同一作者的不同写法（含拼音/英文名）、散落的系列、同一本书登记多次、重复文件、没按规则命名的书、空文件夹。每条都能预览、一键执行、整批撤销。所有移动都有记录，**不会删除任何文件**（删除书会移到书库的 `_回收站`）。
 - **阅读**：
   - EPUB、MOBI、AZW3、FB2：字体、字号、行距、段距、页边距、首行缩进、两端对齐；左右翻页或上下滚动，宽屏自动双栏；目录、书签、书内搜索。
-  - TXT：自动识别 GBK/GB18030/Big5/UTF-8 编码，按“第X章”智能分章。
+  - TXT：自动识别 GBK/GB18030/Big5/UTF-8 编码，按“第X章”智能分章。整本没有换行、一章挤在一行里的 TXT 也会按段落和句子切开，几千章的长篇网文在手机上也是一两秒打开。
   - PDF：按需分段下载（大文件不用等），连续滚动或单页翻页，缩放，目录。
   - 漫画（CBZ/CBR/CB7/CBT/ZIP/RAR）：单页、双页（自动识别跨页大图）、条漫；日漫从右到左；内网看原图，Tailscale 下按屏幕压缩。
-  - DOCX、CHM、RTF 等冷门格式：完整版镜像里用 Calibre 转成 EPUB 再读。DJVU 转 PDF 再读。
+  - DOCX、CHM、RTF 等冷门格式：用 Calibre 转成 EPUB 再读（发布的镜像里已经带了）。DJVU 转 PDF 再读。
 - **夜间模式**：六套阅读主题（白、纸、绿、灰、纯黑、暖夜），夜间模式可以跟随系统或按时间自动切换，单独选择夜间主题；软件亮度（可以低于系统最低亮度）、暖色滤镜；PDF 夜间反色。界面在页面绘制前就确定深浅色，夜里打开不会闪白。
 - **搜索**：书名、作者、系列、标签，支持全拼、首字母（输入 `st` 找到《三体》）、繁简互搜。
 - **听书**：阅读器里点耳机图标（或按 `R`）开始朗读，高亮当前句子、自动翻页；语速、音色随时换；睡眠定时（15 / 30 / 60 分钟或读完本章）；手机锁屏也能暂停、切句。声音来源三选一：
@@ -48,7 +48,6 @@ NAS 服务器的镜像发在 `ghcr.io/smallyjh-boop/shuku`（私有），Contain
 | `shuku-android.apk` | 安卓手机 |
 | `shuku-wear.apk` | Wear OS 手表 |
 | `shuku-extension.zip` | 电脑上的 Chrome / Edge |
-| `shuku-server-amd64.tar.gz` | 服务器镜像，NAS 没法从 ghcr.io 下载时手动导入用（一般用不到） |
 
 装好书库以后，手机 App、手表 App、浏览器插件也可以直接在书库网页“设置 → 版本与升级”里下载，不用登录 GitHub。
 
@@ -70,7 +69,7 @@ NAS 服务器的镜像发在 `ghcr.io/smallyjh-boop/shuku`（私有），Contain
 
 ### 2. 创建应用程序
 
-1. Container Station →**应用程序**→**创建**（旧版 Container Station 是“创建”→“创建应用程序”），应用程序名称填 `shuku`，把 `shuku-compose.yml`（或仓库里的 `docker-compose.yml`）的全部内容粘贴进去，点“验证 YAML”，再点“创建”。Container Station 会从 ghcr.io 下载镜像（一百多 MB），稍等一会儿。共享文件夹不叫 `books` 的，改 `volumes` 里冒号**左边**的路径（大小写也要一样）。
+1. Container Station →**应用程序**→**创建**（旧版 Container Station 是“创建”→“创建应用程序”），应用程序名称填 `shuku`，把 `shuku-compose.yml`（或仓库里的 `docker-compose.yml`）的全部内容粘贴进去，点“验证 YAML”，再点“创建”。Container Station 会从 ghcr.io 下载镜像（带 Calibre，第一次大约三四百 MB），稍等一会儿。共享文件夹不叫 `books` 的，改 `volumes` 里冒号**左边**的路径（大小写也要一样）。
 2. 浏览器打开 `http://192.168.31.200:27200`，设置访问密码，就能用了。
 
 `shuku-compose.yml` 里已经填好了内网地址 `http://192.168.31.200:27200` 和 Tailscale 地址 `http://100.81.34.58:27200`，手机、手表、插件连上后自动在两者之间切换。27200 被占用的话，把 `SHUKU_PORT` 和这两个地址里的端口一起改。
@@ -79,9 +78,7 @@ NAS 服务器的镜像发在 `ghcr.io/smallyjh-boop/shuku`（私有），Contain
 
 **升级**：不用管，见下面的[在线升级](#在线升级)。
 
-**没法从 ghcr.io 下载时**：Container Station →**映像**→**导入** Releases 里的 `shuku-server-amd64.tar.gz`（导入后的名字就是 `ghcr.io/smallyjh-boop/shuku:latest`），再按上面第 1 步创建。注意要在“映像”里导入，不是“容器”。
-
-**自己从源码构建**（一般用不到，比如 ARM 处理器的 NAS：发布的镜像只有 x86 版）：把整个仓库复制到 NAS，SSH 进去执行 `docker build -t localhost/shuku:latest .`，把 compose 里的 `image` 改成 `localhost/shuku:latest`、删掉 `labels` 那两行（否则更新服务会换回发布的版本），再创建应用程序。需要转换 DOCX、CHM、RTF 等冷门格式时，构建时加 `--build-arg FULL=1`（带 Calibre，镜像会大约 600MB）。自己构建的镜像里没有手机、手表 App 和插件的安装包。
+**自己从源码构建**（一般用不到，比如 ARM 处理器的 NAS：发布的镜像只有 x86 版）：把整个仓库复制到 NAS，SSH 进去执行 `docker build -t localhost/shuku:latest .`，把 compose 里的 `image` 改成 `localhost/shuku:latest`、删掉 `labels` 那两行（否则更新服务会换回发布的版本），再创建应用程序。默认带 Calibre（镜像大约大 600MB），不需要转换 DOCX、CHM、RTF 等冷门格式的话，构建时加 `--build-arg FULL=0`。自己构建的镜像里没有手机、手表 App 和插件的安装包。
 
 ### 3. Tailscale（出门访问）
 
@@ -108,7 +105,7 @@ NAS 上已经装好 Tailscale（Tailscale 地址 `100.81.34.58`），书库用�
 
 | 哪一端 | 怎么升级 |
 | --- | --- |
-| NAS 服务器和网页 | 镜像推到 ghcr.io 后，NAS 上已有的更新服务（泰好说装的 `taihaoshuo-updater`）每分钟检查一次，一分钟内自动换上，书和设置都不动。网页“设置 → 版本与升级”里能看到版本，点“检查更新”立即检查。升级后开着的网页会提示“书库已升级”，点“刷新”就是新版。 |
+| NAS 服务器和网页 | 镜像推到 ghcr.io 后，NAS 上已有的更新服务（泰好说装的 `taihaoshuo-updater`）每分钟检查一次，一分钟内自动换上，书和设置都不动。Debian 和 Calibre 这些几百 MB 的运行环境单独做成基础镜像，没改就不变，平时升级只下载几十 MB。网页“设置 → 版本与升级”里能看到版本，点“检查更新”立即检查。升级后开着的网页会提示“书库已升级”，点“刷新”就是新版。 |
 | 安卓手机 App | 打开 App 时检查（最多 6 小时一次），有新版本会问要不要更新，点“更新”下载后按系统提示安装。第一次会跳到“允许安装应用”，给书库打开后回来再点一次“更新”。也可以在“设置 → 版本与升级”里点“更新”。下载到手机的书和设置都会保留。 |
 | Wear OS 手表 App | 手表上的书库首页会提示有新版本。在手机书库 App 的“设置 → 版本与升级”点“更新手表”：安装包存到手机的“下载”文件夹，再选 Wear OS 工具箱（或其他能给手表装 APK 的 App）装到手表；列表里没有的话，打开工具箱从“下载”文件夹里选 `shuku-wear.apk`。也可以用电脑的 adb 装。 |
 | 浏览器插件 | 每 6 小时检查一次，有新版本时工具栏图标上显示“新”。打开插件点“下载新版本”，解压后把文件覆盖到原来加载的插件文件夹里，再点“已覆盖，重新加载”。（Chrome 不会自动更新“加载已解压的扩展程序”装的插件，所以要手动覆盖一次。） |
@@ -186,9 +183,9 @@ NAS 上已经装好 Tailscale（Tailscale 地址 `100.81.34.58`），书库用�
 NAS 服务器镜像、安卓 App、手表 App 和浏览器插件都用 GitHub Actions 打包，**只在手动运行时才打包**，不会因为推送代码自动运行：
 
 1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。可以填版本号（只用数字和点，最多三段，比如 `1.0.1`），留空就用 `android/gradle.properties` 里的；后面会自动接上第几次打包，比如 `1.0.1.12`。
-2. 每次都把服务器、手机 App、手表 App、插件一起打包（各端的安装包要放进服务器镜像，在线升级才能拿到），大约 6～8 分钟。镜像推到 `ghcr.io/smallyjh-boop/shuku`，NAS 一分钟内自动升级；安装文件另外发在仓库的 Releases 里（文件见上面“部署到威联通”的表格），另有校验值 `SHA256SUMS.txt`。
+2. 每次都把服务器、手机 App、手表 App、插件一起打包（各端的安装包要放进服务器镜像，在线升级才能拿到），大约 6～8 分钟。运行环境（Debian、Calibre 等）做成基础镜像 `ghcr.io/smallyjh-boop/shuku-base`，只在 Dockerfile 里 `base` 那一段改了、或者运行时勾了“重新制作基础镜像”时才重做（多 3 分钟左右，NAS 也要多下载几百 MB）。镜像推到 `ghcr.io/smallyjh-boop/shuku`，NAS 一分钟内自动升级；安装文件另外发在仓库的 Releases 里（文件见上面“部署到威联通”的表格），另有校验值 `SHA256SUMS.txt`。
 
-为了省 Actions 的分钟数和存储额度：整个打包只有一个任务；手机和手表在同一次 Gradle 里并行打包；服务器只打 x86 版（NAS 是 Intel 处理器），不用模拟器；不建缓存、不上传 Artifacts（Release 附件不占存储额度），ghcr.io 上只留最近 3 个版本，超过 30 分钟自动停止。服务器镜像先试运行，接口、网页和各端安装包的下载都正常才推送和发布。每次运行的内部版本号自动加一，新的 APK 可以直接覆盖安装。
+为了省 Actions 的分钟数和存储额度：整个打包只有一个任务；手机和手表在同一次 Gradle 里并行打包；服务器只打 x86 版（NAS 是 Intel 处理器），不用模拟器；不建缓存、不上传 Artifacts（Release 附件不占存储额度），ghcr.io 上只留最近 3 个版本，超过 30 分钟自动停止。服务器镜像先试运行，接口、网页、各端安装包的下载和 Calibre 转换都正常才推送和发布。每次运行的内部版本号自动加一，新的 APK 可以直接覆盖安装。
 
 签名：默认用仓库里的 `android/signing/shuku.jks`（密码 `shuku-app`），自己用没问题。如果要公开分发，请换成自己的签名：在仓库 Settings → Secrets and variables → Actions 添加 `SHUKU_KEYSTORE_BASE64`（签名文件 `base64 -w0` 后的内容）、`SHUKU_KEYSTORE_PASSWORD`、`SHUKU_KEY_ALIAS`、`SHUKU_KEY_PASSWORD`。换签名后手机和手表都要卸载重装。
 

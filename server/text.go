@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -116,28 +118,134 @@ func isChapterLine(line string) bool {
 	return false
 }
 
+// TXT 分章规则的版本：改了规则就加一，旧规则转出来的 EPUB 缓存、全文索引会重新生成
+const txtSplitVersion = 2
+
+// 不常见的换行符（Unicode 的行、段分隔符，NEL，换页）也当作换行
+var lineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n", " ", "\n", " ", "\n", "\u0085", "\n", "\f", "\n", "\v", "\n")
+
+// 一行超过这么多字（整本书没有换行、一章挤在一行之类）就拆开：
+// 否则整本书只有一节，手机上光排版就要几十秒
+const longLineRunes = 3000
+
+// 段首缩进：两个以上全角空格、四个以上半角空格或制表符
+var paraIndentRe = regexp.MustCompile(`　{2,}|[ \t]{4,}|\t+`)
+
+func splitLongLine(line string) []string {
+	if len(line) <= longLineRunes || utf8.RuneCountInString(line) <= longLineRunes {
+		return []string{line}
+	}
+	var out []string
+	for _, p := range paraIndentRe.Split(line, -1) {
+		for _, q := range splitInlineChapters(p) {
+			if q = strings.TrimSpace(strings.Trim(q, "　")); q != "" {
+				out = append(out, chunkSentences(q, 400, 1000)...)
+			}
+		}
+	}
+	return out
+}
+
+const chapterNum = `第\s*[0-9０-９零〇一二两三四五六七八九十百千万]+\s*[章回节卷]`
+
+// 句末（或空格）后面紧跟着的“第X章”：没有换行的书里章节标题就是这样夹在正文中间的
+var inlineChapterRe = regexp.MustCompile(`[。！？!?…”’」』）)》】 　](` + chapterNum + `)`)
+
+// 段首的“第X章 标题”后面跟着空格和正文：标题单独成行
+var chapterHeadRe = regexp.MustCompile(`^` + chapterNum + `[ 　]*[^ 　]{1,30}[ 　]+`)
+
+func splitInlineChapters(p string) []string {
+	var parts []string
+	start := 0
+	for _, m := range inlineChapterRe.FindAllStringSubmatchIndex(p, -1) {
+		parts = append(parts, p[start:m[2]])
+		start = m[2]
+	}
+	parts = append(parts, p[start:])
+	var out []string
+	for _, s := range parts {
+		if loc := chapterHeadRe.FindStringIndex(s); loc != nil && loc[1] < len(s) {
+			out = append(out, s[:loc[1]], s[loc[1]:])
+		} else {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func isSentenceEnd(r rune) bool { return strings.ContainsRune("。！？!?…", r) }
+func isCloser(r rune) bool      { return strings.ContainsRune("”’」』）)》】\"'", r) }
+
+// 没有分段的长文字按句子切成段落：凑够 target 字后在句末断开，一直没有句末标点就在 max 字处硬断
+func chunkSentences(s string, target, max int) []string {
+	rs := []rune(s)
+	if len(rs) <= max {
+		return []string{s}
+	}
+	var out []string
+	start := 0
+	push := func(end int) {
+		if t := strings.TrimSpace(string(rs[start:end])); t != "" {
+			out = append(out, t)
+		}
+		start = end
+	}
+	for i := 0; i < len(rs); i++ {
+		if isSentenceEnd(rs[i]) {
+			j := i + 1
+			for j < len(rs) && (isSentenceEnd(rs[j]) || isCloser(rs[j])) {
+				j++
+			}
+			i = j - 1
+			if j-start >= target {
+				push(j)
+				continue
+			}
+		}
+		if i+1-start >= max {
+			push(i + 1)
+		}
+	}
+	push(len(rs))
+	return out
+}
+
+// 这本 TXT 按新规则分章会不会和旧规则不一样（有很长的行或不常见的换行符）
+func txtSplitChanged(text string) bool {
+	if strings.ContainsAny(text, "  \u0085\f\v") {
+		return true
+	}
+	// 旧规则也认 \r\n 和 \r
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n") {
+		if len(splitLongLine(l)) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 func splitChapters(text string) []Chapter {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(lineBreaks.Replace(text), "\n")
 	var chs []Chapter
 	cur := Chapter{Title: "开始"}
 	found := 0
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, " \t　")
-		trim := strings.TrimSpace(strings.Trim(line, "　"))
-		if trim == "" {
-			continue
-		}
-		if isChapterLine(trim) {
-			found++
-			if len(cur.Lines) > 0 || cur.Title != "开始" {
-				chs = append(chs, cur)
+	for _, whole := range lines {
+		for _, raw := range splitLongLine(whole) {
+			line := strings.TrimRight(raw, " \t　")
+			trim := strings.TrimSpace(strings.Trim(line, "　"))
+			if trim == "" {
+				continue
 			}
-			cur = Chapter{Title: trim}
-			continue
+			if isChapterLine(trim) {
+				found++
+				if len(cur.Lines) > 0 || cur.Title != "开始" {
+					chs = append(chs, cur)
+				}
+				cur = Chapter{Title: trim}
+				continue
+			}
+			cur.Lines = append(cur.Lines, trim)
 		}
-		cur.Lines = append(cur.Lines, trim)
 	}
 	chs = append(chs, cur)
 	if len(chs) > 0 && chs[0].Title == "开始" && len(chs[0].Lines) == 0 {
@@ -258,9 +366,26 @@ func convertedPath(srcPath, ext string) string {
 	return filepath.Join(cfg.DataDir, "cache", "conv", cacheKey(srcPath)+"."+ext)
 }
 
+// TXT 转出来的 EPUB 缓存文件名带分章规则的版本，改了规则就重新转
+func txtEPUBExt(v int) string {
+	if v <= 1 {
+		return "epub"
+	}
+	return fmt.Sprintf("t%d.epub", v)
+}
+
 // 把文件转换成 EPUB（TXT 自己转，其他格式交给 Calibre）
 func ensureEPUB(srcPath, format, title, author string) (string, error) {
-	out := convertedPath(srcPath, "epub")
+	ext := "epub"
+	if format == "txt" {
+		ext = txtEPUBExt(txtSplitVersion)
+		defer func() {
+			for v := 1; v < txtSplitVersion; v++ { // 旧规则转出来的缓存用不到了
+				os.Remove(convertedPath(srcPath, txtEPUBExt(v)))
+			}
+		}()
+	}
+	out := convertedPath(srcPath, ext)
 	if _, err := os.Stat(out); err == nil {
 		return out, nil
 	}
@@ -292,9 +417,12 @@ func ensureEPUB(srcPath, format, title, author string) (string, error) {
 	} else {
 		bin, err := exec.LookPath("ebook-convert")
 		if err != nil {
-			return "", errors.New("这个格式需要 Calibre 转换，当前镜像没有安装 Calibre（请使用 full 版镜像）")
+			return "", errors.New("这个格式需要 Calibre 转换，当前镜像没有安装 Calibre")
 		}
-		cmd := exec.Command(bin, srcPath, tmp)
+		// 不生成默认封面（要用 Qt 画图，NAS 上没有显示器）；大文件也不能一直转下去
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, srcPath, tmp, "--no-default-epub-cover")
 		if o, err := cmd.CombinedOutput(); err != nil {
 			lines := strings.Split(strings.TrimSpace(string(o)), "\n")
 			return "", fmt.Errorf("Calibre 转换失败: %s", lines[len(lines)-1])

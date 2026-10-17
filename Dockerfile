@@ -1,11 +1,11 @@
 # 书库 Shuku —— NAS 电子书管理与阅读
-# 一般不用自己构建：GitHub Actions 打包好的镜像发在 ghcr.io/smallyjh-boop/shuku（NAS 上的更新服务会自动换新版本），
-# Releases 里也有一份 shuku-server-amd64.tar.gz，可以在 Container Station 导入。
-# 自己构建普通版：docker build -t localhost/shuku:latest .
-# 完整版（带 Calibre，可转换 DOCX/CHM/RTF 等，镜像大约大 600MB）：docker build --build-arg FULL=1 -t localhost/shuku:latest .
+# 一般不用自己构建：GitHub Actions 打包好的镜像发在 ghcr.io/smallyjh-boop/shuku（NAS 上的更新服务会自动换新版本）。
+# 自己构建：docker build -t localhost/shuku:latest .
+# 默认带 Calibre（转换 DOCX、CHM、RTF 等，镜像大约大 600MB）；不要的话加 --build-arg FULL=0。
 # 自己构建的镜像：compose 里的 image 跟着改，并删掉 labels（否则更新服务会换回发布的版本）。
 # 发布时 Actions 先在同样的 golang:1.24-bookworm 里编译好程序、打好手机/手表 App 和插件，
-# 再用 --build-context build=... 替换下面的编译阶段。自己构建的镜像里没有各端安装包。
+# 再用 --build-context build=... 替换下面的编译阶段，用 --build-context base=... 换成做好的基础镜像。
+# 自己构建的镜像里没有各端安装包。
 
 FROM golang:1.24-bookworm AS build
 WORKDIR /src
@@ -15,13 +15,19 @@ COPY server/ ./
 RUN CGO_ENABLED=1 go build -mod=vendor -tags sqlite_fts5 -trimpath -ldflags "-s -w" -o /out/shuku . \
  && mkdir -p /out/clients
 
-FROM debian:bookworm-slim
-ARG FULL=0
+# 运行环境：格式转换工具（mupdf、7z、djvulibre，以及转换 DOCX、CHM、RTF 等用的 Calibre）。
+# 发布时这一段单独做成基础镜像 ghcr.io/smallyjh-boop/shuku-base（这一段没改就一直用同一个），
+# 每次升级只换下面的程序、网页和安装包，NAS 只要下载几十 MB
+FROM debian:bookworm-slim AS base
 LABEL org.opencontainers.image.source=https://github.com/smallyjh-boop/shuku
+ARG FULL=1
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tzdata mupdf-tools p7zip-full djvulibre-bin \
  && if [ "$FULL" = "1" ]; then apt-get install -y --no-install-recommends calibre; fi \
  && rm -rf /var/lib/apt/lists/*
+
+FROM base
 # 威联通上要用宿主机网络（network_mode: host）运行，书库直接监听 SHUKU_PORT；默认 27200，避开 QTS 自己的 8080
 ENV TZ=Asia/Bangkok \
     SHUKU_PORT=27200 \
