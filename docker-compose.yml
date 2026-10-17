@@ -2,7 +2,7 @@
 #
 # 1. 先在 Container Station →“映像”→“导入”里导入镜像文件（Releases 里下载）：
 #      Intel / AMD 处理器的 NAS 用 shuku-server-amd64.tar.gz，ARM 处理器的用 shuku-server-arm64.tar.gz
-# 2. Container Station →“创建”→“创建应用程序”，名称填 shuku，把这整个文件粘贴进去 →“创建”
+# 2. Container Station →“应用程序”→“创建”（旧版是“创建”→“创建应用程序”），名称填 shuku，把这整个文件粘贴进去 →“创建”
 #
 # 下面 volumes 里冒号左边是 NAS 上的文件夹，按你的实际共享文件夹改（要先在控制台里建好共享文件夹）；
 # 冒号右边是容器里的路径，不要改。
