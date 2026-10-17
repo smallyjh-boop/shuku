@@ -5,7 +5,7 @@
 当前进度：
 
 - 第一阶段（NAS 服务端 + 网页端）、第二阶段（联网补全、书内搜索、听书、阅读统计、OPDS）：已完成。
-- 第三阶段（安卓 App、Wear OS 手表 App、浏览器插件、“发现”页）：代码已完成。安卓和手表的安装包要用 GitHub Actions 打包，见[打包安卓 App](#打包安卓-app-和手表-app)。
+- 第三阶段（安卓 App、Wear OS 手表 App、浏览器插件、“发现”页）：已完成，安装包在仓库的 Releases 里（GitHub Actions 打包，见[打包安卓 App](#打包安卓-app-和手表-app)）。
 
 ## 现在能做什么
 
@@ -222,5 +222,5 @@ SHUKU_DATA=./data SHUKU_INBOX=./inbox SHUKU_WEB=../web SHUKU_LIBRARIES="图书:$
 - AI 识别（`设置 → 识别与整理 → 用示例测试`）
 - “发现”页连真实的维基文库、古腾堡计划、互联网档案馆、Standard Ebooks
 - Docker 镜像构建
-- 安卓 App 和手表 App：代码通过了编译检查，网页和原生之间的接口用模拟的原生桥测过；但还没在 GitHub Actions 上实际打包，也没在真机上运行过（离线、后台听书、手表通信、表冠滚动等）
+- 安卓 App 和手表 App：已在 GitHub Actions 上打包成功（两个 APK 同一个签名、包名都是 `app.shuku`），网页和原生之间的接口用模拟的原生桥测过；但还没在真机上运行过（离线、后台听书、手表通信、表冠滚动等）
 - 浏览器插件在真实网站上的表现（在无头 Chromium 里用模拟网站测过扫描、配对、下载上传、来源页、各种出错情况）
