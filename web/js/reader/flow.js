@@ -6,6 +6,7 @@ import { splitSentences } from './tts.js'
 
 const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dd,dt,td,th,figcaption,pre,div'
 import { download } from '../api.js'
+import { isNative, callJSON } from '../native.js'
 
 const FONT_STACKS = {
   serif: '"Songti SC", "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", Georgia, serif',
@@ -23,6 +24,17 @@ export class Engine {
     const loading = this.shell.loading
     const blob = await download(info.url, p => (loading.textContent = `正在下载 ${Math.round(p * 100)}%`))
     loading.textContent = info.url.includes('/epub') ? '正在排版…' : '正在打开…'
+    // 1.0.0.5 以前的 App 会把每一章的内嵌页面（blob: 地址）当成外部链接拦掉，这类书一直打不开：过几秒还没打开就提示更新 App
+    const oldApp = isNative && ((callJSON('appInfo') || {}).versionCode || 0) < 5
+    const hint = oldApp ? setTimeout(() => this.shell.oldAppHint?.(), 6000) : 0
+    try {
+      await this.load(blob, info, saved)
+    } finally {
+      clearTimeout(hint)
+    }
+  }
+
+  async load(blob, info, saved) {
     const file = new File([blob], info.name)
     const view = this.view = document.createElement('foliate-view')
     this.shell.stage.append(view)

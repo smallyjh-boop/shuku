@@ -22,7 +22,7 @@ import java.security.MessageDigest
  * /api/clients 里就是新版本号，/dl/… 能下载安装包，不用登录 GitHub。
  */
 object Updater {
-    private const val CHECK_EVERY = 6 * 3600 * 1000L
+    private const val CHECK_EVERY = 3600 * 1000L
     private val app get() = ShukuApp.app
     @Volatile private var busy = false
 
@@ -35,7 +35,7 @@ object Updater {
         return Info(j.optInt("versionCode"), j.optString("versionName"), j.optString("url"), j.optString("sha256"))
     }
 
-    /** 打开 App 时检查（最多 6 小时一次），有新版本就问要不要更新。启动时会有两处同时调用，加锁免得弹两次 */
+    /** 打开 App 时检查（最多 1 小时一次），有新版本就问要不要更新。启动时会有两处同时调用，加锁免得弹两次 */
     @Synchronized
     fun checkQuietly(activity: MainActivity) {
         val prefs = app.config.prefs

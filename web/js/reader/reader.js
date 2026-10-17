@@ -3,7 +3,7 @@
 
 import { h, clear, fill, add, icon, iconBtn, toast, toastError, store, save, debounce, pct } from '../ui.js'
 import { api, apiUrl, deviceName, net } from '../api.js'
-import { isNative, call, onNative } from '../native.js'
+import { isNative, call, callJSON, onNative } from '../native.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -121,6 +121,19 @@ class Reader {
     // 第一次打开时短暂显示工具栏，让人知道在哪
     this.showUI(true)
     this.uiTimer = setTimeout(() => { if (!this.panel.classList.contains('show') && !this.sheet.classList.contains('show')) this.showUI(false) }, 1800)
+  }
+
+  // 旧版 App 打不开 EPUB、TXT 这类书：提示更新 App（1.0.0.3 起 App 里能直接更新，更早的交给浏览器下载）
+  oldAppHint() {
+    if (!this.loading.isConnected) return
+    const canUpdate = !!callJSON('appInfo')
+    const url = (net.base || location.origin) + '/dl/shuku-android.apk'
+    fill(this.loading, h('div', { class: 'err' },
+      '这个版本的书库 App 打不开 EPUB、TXT 这类书，更新 App 就好了（PDF 和漫画不受影响）。',
+      h('div', { style: { marginTop: '14px', display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' } },
+        h('button', { class: 'btn primary', onclick: () => canUpdate ? call('updateApp') : call('openExternal', url) }, '更新 App'),
+        h('button', { class: 'btn', onclick: () => this.back() }, '返回书架'))))
+    this.showUI(true)
   }
 
   fail(msg) {

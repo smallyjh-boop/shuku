@@ -156,7 +156,10 @@ class MainActivity : Activity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val uri = request.url
                 if (uri.scheme == "shuku") { handlePairUri(uri); return true }
-                if (uri.scheme == "file" || originOf(uri.toString()) == pageOrigin) return false
+                // 页面里的框架照常加载：阅读器把书的每一章放在 iframe 里，地址是 blob: 开头的，
+                // WebView 会把这种框架跳转也交到这里，拦掉的话 EPUB、TXT 这些书就一直停在“正在打开”
+                if (!request.isForMainFrame) return false
+                if (uri.scheme == "file" || uri.scheme == "blob" || uri.scheme == "data" || originOf(uri.toString()) == pageOrigin) return false
                 try { startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (e: Exception) {}
                 return true
             }
