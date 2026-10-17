@@ -51,14 +51,14 @@
 
 ### 1. 准备文件夹
 
-1. 控制台 → 权限 → 共享文件夹 →“创建”一个共享文件夹，比如叫 `Books`。**一定要先建成共享文件夹**，否则数据会写进系统分区。
-2. 在 File Station 里，`Books` 下面建三个文件夹：`投递`、`图书`、`漫画`；`Container` 下面建一个 `shuku`。
+1. 控制台 → 权限 → 共享文件夹 →“创建”一个共享文件夹 `books`（小写，NAS 上的路径区分大小写，要和 `shuku-compose.yml` 里写的一样）。**一定要先建成共享文件夹**，否则数据会写进系统分区。
+2. 在 File Station 里，`books` 下面建三个文件夹：`投递`、`图书`、`漫画`；`Container` 下面建一个 `shuku`。
 
 | NAS 上的文件夹 | 用途 |
 | --- | --- |
-| `/share/Books/投递` | 投递目录，丢进来的书自动入库 |
-| `/share/Books/图书` | 整理好的电子书 |
-| `/share/Books/漫画` | 整理好的漫画 |
+| `/share/books/投递` | 投递目录，丢进来的书自动入库 |
+| `/share/books/图书` | 整理好的电子书 |
+| `/share/books/漫画` | 整理好的漫画 |
 | `/share/Container/shuku` | 数据库、封面、缓存 |
 
 已经有书的话，直接把现有的书库文件夹挂载成 `/books`，启动后会原地登记，不会移动；之后可以在“整理”里一键按规范整理（可撤销）。
@@ -66,7 +66,7 @@
 ### 2. 导入镜像、创建应用程序
 
 1. Container Station →**映像**→**导入**，选下载的 `shuku-server-amd64.tar.gz`（ARM 处理器的 NAS 选 arm64 那个），可以直接从电脑选。导入后能看到 `localhost/shuku`。注意要在“映像”里导入，不是“容器”。
-2. Container Station →**应用程序**→**创建**（旧版 Container Station 是“创建”→“创建应用程序”），应用程序名称填 `shuku`，把 `shuku-compose.yml` 的全部内容粘贴进去，点“验证 YAML”，再点“创建”。共享文件夹不叫 `Books` 的，改 `volumes` 里冒号**左边**的路径。
+2. Container Station →**应用程序**→**创建**（旧版 Container Station 是“创建”→“创建应用程序”），应用程序名称填 `shuku`，把 `shuku-compose.yml` 的全部内容粘贴进去，点“验证 YAML”，再点“创建”。共享文件夹不叫 `books` 的，改 `volumes` 里冒号**左边**的路径（大小写也要一样）。
 3. 浏览器打开 `http://192.168.31.200:27200`，设置访问密码，就能用了。
 
 `shuku-compose.yml` 里已经填好了内网地址 `http://192.168.31.200:27200` 和 Tailscale 地址 `http://100.81.34.58:27200`，手机、手表、插件连上后自动在两者之间切换。27200 被占用的话，把 `SHUKU_PORT` 和这两个地址里的端口一起改。

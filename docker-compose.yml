@@ -11,7 +11,7 @@
 # 8791（运营分析系统）、18765（3D 选品工具）、27180/27190（流水账房个人版/公司版）。
 # 27200 也被占用的话，把 SHUKU_PORT 和下面两个地址里的端口一起改。
 #
-# volumes 里冒号左边是 NAS 上的文件夹（先在控制台里建好共享文件夹 Books），冒号右边是容器里的路径，不要改。
+# volumes 里冒号左边是 NAS 上的文件夹（先在控制台里建好共享文件夹 books，注意是小写），冒号右边是容器里的路径，不要改。
 # 自己从源码构建（SSH）：docker build -t localhost/shuku:latest . && docker compose up -d
 
 services:
@@ -31,6 +31,6 @@ services:
       # AI 识别的 Key 在装好后的网页“设置 → 识别与整理”里填，不用写在这里
     volumes:
       - /share/Container/shuku:/data          # 数据库、封面、缓存
-      - /share/Books/投递:/inbox                # 投递目录：把书丢进来自动入库
-      - /share/Books/图书:/books                # 整理好的电子书
-      - /share/Books/漫画:/comics               # 整理好的漫画
+      - /share/books/投递:/inbox                # 投递目录：把书丢进来自动入库
+      - /share/books/图书:/books                # 整理好的电子书
+      - /share/books/漫画:/comics               # 整理好的漫画
