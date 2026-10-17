@@ -169,7 +169,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .page-head .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 
 .search {
-  position: relative; flex: 1; max-width: 520px; min-width: 200px;
+  position: relative; display: block; flex: 1; max-width: 520px; min-width: 200px;
 }
 .search input { padding-left: 38px; height: 40px; border-radius: 20px; background: var(--surface); }
 .search svg { position: absolute; left: 12px; top: 11px; width: 18px; height: 18px; color: var(--ink-3); pointer-events: none; }
@@ -227,6 +227,8 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .cv .flag { position: absolute; left: 8px; top: 8px; z-index: 1; font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--warn); color: #fff; }
 .cv .done { position: absolute; right: 6px; top: 6px; z-index: 1; width: 20px; height: 20px; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; display: grid; place-items: center; }
 .cv .done svg { width: 12px; height: 12px; }
+.cv .dl { position: absolute; left: 6px; bottom: 6px; z-index: 1; width: 20px; height: 20px; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; display: grid; place-items: center; }
+.cv .dl svg { width: 12px; height: 12px; }
 
 .book .more {
   position: absolute; top: 6px; right: 6px; z-index: 2; width: 30px; height: 30px; border-radius: 50%; border: 0;
@@ -290,6 +292,8 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 }
 .uploads header { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--rule); font-size: 14px; font-weight: 500; }
 .uploads header .icon-btn { width: 30px; height: 30px; margin-left: auto; }
+.uploads header > svg { width: 18px; height: 18px; flex: none; color: var(--ink-3); }
+.uploads li .e { color: var(--danger); font-size: 12.5px; line-height: 1.5; }
 .uploads ul { list-style: none; margin: 0; padding: 6px 0; overflow-y: auto; }
 .uploads li { padding: 6px 14px; font-size: 13px; display: grid; gap: 4px; }
 .uploads li .n { display: flex; gap: 8px; }
@@ -425,7 +429,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   .mobile-top b { font-family: var(--serif); font-size: 19px; letter-spacing: .06em; }
   .mobile-top .netline { margin-left: auto; font-size: 12px; color: var(--ink-3); }
   .tabbar {
-    display: grid; grid-template-columns: repeat(4, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
     padding: 6px 4px calc(6px + var(--safe-b)); background: color-mix(in srgb, var(--bg) 94%, transparent);
     backdrop-filter: blur(12px); border-top: 1px solid var(--rule);
   }
@@ -679,3 +683,56 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 body.narrating #toasts { bottom: calc(86px + var(--safe-b)); }
 @media (max-width: 899px) { .drawer > footer .btn span { display: none; } }
 .reader.narrating .r-status { opacity: 0; }
+
+/* ---------- 发现 ---------- */
+
+.link-add { display: flex; gap: 10px; align-items: center; margin: 0 0 34px; max-width: 760px; }
+.link-add .search { max-width: none; }
+.src-title { margin-bottom: 12px; }
+.src-title .btn { margin-left: auto; }
+.src-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip.add { display: inline-flex; align-items: center; gap: 4px; border-style: dashed; color: var(--ink-3); }
+.chip.add svg { width: 15px; height: 15px; }
+.src-note { margin: 10px 0 14px; color: var(--ink-3); font-size: 13px; min-height: 20px; }
+.src-search { margin-bottom: 18px; max-width: 760px; }
+.src-search .search { max-width: none; }
+.crumbs { display: flex; align-items: center; gap: 8px; margin: -6px 0 14px; }
+.crumbs:empty { display: none; }
+.disc-results { min-height: 200px; }
+.disc-results .grid { margin-top: 8px; }
+.disc-hint .row { margin-top: 4px; }
+.disc-navs { display: grid; gap: 8px; margin-bottom: 26px; max-width: 760px; }
+.disc-nav {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; text-align: left; cursor: pointer;
+  border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); transition: border-color .15s;
+}
+.disc-nav:hover { border-color: var(--rule-strong); }
+.disc-nav > svg { width: 20px; height: 20px; flex: none; color: var(--ink-3); }
+.disc-nav b { display: block; font-weight: 600; font-size: 15px; }
+.disc-nav small { display: block; color: var(--ink-3); font-size: 12.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv .flag.have { background: var(--accent); }
+.disc-formats { display: grid; gap: 8px; justify-items: start; }
+.disc-formats .btn { white-space: normal; height: auto; min-height: 36px; padding: 6px 14px; text-align: left; }
+.src-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+.src-row b { display: block; font-size: 14.5px; }
+.src-row small { display: block; color: var(--ink-3); font-size: 12.5px; overflow-wrap: anywhere; }
+.uploads.jobs li .bar { flex: none; height: 3px; }
+@media (max-width: 899px) {
+  .link-add { flex-wrap: wrap; margin-bottom: 26px; }
+  .link-add .search { flex-basis: 100%; }
+  .link-add .btn { width: 100%; }
+}
+
+/* ---------- 设备与配对 ---------- */
+
+.pair { display: grid; grid-template-columns: 188px 1fr; gap: 22px; align-items: start; padding: 16px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); }
+.pair .qr { width: 188px; height: 188px; border-radius: 6px; image-rendering: pixelated; background: #fff; }
+.pair-code { font: 600 30px/1.3 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: .12em; margin: 2px 0 4px; }
+.pair-steps { margin: 14px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 13.5px; display: grid; gap: 6px; }
+.dev-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+.dev-row > svg { width: 20px; height: 20px; flex: none; color: var(--ink-3); }
+.dev-row small { display: block; color: var(--ink-3); font-size: 12.5px; }
+@media (max-width: 899px) {
+  .pair { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+  .pair-steps { text-align: left; }
+}

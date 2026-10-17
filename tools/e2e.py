@@ -41,7 +41,7 @@ def section(name):
 
 # ---------------------------------------------------------------- 模拟服务
 
-TTS_LOG, AI_LOG, FETCH_LOG = [], [], []
+TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH = [], [], [], [], []
 TONE = b""
 COVER = b""
 
@@ -129,6 +129,36 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, {"items": []})
         if p.startswith("/img/"):
             return self.send(200, COVER, "image/jpeg")
+        if p.startswith("/opds/"):
+            import base64
+            a = self.headers.get("Authorization", "")
+            if a.startswith("Basic "):
+                OPDS_AUTH.append(base64.b64decode(a[6:]).decode())
+            return self.opds(p, q)
+        if p == "/page.html":
+            return self.send(200, "<html><body>这是一个网页</body></html>", "text/html; charset=utf-8")
+        if p == "/ws/zh/api.php":
+            sr = q.get("srsearch", [""])[0]
+            WS_LOG.append(sr)
+            hits = []
+            if "紅樓夢" in sr:
+                hits = [{"title": "紅樓夢", "snippet": "<span class=\"searchmatch\">紅樓夢</span>，清代曹雪芹著"}, {"title": "紅樓夢/第001回", "snippet": "甄士隱夢幻識通靈"}]
+            return self.send(200, {"query": {"search": hits}})
+        if p == "/ws/export":
+            page = q.get("page", [""])[0]
+            f = os.path.join(T, "remote", "ws-" + page + ".epub")
+            make_epub(f, page, "曹雪芹", [("第一回", ["甄士隱夢幻識通靈，賈雨村風塵懷閨秀。" * 20])])
+            return self.send(200, open(f, "rb").read(), "application/epub+zip", {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(page + ".epub")})
+        if p == "/ia/advancedsearch.php":
+            return self.send(200, {"response": {"numFound": 1, "docs": [{"identifier": "rulinwaishi00wu", "title": "儒林外史", "creator": ["吴敬梓"], "year": "1803", "language": "chi"}]}})
+        if p == "/ia/metadata/rulinwaishi00wu":
+            return self.send(200, {"metadata": {"title": "儒林外史"}, "files": [{"name": "rlws.pdf", "format": "Text PDF"}, {"name": "rlws.epub", "format": "EPUB"}]})
+        if p == "/ia/download/rulinwaishi00wu/rlws.epub":
+            f = os.path.join(T, "remote", "rlws.epub")
+            make_epub(f, "儒林外史", "吴敬梓", [("第一回", ["说楔子敷陈大义，借名流隐括全文。" * 20])])
+            return self.send(200, open(f, "rb").read(), "application/epub+zip")
+        if p.startswith("/ia/services/img/"):
+            return self.send(200, COVER, "image/jpeg")
         if p.startswith("/files/"):
             FETCH_LOG.append(p)
             f = os.path.join(T, "remote", urllib.parse.unquote(p[len("/files/"):]))
@@ -137,6 +167,31 @@ class Mock(BaseHTTPRequestHandler):
                                  {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(f))})
             return self.send(404, "not found", "text/plain")
         self.send(404, {"error": "no route " + p})
+
+    def opds(self, p, q):
+        A = 'xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:dc="http://purl.org/dc/terms/"'
+        def entry(t, a, f, summary=""):
+            return (f"<entry><title>{t}</title><id>urn:{t}</id><author><name>{a}</name></author><summary type='text'>{summary}</summary>"
+                    f"<link rel='http://opds-spec.org/acquisition' type='application/epub+zip' href='/files/{urllib.parse.quote(f)}' length='1234'/>"
+                    f"<link rel='http://opds-spec.org/acquisition' type='application/x-mobipocket-ebook' href='/files/{urllib.parse.quote(f)}.mobi'/>"
+                    f"<link rel='http://opds-spec.org/image' type='image/jpeg' href='{MOCK}/img/{urllib.parse.quote(t)}.jpg'/></entry>")
+        nav = "application/atom+xml;profile=opds-catalog;kind=acquisition"
+        if p == "/opds/root.xml":
+            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>测试书源</title><id>root</id>"
+                             f"<link rel='search' type='application/opensearchdescription+xml' href='osd.xml'/>"
+                             f"<entry><title>新书</title><id>new</id><content type='text'>最近上架</content><link rel='subsection' type='{nav}' href='new.xml'/></entry></feed>", "application/atom+xml")
+        if p == "/opds/osd.xml":
+            return self.send(200, f"<?xml version='1.0'?><OpenSearchDescription xmlns='http://a9.com/-/spec/opensearch/1.1/'><Url type='application/atom+xml;profile=opds-catalog' template='{MOCK}/opds/search?q={{searchTerms}}&amp;page={{startPage?}}'/></OpenSearchDescription>", "application/opensearchdescription+xml")
+        if p == "/opds/new.xml":
+            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>新书</title><id>new</id><link rel='next' type='{nav}' href='/opds/new2.xml'/>"
+                             + entry("镜花缘", "李汝珍", "镜花缘.epub", "清代长篇小说") + entry("老残游记", "刘鹗", "老残游记.epub") + "</feed>", "application/atom+xml")
+        if p == "/opds/new2.xml":
+            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>新书 第 2 页</title><id>new2</id>" + entry("海上花列传", "韩邦庆", "海上花列传.epub") + "</feed>", "application/atom+xml")
+        if p == "/opds/search":
+            kw = q.get("q", [""])[0]
+            es = "".join(entry(t, a, t + ".epub") for t, a in [("镜花缘", "李汝珍"), ("老残游记", "刘鹗"), ("海上花列传", "韩邦庆")] if kw and kw in t)
+            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>搜索：{kw}</title><id>s</id>{es}</feed>", "application/atom+xml")
+        self.send(404, "no", "text/plain")
 
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
@@ -255,7 +310,9 @@ def setup(fresh=True):
                SHUKU_LIBRARIES=f"图书:{T}/books:book,漫画:{T}/comics:comic",
                SHUKU_DOUBAN_BASE=MOCK + "/douban", SHUKU_OPENLIBRARY_BASE=MOCK + "/ol", SHUKU_OPENLIBRARY_COVERS=MOCK + "/img",
                SHUKU_GOOGLE_BASE=MOCK + "/google", SHUKU_BANGUMI_BASE=MOCK + "/bgm", SHUKU_EDGE_WSS="ws://127.0.0.1:9/none",
-               SHUKU_LAN_URL=BASE, SHUKU_REMOTE_URL="")
+               SHUKU_LAN_URL=BASE, SHUKU_REMOTE_URL="",
+               SHUKU_CATALOG_GUTENBERG=MOCK + "/opds/root.xml", SHUKU_CATALOG_IA=MOCK + "/ia",
+               SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export")
     log = open(os.path.join(T, "server.log"), "w")
     server_proc = subprocess.Popen([os.path.join(T, "shuku-e2e-server")], cwd=T, env=env, stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: requests.get(BASE + "/api/ping", timeout=2).ok, 20, what="服务器启动")
@@ -564,6 +621,110 @@ def test_settings_libs():
     check("跨地址访问的 CORS 预检", r.status_code == 204 and r.headers.get("Access-Control-Allow-Origin") == "http://other:8080")
 
 
+def test_clients():
+    global TOKEN
+    section("配对、设备、按章节读（手机、手表用）")
+    p = j("POST", "/api/pair")
+    check("生成配对码和二维码链接", len(p["code"]) == 8 and p["link"].startswith("shuku://pair?") and "c=" + p["code"] in p["link"], p)
+    saved, TOKEN = TOKEN, ""
+    check("错误的配对码", api("POST", "/api/pair/claim", 401, json={"code": "WRONG234", "device": "x"}).status_code == 401)
+    r = j("POST", "/api/pair/claim", json={"code": p["code"].lower(), "device": "Pixel 9"})
+    check("配对码（不分大小写）换到令牌和地址", len(r["token"]) == 64 and r["lan_url"] == BASE, r)
+    check("配对码只能用一次", api("POST", "/api/pair/claim", 401, json={"code": p["code"]}).status_code == 401)
+    phone = TOKEN = r["token"]
+    check("新令牌可以用", j("GET", "/api/info")["id"])
+    TOKEN = saved
+    pix = [x for x in j("GET", "/api/sessions") if x["device"] == "Pixel 9"]
+    check("设备列表里有新手机", pix and not pix[0]["current"], pix)
+    j("DELETE", f"/api/sessions/{pix[0]['id']}")
+    TOKEN = phone
+    check("移除设备后它的令牌失效", api("GET", "/api/info", 401).status_code == 401)
+    TOKEN = saved
+    b2 = book_by_title("三体Ⅱ·黑暗森林")
+    c = j("GET", f"/api/books/{b2['id']}/chapters")
+    check("EPUB 按章节列出（3 章）", [x["title"] for x in c["chapters"]] == ["上部 面壁者", "中部 咒语", "下部 黑暗森林"], [x["title"] for x in c["chapters"]])
+    check("章节位置是阅读器能认的 sec:", c["chapters"][1]["loc"].startswith("sec:1:"), c["chapters"][1])
+    ch = j("GET", f"/api/books/{b2['id']}/chapters/1")
+    check("取一章正文", "晴朗的早晨" in ch["text"] and ch["count"] == 3)
+    j("PUT", f"/api/books/{b2['id']}/progress", json={"file_id": c["file_id"], "location": "sec:2:0.5", "percent": 0.83, "device": "手表"})
+    c = j("GET", f"/api/books/{b2['id']}/chapters")
+    check("从手表位置接着读（第 3 章一半）", c["resume"]["i"] == 2 and abs(c["resume"]["frac"] - 0.5) < 0.01, c["resume"])
+    alive = book_by_title("活着")
+    c = j("GET", f"/api/books/{alive['id']}/chapters")
+    check("TXT 章节", len(c["chapters"]) == 5 and c["chapters"][0]["title"].startswith("第一章"), [x["title"] for x in c["chapters"]])
+    pdf = [b for b in all_books() if "深度学习" in b["title"]][0]
+    c = j("GET", f"/api/books/{pdf['id']}/chapters")
+    check("PDF 几页合成一段", c["chapters"][0]["loc"].startswith("p:1:") and c["chapters"][0]["title"].startswith("第 1"), c["chapters"][:2])
+    comic = [b for b in all_books() if b["kind"] == "comic"][0]
+    check("漫画没有文字", api("GET", f"/api/books/{comic['id']}/chapters", 400).status_code == 400)
+    small = api("GET", f"/api/books/{b2['id']}/cover?w=120")
+    big = api("GET", f"/api/books/{b2['id']}/cover")
+    check("小尺寸封面", small.headers["Content-Type"] == "image/jpeg" and len(small.content) < len(big.content), (len(small.content), len(big.content)))
+    t = j("GET", "/api/trash")
+    check("回收站统计", t["files"] >= 1, t)
+    j("DELETE", "/api/trash")
+    check("清空回收站", j("GET", "/api/trash")["files"] == 0)
+
+
+def wait_job(jid):
+    def done():
+        js = [x for x in j("GET", "/api/fetch") if x["id"] == jid]
+        return js[0] if js and js[0]["status"] in ("done", "error") else None
+    return wait(done, 40, 0.5, "下载任务")
+
+
+def test_fetch_discover():
+    section("从链接添加、发现（公开书库）")
+    for t, a in [("镜花缘", "李汝珍"), ("老残游记", "刘鹗"), ("海上花列传", "韩邦庆")]:
+        make_epub(os.path.join(T, "remote", t + ".epub"), t, a, [("第一回", [t + "的第一回。" * 40])])
+    r = j("POST", "/api/fetch", json={"url": MOCK + "/files/" + urllib.parse.quote("镜花缘.epub")})
+    job = wait_job(r["id"])
+    check("链接下载完成", job["status"] == "done" and job["bytes"] > 1000, job)
+    b = wait(lambda: book_by_title("镜花缘"), 40, 1, "链接下载的书入库")
+    check("下载的书自动入库", b and b["author"] == "李汝珍", b and b["author"])
+    job = wait_job(j("POST", "/api/fetch", json={"url": MOCK + "/page.html"})["id"])
+    check("网页链接给出明确提示", job["status"] == "error" and "网页" in job["error"], job)
+    check("非 http 链接被拒绝", api("POST", "/api/fetch", 400, json={"url": "ftp://x/y.epub"}).status_code == 400)
+    cats = j("GET", "/api/catalogs")
+    check("内置书源", {"wikisource", "gutenberg", "ia", "standardebooks"} <= {c["id"] for c in cats}, [c["id"] for c in cats])
+    root = j("GET", "/api/catalogs/gutenberg/browse")
+    check("OPDS 目录", root["entries"] and root["entries"][0]["kind"] == "nav" and root["can_search"], root)
+    feed = j("GET", "/api/catalogs/gutenberg/browse?url=" + urllib.parse.quote(root["entries"][0]["href"]))
+    bk = feed["entries"][1]
+    check("OPDS 书目（作者、封面、格式按 EPUB 优先）", bk["kind"] == "book" and bk["author"] == "刘鹗" and bk["formats"][0]["type"] == "EPUB" and bk["cover"].startswith(MOCK), bk)
+    check("书库里已有的书做了标记", feed["entries"][0]["id"].startswith("have:"), feed["entries"][0]["id"])
+    check("OPDS 分页", feed.get("next"))
+    page2 = j("GET", "/api/catalogs/gutenberg/browse?next=" + urllib.parse.quote(feed["next"]))
+    check("下一页", page2["entries"] and page2["entries"][0]["title"] == "海上花列传", page2)
+    sr = j("GET", "/api/catalogs/gutenberg/browse?q=" + urllib.parse.quote("老残"))
+    check("OPDS 搜索（OpenSearch 描述）", [e["title"] for e in sr["entries"]] == ["老残游记"], sr)
+    img = api("GET", "/api/catalog-image?c=gutenberg&url=" + urllib.parse.quote(bk["cover"]))
+    check("书源封面经服务器转发", img.headers["Content-Type"].startswith("image/"))
+    j("POST", "/api/fetch", json={"url": sr["entries"][0]["formats"][0]["url"], "name": "老残游记 - 刘鹗", "catalog": "gutenberg"})
+    b = wait(lambda: book_by_title("老残游记"), 40, 1, "书源下载入库")
+    check("书源一键入库", b and b["author"] == "刘鹗")
+    c = j("POST", "/api/catalogs", json={"url": MOCK + "/opds/root.xml", "username": "me", "password": "pw"})
+    check("添加自定义 OPDS 书源（自动取名）", c["name"] == "测试书源" and c["id"].startswith("u"), c)
+    check("书源密码不回传", all(x.get("password") in (None, "", "••••") for x in j("GET", "/api/catalogs")))
+    check("需要登录的书源带上用户名密码", OPDS_AUTH and OPDS_AUTH[-1] == "me:pw", OPDS_AUTH[-3:])
+    check("无效地址被拒绝", api("POST", "/api/catalogs", 400, json={"url": MOCK + "/page.html"}).status_code == 400)
+    j("DELETE", f"/api/catalogs/{c['id']}")
+    j("DELETE", "/api/catalogs/standardebooks")
+    ids = [x["id"] for x in j("GET", "/api/catalogs")]
+    check("删除书源（内置的可以隐藏）", c["id"] not in ids and "standardebooks" not in ids, ids)
+    j("POST", "/api/catalogs/restore")
+    check("恢复内置书源", "standardebooks" in [x["id"] for x in j("GET", "/api/catalogs")])
+    ws = j("GET", "/api/catalogs/wikisource/browse?q=" + urllib.parse.quote("红楼梦"))
+    check("维基文库：简体搜到繁体书名，章节页归到作品", [e["title"] for e in ws["entries"]] == ["紅樓夢"], (ws, WS_LOG))
+    j("POST", "/api/fetch", json={"url": ws["entries"][0]["formats"][0]["url"], "name": "紅樓夢", "catalog": "wikisource"})
+    check("维基文库生成 EPUB 入库", wait(lambda: book_by_title("紅樓夢"), 40, 1, "维基文库入库"))
+    ia = j("GET", "/api/catalogs/ia/browse?q=" + urllib.parse.quote("儒林外史"))
+    check("互联网档案馆搜索", ia["entries"] and ia["entries"][0]["formats"][0]["url"] == "ia:rulinwaishi00wu" and ia["entries"][0]["author"] == "吴敬梓", ia)
+    j("POST", "/api/fetch", json={"url": "ia:rulinwaishi00wu", "catalog": "ia"})
+    b = wait(lambda: book_by_title("儒林外史"), 40, 1, "档案馆入库")
+    check("互联网档案馆下载（自动选 EPUB）", b and b["files"][0]["format"] == "epub")
+
+
 # ---------------------------------------------------------------- 网页检查
 
 def ui_tests():
@@ -694,6 +855,7 @@ def ui_tests():
         pg.goto(BASE + f"/#/read/{b2['id']}")
         reader_ready(pg)
         pg.wait_for_timeout(800)
+        check("从手表的位置（sec:2:0.5）接着读", "下部" in pg.inner_text(".r-status"), pg.inner_text(".r-status"))
         v0 = int(pg.eval_on_selector(".r-prog input[type=range]", "e => e.value"))
         pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(700)
         pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(700)
@@ -853,6 +1015,141 @@ def ui_tests():
         shot(pg, "16-dark-shelf")
         ctx.close()
 
+        # ---- 发现 ----
+        section("网页：发现、从链接添加")
+        ctx = context()
+        pg = ctx.new_page(); attach(pg, "discover")
+        pg.goto(BASE + "/#/discover")
+        pg.wait_for_selector(".src-chips .chip")
+        check("书源列表", pg.locator(".src-chips .chip", has_text="维基文库").count() == 1 and pg.locator(".src-chips .chip", has_text="古腾堡计划").count() == 1)
+        pg.locator(".src-chips .chip", has_text="维基文库").click()
+        pg.wait_for_selector(".disc-hint .chip")
+        pg.fill(".src-search input", "红楼梦")
+        pg.press(".src-search input", "Enter")
+        pg.wait_for_selector(".grid.disc .book")
+        check("维基文库搜索结果", "紅樓夢" in pg.inner_text(".grid.disc"))
+        shot(pg, "17-discover-wikisource")
+        pg.locator(".src-chips .chip", has_text="古腾堡计划").click()
+        pg.wait_for_selector(".disc-nav")
+        pg.click(".disc-nav")
+        pg.wait_for_selector(".grid.disc .book")
+        check("OPDS 目录点进去看到书", pg.locator(".grid.disc .book").count() == 2)
+        check("书库里已有的书有标记", pg.locator(".grid.disc .flag.have").count() >= 1)
+        pg.click(".loading-more button")
+        pg.wait_for_function("() => document.querySelectorAll('.grid.disc .book').length === 3")
+        check("加载更多", True)
+        shot(pg, "18-discover-opds")
+        pg.locator(".grid.disc .book", has_text="海上花列传").click()
+        pg.wait_for_selector(".drawer.show .disc-formats .btn.primary")
+        check("书目详情：格式按 EPUB 优先", "EPUB" in pg.inner_text(".drawer .disc-formats .btn.primary"))
+        pg.click(".drawer .disc-formats .btn.primary")
+        pg.wait_for_selector(".uploads.jobs li")
+        check("下载任务面板", True)
+        pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('海上花列传') && t.textContent.includes('入库'))", timeout=40000)
+        check("书源一键入库后有提示", True)
+        make_epub(os.path.join(T, "remote", "浮生六记.epub"), "浮生六记", "沈复", [("闺房记乐", ["余生乾隆癸未冬十一月二十有二日。" * 30])])
+        pg.fill(".link-add input", MOCK + "/files/" + urllib.parse.quote("浮生六记.epub"))
+        pg.click(".link-add button")
+        pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('浮生六记'))", timeout=40000)
+        check("粘贴链接下载入库", True)
+        pg.fill(".link-add input", MOCK + "/page.html")
+        pg.click(".link-add button")
+        pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast.err')].some(t => t.textContent.includes('网页'))", timeout=20000)
+        check("网页链接提示失败原因", True)
+        ctx.close()
+
+        # ---- 设备配对 ----
+        section("网页：手机配对二维码、设备列表")
+        ctx = context()
+        pg = ctx.new_page(); attach(pg, "pair")
+        pg.goto(BASE + "/#/settings")
+        pg.wait_for_selector("button:has-text('显示配对二维码')")
+        pg.click("button:has-text('显示配对二维码')")
+        pg.wait_for_selector(".pair img.qr")
+        pg.add_script_tag(content=open("/home/claude/cozmo/jsQR/dist/jsQR.js").read()) if os.path.exists("/home/claude/cozmo/jsQR/dist/jsQR.js") else None
+        code = pg.inner_text(".pair-code").replace(" ", "")
+        decoded = pg.evaluate("""async () => {
+          if (!window.jsQR) return 'nojsqr'
+          const img = document.querySelector('.pair img.qr'); await img.decode()
+          const c = document.createElement('canvas'); c.width = c.height = 400; const x = c.getContext('2d'); x.drawImage(img, 0, 0, 400, 400)
+          const q = jsQR(x.getImageData(0, 0, 400, 400).data, 400, 400); return q ? q.data : null }""")
+        check("二维码能扫出配对链接", decoded == "nojsqr" or (decoded and decoded.startswith("shuku://pair?") and "c=" + code in decoded), decoded)
+        pg.wait_for_selector(".dev-row")
+        check("已登录设备列表", pg.locator(".dev-row").count() >= 2)
+        shot(pg, "19-pair")
+        ctx.close()
+
+        # ---- 模拟安卓 App：桥接 ----
+        section("网页：在安卓 App 里运行（模拟原生桥）")
+        fake = """
+          window.__calls = []; window.__store = { 'shuku.token': %s }; window.__downloads = []
+          window.ShukuNative = {
+            storageGet: k => (k in __store ? __store[k] : null), storageSet: (k, v) => { __store[k] = v }, storageRemove: k => { delete __store[k] },
+            storageKeys: () => JSON.stringify(Object.keys(__store)), version: () => '1.0-test', deviceName: () => '测试手机',
+            setRoute: j => __calls.push(['setRoute', j]), setNetwork: j => __calls.push(['setNetwork', j]), setToken: t => __calls.push(['setToken', t]),
+            setThemeColor: (c, d) => __calls.push(['setThemeColor', c, d]), setReaderMode: on => __calls.push(['setReaderMode', on]),
+            saveProgress: (id, body) => __calls.push(['saveProgress', id, body]), tts: (cmd, arg) => __calls.push(['tts', cmd, arg]),
+            prefs: () => JSON.stringify({ volume_keys: true, keep_screen_on: true, tts_engine: 'server' }), setPref: (k, v) => __calls.push(['setPref', k, v]),
+            downloads: () => JSON.stringify(__downloads), removeDownload: id => { __downloads = [] },
+            download: (id, json) => { __calls.push(['download', id, json]); __downloads = [{ id, title: JSON.parse(json).title, state: 'done', size: 2048, format: 'epub' }]; setTimeout(() => shukuNativeEvent('download', JSON.stringify({ id, state: 'done' })), 50) },
+            syncWatch: () => JSON.stringify({ message: '已发送给手表' }), logout: () => __calls.push(['logout']), ttsVoices: () => '[]',
+          }""" % json.dumps(TOKEN)
+        ctx = browser.new_context(viewport={"width": 412, "height": 900}, device_scale_factor=2, has_touch=True, is_mobile=True, locale="zh-CN")
+        ctx.add_init_script(fake)
+        pg = ctx.new_page(); attach(pg, "native")
+        calls = lambda name: pg.evaluate(f"() => __calls.filter(c => c[0] === {json.dumps(name)})")
+        pg.goto(BASE + "/")
+        pg.wait_for_selector(".book")
+        check("App 里登录状态来自原生存储", pg.evaluate("() => localStorage.getItem('shuku.token')") == TOKEN)
+        check("线路告诉原生", any(json.loads(c[1])["route"] in ("lan", "origin") for c in calls("setRoute")), calls("setRoute"))
+        check("状态栏颜色交给原生", len(calls("setThemeColor")) >= 1)
+        check("App 里不注册 Service Worker", pg.evaluate("() => navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(r => r.length) : 0") == 0)
+        pg.locator(".book", has_text="活着").first.click(button="right")
+        pg.wait_for_selector(".drawer.show .read-row button:has-text('下载到手机')")
+        pg.click(".drawer .read-row button:has-text('下载到手机')")
+        pg.wait_for_selector(".drawer .read-row button:has-text('已下载')")
+        check("详情里下载到手机", calls("download") and json.loads(calls("download")[0][2])["title"] == "活着")
+        check("返回键先关详情", pg.evaluate("() => window.shukuBack()") is True)
+        pg.wait_for_timeout(400)
+        check("已下载的书在封面上有标记", pg.locator(".book .cv .dl").count() >= 1)
+        pg.goto(BASE + "/#/settings")
+        pg.wait_for_selector(".set-sec >> text=手机 App")
+        check("设置里有“手机 App”一节", pg.locator(".set-sec h2", has_text="手机 App").count() == 1)
+        shot(pg, "20-native-settings")
+        pg.goto(BASE + f"/#/read/{b2['id']}")
+        reader_ready(pg)
+        pg.wait_for_timeout(600)
+        check("阅读器打开时通知原生（音量键、常亮）", [c[1] for c in calls("setReaderMode")][-1] is True)
+        cfi0 = pg.evaluate("() => document.querySelector('foliate-view').lastLocation?.cfi")
+        pg.evaluate("() => shukuNativeEvent('key', JSON.stringify({ dir: 'next' }))")
+        pg.wait_for_timeout(800)
+        check("音量键翻页", pg.evaluate("() => document.querySelector('foliate-view').lastLocation?.cfi") != cfi0)
+        pg.wait_for_timeout(1800)
+        sp = calls("saveProgress")
+        check("进度交给原生保存", sp and json.loads(sp[-1][2])["location"].startswith("epubcfi"), sp[-1:] if sp else None)
+        pg.keyboard.press("r")
+        pg.wait_for_function("() => __calls.some(c => c[0] === 'tts' && c[1] === 'start')")
+        start = json.loads([c for c in calls("tts") if c[1] == "start"][-1][2])
+        check("听书交给原生：带书名、语速和句子", start["book"]["title"] == "三体Ⅱ·黑暗森林" and len(start["segments"]) > 3 and start["speed"] == 1, {k: start[k] for k in ("book", "speed")})
+        first_id = start["segments"][0]["id"]
+        pg.evaluate("(id) => { shukuNativeEvent('tts', JSON.stringify({ type: 'state', playing: true })); shukuNativeEvent('tts', JSON.stringify({ type: 'seg', id })) }", first_id)
+        pg.wait_for_function("() => document.querySelector('foliate-view').renderer.getContents()[0].doc.defaultView.CSS.highlights.has('tts')")
+        check("原生读到哪句就高亮哪句", True)
+        check("播放状态同步到界面", pg.get_attribute(".r-player .play", "title") == "暂停")
+        pg.evaluate("() => shukuNativeEvent('tts', JSON.stringify({ type: 'need' }))")
+        pg.wait_for_function("() => __calls.some(c => c[0] === 'tts' && (c[1] === 'append' || c[1] === 'end'))")
+        app = [c for c in calls("tts") if c[1] in ("append", "end")][-1]
+        check("需要更多句子时不排版直接取下一章（或读完）", app[1] == "end" or len(json.loads(app[2])["segments"]) > 0, app[:2])
+        pg.click(".r-player button[title='下一句']")
+        check("控制按钮发给原生", any(c[1] == "next" for c in calls("tts")))
+        pg.evaluate("() => shukuNativeEvent('tts', JSON.stringify({ type: 'stopped' }))")
+        check("原生停止后界面收起", pg.locator(".r-player[hidden]").count() == 1)
+        check("返回键退出阅读器", pg.evaluate("() => window.shukuBack()") is True)
+        pg.wait_for_selector(".reader", state="detached")
+        check("退出阅读器时通知原生", [c[1] for c in calls("setReaderMode")][-1] is False)
+        check("首页按返回键交给 App（退到后台）", pg.evaluate("() => { location.hash = '#/'; return new Promise(r => setTimeout(() => r(window.shukuBack()), 300)) }") is False)
+        ctx.close()
+
         # ---- 上传 ----
         section("网页：上传")
         p = os.path.join(T, "remote", "上传测试《夜航船》张岱.epub")
@@ -886,7 +1183,7 @@ def main():
             time.sleep(3600)
     try:
         setup()
-        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs]:
+        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_fetch_discover]:
             try:
                 t()
             except Exception as e:

@@ -1,15 +1,33 @@
 // 书籍详情：信息、格式、编辑、确认、重新识别、删除
 
 import { h, clear, fill, add, icon, coverEl, openDrawer, toast, toastError, confirmDialog, fmtBytes, pct } from './ui.js'
-import { api, apiUrl } from './api.js'
+import { api, apiUrl, net } from './api.js'
+import { isNative, call, onNative, refreshDownloads } from './native.js'
 
 export async function openBook(id, ctx) {
   const d = openDrawer({ title: '书籍详情', body: h('div', { class: 'muted' }, '加载中…') })
   let b
   try { b = await api('/api/books/' + id) } catch (e) { fill(d.body, h('p', null, e.message)); return }
+  // App 里：下载到手机，离线也能读
+  const dlBtn = isNative ? h('button', { class: 'btn', type: 'button' }) : null
+  function drawDl() {
+    if (!dlBtn) return
+    const st = refreshDownloads().find(x => x.id === b.id)
+    dlBtn.disabled = st?.state === 'downloading'
+    fill(dlBtn, icon('download'), !st || st.state === 'error' ? (st ? '重新下载' : '下载到手机') : st.state === 'done' ? '已下载 · 删除' : `下载中 ${Math.round((st.progress || 0) * 100)}%`)
+    dlBtn.onclick = () => {
+      if (st?.state === 'done') { call('removeDownload', b.id); toast('已从手机删除'); drawDl(); return }
+      if (net.route === 'offline') { toast('现在连不上书库，联网后再下载', { error: true }); return }
+      call('download', b.id, { ...b, files: undefined, description: b.description })
+      drawDl()
+    }
+  }
+  if (dlBtn) { const off = onNative('download', drawDl); const t = setInterval(() => { if (!d.panel.isConnected) { off(); clearInterval(t) } }, 3000) }
+
   render()
 
   function render() {
+    drawDl()
     const cats = ctx.settings?.categories || []
     const f = {}
     const inp = (k, attrs = {}) => (f[k] = h('input', { class: 'input', value: b[k] ?? '', ...attrs }))
@@ -37,6 +55,7 @@ export async function openBook(id, ctx) {
         b.percent > 0 ? h('div', { class: 'muted small-text', style: { marginTop: '10px' } }, b.read_state === 'done' ? '已读完' : `已读 ${pct(b.percent)}`) : null,
         h('div', { class: 'read-row' },
           h('a', { class: 'btn primary', href: '#/read/' + b.id, onclick: () => d.close() }, icon('reading'), b.percent > 0 && b.read_state !== 'done' ? '继续阅读' : '开始阅读'),
+          isNative ? dlBtn : null,
           b.author ? h('a', { class: 'btn quiet', href: '#/author/' + encodeURIComponent(b.author), onclick: () => d.close() }, '作者的其他书') : null)))
 
     const files = h('ul', { class: 'files' }, (b.files || []).map(x => h('li', null,

@@ -245,12 +245,29 @@ export class Engine {
   // ---------- 听书：按页读 ----------
   async ttsSegments(fromView) {
     if (fromView || !this.ttsPage) this.ttsPage = this.page
-    const page = await this.pdf.getPage(this.ttsPage)
+    return this.pageSegments(this.ttsPage)
+  }
+
+  async pageSegments(n) {
+    const page = await this.pdf.getPage(n)
     const tc = await page.getTextContent()
     let text = ''
     for (const it of tc.items) { text += it.str; if (it.hasEOL) text += /[。！？.!?：:]$/.test(it.str.trim()) ? '\n' : '' }
-    return splitSentences(text).map(s => ({ text: s.text, page: this.ttsPage }))
+    return splitSentences(text).map(s => ({ text: s.text, page: n }))
   }
+
+  // App 里的听书：按页往后取文字，不需要渲染
+  ttsUnitKey() { return this.ttsPage || this.page }
+  async ttsUnitAfter(key) {
+    for (let p = (key || 0) + 1; p <= this.count; p++) {
+      const segs = await this.pageSegments(p)
+      if (segs.length) return { key: p, segs: segs.map((x, n) => ({ text: x.text, i: n })) }
+    }
+    return null
+  }
+  async ttsShowUnit(key) { if (this.page !== key) this.goToPage(key) }
+  async ttsSegmentsOf(key) { return this.pageSegments(key) }
+  ttsLocation(key) { return { location: `p:${key}:0`, fraction: this.count > 1 ? (key - 1) / (this.count - 1) : 1 } }
 
   async ttsNextUnit() {
     if ((this.ttsPage || this.page) >= this.count) return false

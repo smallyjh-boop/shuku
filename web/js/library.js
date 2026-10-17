@@ -1,5 +1,16 @@
 import { h, clear, fill, add, icon, coverEl, debounce, store, save, pct, fmtTime } from './ui.js'
 import { api, apiUrl } from './api.js'
+import { isNative, isDownloaded, onNative } from './native.js'
+
+// App 里下载完成或删除后，更新封面上“已下载到手机”的标记
+if (isNative) onNative('download', () => setTimeout(() => {
+  for (const el of document.querySelectorAll('.book[data-id] .cv')) {
+    const id = +el.closest('.book').dataset.id
+    const has = el.querySelector('.dl')
+    if (isDownloaded(id) && !has) el.append(h('span', { class: 'dl', title: '已下载到手机' }, icon('phone')))
+    else if (!isDownloaded(id) && has) has.remove()
+  }
+}, 0))
 
 // 把片段里的关键词标出来
 function markSnippet(text, m) {
@@ -181,7 +192,7 @@ export function bookCard(b, ctx) {
   const open = () => b.status === 'review' ? ctx.openBook(b.id) : ctx.navigate('#/read/' + b.id)
   let pressTimer = 0, longPressed = false
   const el = h('div', {
-    class: 'book', role: 'button', tabindex: 0, title: b.title + (b.author ? ' · ' + b.author : ''),
+    class: 'book', role: 'button', tabindex: 0, title: b.title + (b.author ? ' · ' + b.author : ''), dataset: { id: b.id },
     onclick: e => { if (longPressed) { longPressed = false; return } open() },
     onkeydown: e => { if (e.key === 'Enter') open(); if (e.key === 'i') ctx.openBook(b.id) },
     oncontextmenu: e => { e.preventDefault(); ctx.openBook(b.id) },
@@ -189,11 +200,17 @@ export function bookCard(b, ctx) {
     ontouchend: () => clearTimeout(pressTimer),
     ontouchmove: () => clearTimeout(pressTimer),
   },
-    withMore(coverEl(b, apiUrl), () => ctx.openBook(b.id)),
+    withMore(withDl(coverEl(b, apiUrl), b.id), () => ctx.openBook(b.id)),
     b.percent > 0 && b.read_state !== 'done' ? h('div', { class: 'bar' }, h('i', { style: { width: pct(b.percent) } })) : null,
     h('div', { class: 't' }, b.title),
     h('div', { class: 'a', onclick: e => { e.stopPropagation(); ctx.openBook(b.id) } }, b.author || (b.series && b.kind === 'comic' ? b.series : '') || '详情'))
   return el
+}
+
+// App 里：已经下载到手机的书在封面左下角标一下
+function withDl(cv, id) {
+  if (isDownloaded(id)) cv.append(h('span', { class: 'dl', title: '已下载到手机' }, icon('phone')))
+  return cv
 }
 
 function withMore(cv, fn) {

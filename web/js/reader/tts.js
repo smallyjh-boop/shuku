@@ -2,7 +2,8 @@
 // 声音来源：服务器（微软自然语音 / 自定义接口，带缓存）或设备自带语音
 
 import { h, fill, icon, iconBtn, toast, store, save } from '../ui.js'
-import { api, apiUrl } from '../api.js'
+import { api, apiUrl, net } from '../api.js'
+import { call, callJSON, onNative } from '../native.js'
 
 const SPEEDS = [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5]
 const TIMERS = [0, 15, 30, 60, -1] // -1：读完本章
@@ -342,6 +343,221 @@ export class Narrator {
       const sel = h('select', { class: 'input', 'aria-label': '音色' }, info.voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.voice }, `${v.name}${v.lang ? '（' + v.lang + (v.gender ? ' · ' + v.gender : '') + '）' : ''}`)))
       sel.onchange = () => this.setVoice(sel.value)
       parts.push(sel)
+    }
+    parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
+      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
+    return parts
+  }
+}
+
+
+// =====================================================================
+// 安卓 App 里的听书：声音交给原生的后台服务播放（锁屏、切到别的 App、耳机按键、手表都能控制），
+// 这里负责把正文切成句子交给它、高亮正在读的句子、翻页和记录进度。
+// 后面的章节不经过排版直接从书里取文字，所以熄屏时也能接着读下去。
+// =====================================================================
+
+export class NativeNarrator {
+  constructor(shell) {
+    this.shell = shell
+    this.prefs = store(PREFS_KEY, { speed: 1, voice: '', engine: '' })
+    this.active = false
+    this.playing = false
+    this.segs = new Map()   // id → { key, i, text }
+    this.order = []          // 已交给原生的句子 id
+    this.lastKey = null
+    this.timerMin = 0
+    this.off = onNative('tts', e => this.onEvent(e))
+    this.buildUI()
+  }
+
+  get speed() { return this.prefs.speed || 1 }
+
+  buildUI() {
+    this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
+    this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: () => this.cycleSpeed() }, '1.0×')
+    this.timerBtn = h('button', { class: 'icon-btn', title: '睡眠定时', onclick: () => this.cycleTimer() }, icon('timer'))
+    this.timerText = h('span', { class: 'timer' })
+    this.stateEl = h('span', { class: 'state' })
+    this.el = h('div', { class: 'r-player', hidden: true, role: 'region', 'aria-label': '听书' },
+      iconBtn('prevSent', '上一句', () => call('tts', 'prev', '')),
+      this.playBtn,
+      iconBtn('nextSent', '下一句', () => call('tts', 'next', '')),
+      this.speedBtn, this.timerBtn, this.timerText, this.stateEl,
+      iconBtn('close', '停止听书', () => this.stop()))
+    this.el.addEventListener('click', e => e.stopPropagation())
+    this.shell.root.append(this.el)
+    this.updateUI()
+  }
+
+  updateUI() {
+    this.playBtn.replaceChildren(icon(this.playing ? 'pause' : 'play'))
+    this.playBtn.title = this.playing ? '暂停' : '继续'
+    this.speedBtn.textContent = this.speed.toFixed(1) + '×'
+    this.timerBtn.classList.toggle('on', !!this.timerMin)
+    this.timerText.textContent = this.timerMin === -1 ? '本章' : this.timerMin > 0 ? this.timerMin + '分' : ''
+  }
+
+  // 一段（EPUB 的一节、PDF 的一页）的句子；第一段从当前看到的位置开始
+  async firstUnit() {
+    const eng = this.shell.engine
+    const segs = await eng.ttsSegments(true)
+    const key = eng.ttsUnitKey()
+    const all = await eng.ttsSegments(false)
+    const offset = Math.max(0, all.length - segs.length) // 从当前页开始时跳过了前面的句子
+    return { key, segs: segs.map((s, n) => ({ text: s.text, i: n + offset })) }
+  }
+
+  pack(unit) {
+    return unit.segs.map(s => {
+      const id = `${unit.key}:${s.i}`
+      this.segs.set(id, { key: unit.key, i: s.i, text: s.text })
+      this.order.push(id)
+      return { id, text: s.text }
+    })
+  }
+
+  async start() {
+    const eng = this.shell.engine
+    if (!eng?.ttsSegments) { toast('漫画没有文字，不能朗读'); return }
+    this.active = true
+    this.el.hidden = false
+    this.shell.root.classList.add('narrating')
+    document.body.classList.add('narrating')
+    this.setState('准备中…')
+    this.segs.clear(); this.order = []
+    let unit = await this.firstUnit()
+    // 当前这一节已经读完（比如在一节的最后一页），从下一节开始
+    while (unit && !unit.segs.length) unit = await this.shell.engine.ttsUnitAfter(unit.key)
+    if (!unit) { this.stop(); toast('后面没有可以朗读的文字了'); return }
+    this.lastKey = unit.key
+    const info = this.shell.info || {}
+    call('tts', 'start', {
+      book: { id: this.shell.id, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
+      voice: this.prefs.voice || '', speed: this.speed, segments: this.pack(unit),
+    })
+  }
+
+  async onEvent(e) {
+    if (!this.active && e.type !== 'state') return
+    switch (e.type) {
+      case 'seg': return this.onSeg(e.id)
+      case 'need': return this.onNeed()
+      case 'state':
+        this.playing = !!e.playing
+        if (e.timer !== undefined) this.timerMin = e.timer
+        if (e.speed) { this.prefs.speed = e.speed; save(PREFS_KEY, this.prefs) }
+        this.setState(e.status || '')
+        this.updateUI()
+        return
+      case 'error': toast(e.message || '朗读出错了', { error: true, duration: 5000 }); return
+      case 'stopped': this.cleanup(); if (e.reason) toast(e.reason); return
+    }
+  }
+
+  async onSeg(id) {
+    const seg = this.segs.get(id)
+    if (!seg) return
+    this.cur = seg
+    this.shell.markActivity?.()
+    const eng = this.shell.engine
+    if (document.visibilityState === 'visible') {
+      // 读到了还没显示的那一节：翻过去再高亮
+      if (eng.ttsUnitKey() !== seg.key) await eng.ttsShowUnit(seg.key)
+      const segs = await eng.ttsSegmentsOf(seg.key)
+      const s = segs[seg.i]
+      if (s) eng.ttsHighlight(s)
+      const loc = eng.ttsLocation?.(seg.key, seg.i)
+      if (loc && eng.kind === 'pdf') this.shell.saveLocation(loc.location, loc.fraction)
+    } else {
+      // 熄屏或在后台：不排版，只记下位置，回来时从这里接着看
+      const loc = eng.ttsLocation?.(seg.key, seg.i)
+      if (loc) this.shell.saveLocation(loc.location, loc.fraction)
+    }
+  }
+
+  async onNeed() {
+    if (this.loadingMore) return
+    this.loadingMore = true
+    try {
+      const unit = await this.shell.engine.ttsUnitAfter(this.lastKey)
+      if (!unit) { call('tts', 'end', ''); return }
+      this.lastKey = unit.key
+      if (this.timerMin === -1) { call('tts', 'end', ''); return } // 读完本章就停
+      call('tts', 'append', { segments: this.pack(unit) })
+    } catch (e) { console.error(e); call('tts', 'end', '') } finally { this.loadingMore = false }
+  }
+
+  // 用户自己翻页后，从新位置接着读
+  async jumpToView() { if (this.active) this.start() }
+
+  toggle() { call('tts', this.playing ? 'pause' : 'resume', '') }
+  play() { call('tts', 'resume', '') }
+  pause() { call('tts', 'pause', '') }
+
+  cycleSpeed() {
+    const i = SPEEDS.indexOf(this.speed)
+    this.prefs.speed = SPEEDS[(i + 1) % SPEEDS.length]
+    save(PREFS_KEY, this.prefs)
+    call('tts', 'speed', String(this.prefs.speed))
+    this.updateUI()
+  }
+
+  cycleTimer() {
+    const i = TIMERS.indexOf(this.timerMin)
+    this.timerMin = TIMERS[(i + 1) % TIMERS.length]
+    call('tts', 'timer', String(this.timerMin))
+    this.updateUI()
+    toast(this.timerMin === 0 ? '已关闭定时' : this.timerMin === -1 ? '读完本章后停止' : `${this.timerMin} 分钟后停止`, { duration: 1500 })
+  }
+
+  setVoice(v) {
+    this.prefs.voice = v
+    save(PREFS_KEY, this.prefs)
+    call('tts', 'voice', v)
+  }
+
+  setState(t) { this.stateEl.textContent = t || '' }
+
+  stop() { call('tts', 'stop', ''); this.cleanup() }
+
+  cleanup() {
+    this.active = false
+    this.playing = false
+    this.shell.engine?.ttsClear?.()
+    this.el.hidden = true
+    this.shell.root.classList.remove('narrating')
+    document.body.classList.remove('narrating')
+    this.timerMin = 0
+    this.updateUI()
+    this.setState('')
+  }
+
+  destroy() { if (this.active) call('tts', 'stop', ''); this.cleanup(); this.off(); this.el.remove() }
+
+  async sheetSection() {
+    const parts = [h('h4', null, '听书')]
+    const app = callJSON('prefs') || {}
+    if (app.tts_engine === 'device') {
+      const voices = callJSON('ttsVoices') || []
+      parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7, marginBottom: '6px' } }, '正在用手机自带语音。在“设置 → 手机 App”里可以换成书库的微软自然语音。'))
+      if (voices.length) {
+        const sel = h('select', { class: 'input', 'aria-label': '音色' }, voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.voice }, v.name)))
+        sel.onchange = () => this.setVoice(sel.value)
+        parts.push(sel)
+      }
+    } else {
+      try {
+        const r = await api('/api/tts/voices')
+        if (r.voices?.length) {
+          const cur = this.prefs.voice || r.default
+          const sel = h('select', { class: 'input', 'aria-label': '音色' }, r.voices.map(v => h('option', { value: v.id, selected: v.id === cur }, `${v.name}${v.lang ? '（' + v.lang + (v.gender ? ' · ' + v.gender : '') + '）' : ''}`)))
+          sel.onchange = () => this.setVoice(sel.value)
+          parts.push(sel)
+        }
+      } catch {
+        if (net.route === 'offline') parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7 } }, '离线时用手机自带语音朗读。'))
+      }
     }
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
       h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))

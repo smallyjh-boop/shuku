@@ -5,6 +5,7 @@
 // 两个地址连的是同一台服务器（用服务器 ID 核对），所以登录令牌两边通用。
 
 import { store, save } from './ui.js'
+import { isNative, call, onNative } from './native.js'
 
 const NET_KEY = 'shuku.net'
 const TOKEN_KEY = 'shuku.token'
@@ -29,6 +30,7 @@ export const net = {
   setConfig(c) {
     state.net = { ...state.net, ...c }
     save(NET_KEY, state.net)
+    call('setNetwork', state.net)
     return resolveRoute(true)
   },
   resolve: (force) => resolveRoute(force),
@@ -54,8 +56,8 @@ async function resolveRoute(force) {
     const origin = location.origin
     const https = location.protocol === 'https:'
     const lan = norm(state.net.lan), remote = norm(state.net.remote)
-    // https 页面不能请求 http 地址（浏览器会拦截），这种情况只用当前地址
-    const usable = u => u && !(https && u.startsWith('http:'))
+    // https 页面不能请求 http 地址（浏览器会拦截），这种情况只用当前地址；App 里允许
+    const usable = u => u && (isNative || !(https && u.startsWith('http:')))
     const tasks = []
     if (usable(lan)) tasks.push(['lan', lan, ping(lan === origin ? '' : lan, 1200)])
     if (usable(remote)) tasks.push(['remote', remote, ping(remote === origin ? '' : remote, 4000)])
@@ -75,10 +77,13 @@ async function resolveRoute(force) {
     if (pick) {
       state.base = pick.url === origin ? '' : pick.url
       state.route = pick.route
-      if (pick.id && !state.net.serverId) { state.net.serverId = pick.id; save(NET_KEY, state.net) }
+      if (pick.id && !state.net.serverId) { state.net.serverId = pick.id; save(NET_KEY, state.net); call('setNetwork', state.net) }
     } else {
       state.route = 'offline'
+      // App 里离线时请求发到当前页面地址，由 App 用下载到手机的书来回应
+      if (isNative) state.base = ''
     }
+    call('setRoute', { route: state.route, base: state.route === 'offline' ? '' : (state.base || origin) })
     emit()
     state.resolving = null
     return state.route
@@ -88,6 +93,7 @@ async function resolveRoute(force) {
 
 // 网络变化时重新选线路
 addEventListener('online', () => resolveRoute(true))
+onNative('network', () => resolveRoute(true))
 addEventListener('offline', () => { state.route = 'offline'; emit() })
 let hiddenAt = 0
 document.addEventListener('visibilitychange', () => {
@@ -100,7 +106,7 @@ navigator.connection?.addEventListener?.('change', () => resolveRoute(true))
 
 export const auth = {
   get token() { return state.token },
-  set(t) { state.token = t || ''; t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY) },
+  set(t) { state.token = t || ''; t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); call('setToken', state.token) },
 }
 
 // 给 <img>、下载链接等无法带请求头的地址用：把令牌放到参数里（跨地址时没有 Cookie）
@@ -190,6 +196,7 @@ export function uploadFile(file, relPath, onProgress) {
 }
 
 export const deviceName = (() => {
+  if (isNative) return call('deviceName') || '安卓 App'
   const ua = navigator.userAgent
   if (/iPhone/.test(ua)) return 'iPhone 网页'
   if (/iPad/.test(ua)) return 'iPad 网页'

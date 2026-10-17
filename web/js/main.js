@@ -6,6 +6,8 @@ import { renderOrganize } from './organize.js'
 import { renderSettings } from './settings.js'
 import { initUploads, pickFiles } from './upload.js'
 import { renderStats } from './stats.js'
+import { renderDiscover } from './discover.js'
+import { isNative, call, onBack } from './native.js'
 
 const app = $('#app')
 
@@ -35,6 +37,7 @@ export function applyAppearance() {
   const dark = readerNightOn() || mode === 'dark' || (mode === 'system' && darkMQ.matches)
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   $('#theme-color').content = dark ? '#14181E' : '#F8F8F6'
+  if (!document.querySelector('.reader')) call('setThemeColor', dark ? '#14181E' : '#F8F8F6', dark)
 }
 darkMQ.addEventListener('change', applyAppearance)
 ctx.setAppearance = (mode) => { ctx.appPrefs.appearance = mode; save('shuku.app', ctx.appPrefs); applyAppearance() }
@@ -83,10 +86,21 @@ function netLine() {
 function updateNet() {
   for (const el of netEls) {
     el.className = 'netline ' + ({ remote: 'remote', offline: 'off' }[net.route] || '')
-    el.lastChild.textContent = net.label()
+    el.lastChild.textContent = isNative && net.route === 'offline' ? '离线 · 手机里的书' : net.label()
   }
+  document.body.classList.toggle('offline', net.route === 'offline')
 }
 net.on(updateNet)
+// App 里断网 / 恢复网络时，书架在“手机里的书”和书库之间切换
+let lastRoute = null
+net.on(route => {
+  const wasOff = lastRoute === 'offline', isOff = route === 'offline'
+  if (isNative && lastRoute !== null && wasOff !== isOff && shell && document.body.contains(shell)) {
+    ctx.refreshFacets(); currentView?.refresh?.()
+    toast(isOff ? '连不上书库，现在显示下载到手机的书' : '已连上书库：' + net.label())
+  }
+  lastRoute = route
+})
 
 function buildShell() {
   netEls = []
@@ -120,6 +134,7 @@ function renderNav() {
     navLink('#/stats', 'activity', '阅读统计'),
     navLink('#/books', 'book', '图书', cnt(kinds.book)),
     navLink('#/comics', 'comic', '漫画', cnt(kinds.comic)),
+    navLink('#/discover', 'compass', '发现'),
     (f.categories || []).length ? h('div', { class: 'nav-group' }, '分类') : null,
     (f.categories || []).filter(c => c.name !== '漫画').map(c => navLink('#/cat/' + encodeURIComponent(c.name), 'folder', c.name, cnt(c.count))),
     h('div', { class: 'nav-group' }, '管理'),
@@ -128,9 +143,10 @@ function renderNav() {
   ].flat().filter(Boolean))
   const cur = (location.hash || '#/').split('?')[0]
   const tab = (hash, ic, label, badge) => h('a', { href: hash, class: cur === hash || (hash === '#/' && ['#/books', '#/comics', '#/all'].includes(cur)) || (hash === '#/' && cur.startsWith('#/cat/')) ? 'on' : null }, icon(ic), h('span', null, label), badge ? h('span', { class: 'badge warn' }, badge) : null)
-  fill(tabbarEl, 
+  fill(tabbarEl,
     tab('#/', 'shelf', '书架'),
     tab('#/reading', 'reading', '在读'),
+    tab('#/discover', 'compass', '发现'),
     tab('#/organize', 'sparkle', '整理', pending || null),
     tab('#/settings', 'settings', '设置'))
 }
@@ -175,6 +191,7 @@ async function route() {
     organize: () => renderOrganize(mainEl, params, ctx),
     settings: () => renderSettings(mainEl, ctx),
     stats: () => renderStats(mainEl, ctx),
+    discover: () => renderDiscover(mainEl, params, ctx),
   }
   currentView = await (views[parts[0] || ''] || views[''])()
 }
@@ -244,8 +261,19 @@ async function boot() {
 
 boot()
 
-if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+// App 里由原生代码缓存网页，不用 Service Worker
+if (!isNative && 'serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('/sw.js').catch(() => {})
 }
+
+// 安卓返回键：先关弹出的面板，再退出阅读器，再回书架首页，最后才退出 App
+onBack(() => {
+  const esc = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  if (document.querySelector('.dialog.show, .drawer.show')) { esc(); return true }
+  if (document.querySelector('.reader')) { esc(); return true }
+  const hash = location.hash || '#/'
+  if (hash !== '#/' && hash !== '#') { history.length > 1 ? history.back() : (location.hash = '#/'); return true }
+  return false
+})
 
 export { toastError }

@@ -76,6 +76,7 @@ func routes() http.Handler {
 	mux.HandleFunc("GET /api/preview-template", a(handlePreviewTemplate))
 
 	routesP1(mux)
+	routesP2(mux)
 	mux.HandleFunc("/", handleStatic)
 	return withCORS(mux)
 }
@@ -384,6 +385,10 @@ func handleDeleteBook(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCover(w http.ResponseWriter, r *http.Request) {
+	if wd, _ := strconv.Atoi(r.URL.Query().Get("w")); wd > 0 && wd < 480 {
+		handleCoverSized(w, r, pathID(r, "id"), wd)
+		return
+	}
 	p := coverPath(pathID(r, "id"))
 	if _, err := os.Stat(p); err != nil {
 		http.NotFound(w, r)

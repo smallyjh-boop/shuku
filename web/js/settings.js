@@ -1,5 +1,6 @@
-import { h, clear, fill, add, icon, toast, toastError, confirmDialog, debounce } from './ui.js'
+import { h, clear, fill, add, icon, toast, toastError, confirmDialog, debounce, fmtTime, fmtBytes } from './ui.js'
 import { api, auth, net } from './api.js'
+import { isNative, call, callJSON, onNative, refreshDownloads } from './native.js'
 
 const AI_PRESETS = [
   ['', '选择服务商…', '', ''],
@@ -17,7 +18,7 @@ export async function renderSettings(main, ctx) {
   main.append(wrap)
   let s
   try { s = await api('/api/settings'); ctx.settings = s } catch (e) { fill(wrap, h('p', null, e.message)); return }
-  fill(wrap, appearance(ctx), network(s), await libraries(s), recognition(s, ctx), onlineMeta(s, ctx), narration(s, ctx), fulltextSec(s), opdsSec(s), account(s, ctx), about(s))
+  fill(wrap, isNative ? appSection(ctx) : null, appearance(ctx), network(s), devices(s), await libraries(s), recognition(s, ctx), onlineMeta(s, ctx), narration(s, ctx), fulltextSec(s), opdsSec(s), account(s, ctx), about(s))
 }
 
 const sec = (title, desc, ...children) => h('section', { class: 'set-sec' }, h('h2', null, title), desc ? h('p', null, desc) : null, ...children)
@@ -142,8 +143,20 @@ async function libraries(s) {
   const sprev = h('div', { class: 'preview' })
   const sp = debounce(async () => { try { const r = await api('/api/preview-template?t=' + encodeURIComponent(series.value)); fill(sprev, '示例：', h('code', null, r.path)) } catch {} }, 250)
   series.addEventListener('input', sp); sp()
+  const trash = h('div', { class: 'set-row' })
+  const drawTrash = async () => {
+    try {
+      const t = await api('/api/trash')
+      fill(trash, h('div', null, h('div', { class: 'l' }, '回收站'), h('div', { class: 'h' }, t.files ? `删除的书先放在各书库的 _回收站 文件夹，现在有 ${t.files} 个文件，共 ${fmtBytes(t.size)}` : '删除的书先放在各书库的 _回收站 文件夹，现在是空的')),
+        t.files ? h('button', { class: 'btn small danger', onclick: async () => {
+          if (!await confirmDialog({ title: '清空回收站？', message: `会彻底删除 ${t.files} 个文件（${fmtBytes(t.size)}），不能撤销。`, ok: '彻底删除', danger: true })) return
+          try { const r = await api('/api/trash', { method: 'DELETE' }); toast(`已清空回收站（${r.count} 项）`); drawTrash() } catch (e) { toastError(e) }
+        } }, '清空回收站') : null)
+    } catch {}
+  }
+  drawTrash()
   return sec('书库目录', `书整理后放在这些目录里。投递目录是 ${s.inbox}，把书丢进去会自动入库。`,
-    box,
+    box, trash,
     h('div', { class: 'stack', style: { marginTop: '18px' } },
       h('label', { class: 'field' }, h('span', null, '系列图书的命名规则'), series, sprev,
         h('small', null, '可用：{分类} {作者} {书名} {原名} {系列} {序号:02} {年份} {译者}。花括号里可以带前后缀，比如 { (年份)}，没有年份时整段省略')),
@@ -361,4 +374,93 @@ function opdsSec(s) {
     h('div', { class: 'stack', style: { gap: '8px' } },
       urls.map(u => h('div', { class: 'row' }, h('code', { class: 'code-block grow' }, u), h('button', { class: 'btn small', onclick: () => { navigator.clipboard?.writeText(u).then(() => toast('已复制'), () => toast(u)) } }, '复制'))),
       h('small', { class: 'muted' }, 'KOReader：菜单 → 搜索 → OPDS 目录 → 添加，填上面的地址。')))
+}
+
+// ---------- 手机、手表、浏览器插件 ----------
+function devices(s) {
+  const pairBox = h('div')
+  const list = h('div', { class: 'stack', style: { gap: '6px' } })
+  let timer = 0
+  async function pair(btn) {
+    btn.disabled = true
+    try {
+      const p = await api('/api/pair', { method: 'POST' })
+      const left = h('span')
+      let end = Date.now() + p.expires_in * 1000
+      clearInterval(timer)
+      const tick = () => {
+        const sec = Math.max(0, Math.round((end - Date.now()) / 1000))
+        left.textContent = sec ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')} 后失效` : '已失效，请重新生成'
+        if (!sec || !document.body.contains(left)) clearInterval(timer)
+      }
+      timer = setInterval(tick, 1000); tick()
+      fill(pairBox, h('div', { class: 'pair' },
+        p.qr ? h('img', { class: 'qr', alt: '配对二维码', src: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(p.qr) }) : null,
+        h('div', null,
+          h('div', { class: 'muted small-text' }, '配对码'),
+          h('div', { class: 'pair-code' }, p.code.slice(0, 4) + ' ' + p.code.slice(4)),
+          h('div', { class: 'muted small-text' }, left),
+          h('ol', { class: 'pair-steps' },
+            h('li', null, '安卓手机：用相机扫二维码，或者打开书库 App 选“输入配对码”。连接后手表会自动从手机拿到连接信息。'),
+            h('li', null, '浏览器插件：在插件设置里填书库地址和上面的配对码。'),
+            h('li', null, '配对码只能用一次，10 分钟内有效。')))))
+    } catch (e) { toastError(e) }
+    btn.disabled = false
+  }
+  async function drawSessions() {
+    try {
+      const ss = await api('/api/sessions')
+      fill(list, ss.map(x => h('div', { class: 'dev-row' },
+        icon(/手表|Watch|Wear/i.test(x.device) ? 'watch' : /App|安卓|Android|iPhone|手机/i.test(x.device) ? 'phone' : /插件|Chrome|Edge/i.test(x.device) ? 'puzzle' : 'globe'),
+        h('div', { class: 'grow' }, h('div', null, x.device, x.current ? h('span', { class: 'badge', style: { marginLeft: '8px' } }, '当前') : null),
+          h('small', null, `最近使用：${fmtTime(x.last_seen) || '—'} · 登录于 ${fmtTime(x.created_at)}`)),
+        x.current ? null : h('button', { class: 'btn small quiet danger', onclick: async () => {
+          if (!await confirmDialog({ title: `移除“${x.device}”？`, message: '这台设备需要重新登录或配对才能再访问书库。', ok: '移除', danger: true })) return
+          try { await api('/api/sessions/' + x.id, { method: 'DELETE' }); drawSessions() } catch (e) { toastError(e) }
+        } }, '移除'))))
+    } catch {}
+  }
+  drawSessions()
+  return sec('手机、手表和浏览器插件', '安卓 App 能离线读书、后台听书、用音量键翻页，自动在内网和 Tailscale 之间切换；Wear OS 手表从手机获取连接信息；浏览器插件能把任何网站上的电子书一键加入书库。',
+    h('div', { class: 'stack' },
+      h('div', { class: 'row wrap' }, h('button', { class: 'btn primary', onclick: e => pair(e.currentTarget) }, icon('phone'), '显示配对二维码')),
+      pairBox,
+      h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, '已登录的设备'),
+      list))
+}
+
+// ---------- 安卓 App 自己的设置（只在 App 里显示） ----------
+function appSection(ctx) {
+  const prefs = callJSON('prefs') || {}
+  const sw = (key, label, hint) => {
+    const input = h('input', { type: 'checkbox', checked: !!prefs[key] })
+    input.onchange = () => { prefs[key] = input.checked; call('setPref', key, String(input.checked)) }
+    return h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, label), hint ? h('div', { class: 'h' }, hint) : null), h('label', { class: 'switch' }, input, h('i')))
+  }
+  const ttsSel = h('select', { class: 'input', style: { width: 'auto' } },
+    [['server', '书库的语音（微软自然语音等）'], ['device', '手机自带语音（不联网也能用）']].map(([v, l]) => h('option', { value: v, selected: (prefs.tts_engine || 'server') === v }, l)))
+  ttsSel.onchange = () => call('setPref', 'tts_engine', ttsSel.value)
+  const dl = h('div', { class: 'stack', style: { gap: '6px' } })
+  const draw = () => {
+    const list = refreshDownloads()
+    const used = list.reduce((a, d) => a + (d.size || 0), 0)
+    fill(dl, list.length ? list.map(d => h('div', { class: 'dev-row' }, icon('book'),
+      h('div', { class: 'grow' }, h('div', null, d.title), h('small', null, d.state === 'done' ? `${(d.format || '').toUpperCase()} · ${fmtBytes(d.size)}` : d.state === 'error' ? '下载失败：' + (d.error || '') : `下载中 ${Math.round((d.progress || 0) * 100)}%`)),
+      h('button', { class: 'btn small quiet danger', onclick: () => { call('removeDownload', d.id); draw() } }, '删除'))) : h('p', { class: 'muted small-text', style: { margin: 0 } }, '还没有下载到手机的书。在书的详情里点“下载到手机”，没网的时候也能读。'),
+    list.length ? h('div', { class: 'muted small-text' }, `共占用 ${fmtBytes(used)}`) : null)
+  }
+  draw()
+  const off = onNative('download', draw)
+  setTimeout(() => { const t = setInterval(() => { if (!document.body.contains(dl)) { off(); clearInterval(t) } }, 2000) }, 0)
+  return sec('手机 App', `书库 App ${call('version') || ''}。`,
+    h('div', { class: 'stack', style: { gap: '4px' } },
+      sw('volume_keys', '音量键翻页', '阅读时按音量键上一页、下一页'),
+      sw('keep_screen_on', '阅读时屏幕常亮'),
+      sw('auto_download', '自动下载在读的书', '连着内网时，把“在读”里的书下载到手机'),
+      h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '听书的声音'), h('div', { class: 'h' }, '锁屏、切到别的 App 也会继续读')), ttsSel),
+      h('div', { class: 'row wrap', style: { margin: '8px 0 14px' } },
+        h('button', { class: 'btn', onclick: () => { const r = callJSON('syncWatch'); toast(r?.message || '已把连接信息发给手表') } }, icon('watch'), '连接手表'),
+        h('button', { class: 'btn quiet', onclick: async () => { if (await confirmDialog({ title: '断开这台手机？', message: '下载到手机的书会保留。之后需要重新扫码或输入配对码。', ok: '断开' })) call('logout') } }, '断开并重新配对')),
+      h('div', { class: 'sub-title', style: { margin: '6px 0 6px' } }, '下载到手机的书'),
+      dl))
 }

@@ -43,8 +43,14 @@ export class Engine {
     view.addEventListener('load', e => this.onDocLoad(e.detail.doc))
     this.applyPrefs(this.shell.prefs, this.shell.theme)
     let target = saved?.location
+    const sec = /^sec:(\d+):?([\d.]*)/.exec(String(target || ''))
     if (target && !String(target).startsWith('epubcfi(')) target = null
-    if (target) await view.init({ lastLocation: target }).catch(() => view.init({ showTextStart: true }))
+    if (sec) {
+      // 手表按章节读到的位置：第几节 + 节内比例
+      await view.init({ showTextStart: true })
+      await view.renderer.goTo({ index: +sec[1], anchor: Math.min(1, +sec[2] || 0) }).catch(() => {})
+    }
+    else if (target) await view.init({ lastLocation: target }).catch(() => view.init({ showTextStart: true }))
     else if (saved?.percent > 0) { await view.init({ showTextStart: true }); await view.goToFraction(saved.percent) }
     else await view.init({ showTextStart: true })
   }
@@ -193,19 +199,8 @@ export class Engine {
     const c = this.current()
     if (!c?.doc) return []
     const doc = c.doc
-    const all = [...doc.body.querySelectorAll(BLOCKS)]
-    const set = new Set(all)
-    // 只取最内层的块，避免 li > p 这种重复朗读
-    const leaves = all.filter(el => el.textContent.trim() && ![...el.querySelectorAll(BLOCKS)].some(x => set.has(x) && x.textContent.trim()))
-    if (!leaves.length && doc.body.textContent.trim()) leaves.push(doc.body)
-    const segs = []
-    for (const el of leaves) {
-      const text = el.textContent
-      for (const s of splitSentences(text)) {
-        const range = rangeOf(doc, el, s.start, s.end)
-        if (range) segs.push({ text: s.text, range })
-      }
-    }
+    const segs = segmentsOf(doc, true)
+    this.ttsLens.set(c.index, segs.map(x => x.text.length))
     if (!fromView) return segs
     // 从当前这一页开始读：跳过已经在前面的句子
     const vis = this.last?.range
@@ -229,6 +224,48 @@ export class Engine {
     return this.current()?.index !== before
   }
 
+  // ---------- App 里的听书：不排版直接取后面章节的文字 ----------
+  ttsLens = new Map() // 节序号 → 每句的字数（算进度用）
+  ttsUnitKey() { return this.current()?.index }
+
+  async ttsUnitAfter(key) {
+    const sections = this.view.book.sections
+    for (let i = (key ?? -1) + 1; i < sections.length; i++) {
+      const sec = sections[i]
+      if (sec.linear === 'no' || !sec.createDocument) continue
+      const doc = await sec.createDocument()
+      const segs = segmentsOf(doc, false)
+      if (segs.length) {
+        this.ttsLens.set(i, segs.map(x => x.text.length))
+        return { key: i, segs: segs.map((x, n) => ({ text: x.text, i: n })) }
+      }
+    }
+    return null
+  }
+
+  async ttsShowUnit(key) {
+    if (this.ttsUnitKey() === key) return
+    await this.view.goTo(key).catch(() => {})
+    for (let k = 0; k < 40 && this.ttsUnitKey() !== key; k++) await new Promise(r => setTimeout(r, 100))
+  }
+
+  async ttsSegmentsOf(key) {
+    if (this.ttsUnitKey() !== key) return []
+    return this.ttsSegments(false)
+  }
+
+  // 熄屏时读到哪里：sec:节:节内比例（服务器和手表也认这个格式）
+  ttsLocation(key, i) {
+    const lens = this.ttsLens.get(key)
+    if (!lens?.length) return null
+    const total = lens.reduce((a, b) => a + b, 0) || 1
+    const before = lens.slice(0, i).reduce((a, b) => a + b, 0)
+    const frac = before / total
+    const fr = this.view.getSectionFractions?.() || []
+    const a = fr[key] ?? 0, b = fr[key + 1] ?? 1
+    return { location: `sec:${key}:${frac.toFixed(4)}`, fraction: Math.min(1, a + (b - a) * frac) }
+  }
+
   ttsHighlight(seg) {
     if (!seg?.range) return
     const win = seg.range.startContainer.ownerDocument?.defaultView
@@ -247,6 +284,24 @@ export class Engine {
     try { this.view?.close() } catch {}
     this.view?.remove()
   }
+}
+
+// 一个文档里要朗读的句子：只取最内层的块，避免 li > p 这种重复朗读
+function segmentsOf(doc, withRanges) {
+  if (!doc?.body) return []
+  const all = [...doc.body.querySelectorAll(BLOCKS)]
+  const set = new Set(all)
+  const leaves = all.filter(el => el.textContent.trim() && ![...el.querySelectorAll(BLOCKS)].some(x => set.has(x) && x.textContent.trim()))
+  if (!leaves.length && doc.body.textContent.trim()) leaves.push(doc.body)
+  const segs = []
+  for (const el of leaves) {
+    for (const s of splitSentences(el.textContent)) {
+      if (!withRanges) { segs.push({ text: s.text }); continue }
+      const range = rangeOf(doc, el, s.start, s.end)
+      if (range) segs.push({ text: s.text, range })
+    }
+  }
+  return segs
 }
 
 // 元素内第 start~end 个字符对应的 Range

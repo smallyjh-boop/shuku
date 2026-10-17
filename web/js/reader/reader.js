@@ -3,6 +3,7 @@
 
 import { h, clear, fill, add, icon, iconBtn, toast, toastError, store, save, debounce, pct } from '../ui.js'
 import { api, apiUrl, deviceName, net } from '../api.js'
+import { isNative, call, onNative } from '../native.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -186,6 +187,17 @@ class Reader {
     const onMq = () => this.applyTheme()
     mq.addEventListener('change', onMq)
     this.cleanups.push(() => { clearInterval(t); mq.removeEventListener('change', onMq) })
+    // App 里：音量键翻页、阅读时屏幕常亮（App 的设置里可以关）
+    if (isNative) {
+      call('setReaderMode', true)
+      this.cleanups.push(() => call('setReaderMode', false))
+      this.cleanups.push(onNative('key', d => {
+        if (!this.engine) return
+        this.showUI(false)
+        d.dir === 'prev' ? this.engine.prev() : this.engine.next()
+        this.markActivity(); this.afterUserNav()
+      }))
+    }
     // 鼠标滚轮翻页（翻页模式）
     let wheelAt = 0
     this.stage.addEventListener('wheel', e => {
@@ -205,7 +217,7 @@ class Reader {
     this.readSecs = 0
     this.markActivity()
     const tick = setInterval(() => {
-      if (document.hidden) return
+      if (document.hidden && !this.narrator?.playing) return
       if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) this.readSecs++
     }, 1000)
     const flushT = setInterval(() => { if (this.readSecs >= 30) this.saveProgress() }, 60000)
@@ -219,12 +231,16 @@ class Reader {
 
   // ---------- 听书 ----------
   async toggleNarration() {
-    if (!this.narrator) {
-      const { Narrator } = await import('./tts.js')
-      this.narrator = new Narrator(this)
-    }
+    if (!this.narrator) await this.makeNarrator()
     if (this.narrator.active) this.narrator.toggle()
     else { this.showUI(false); this.narrator.start() }
+  }
+
+  // App 里声音交给原生后台服务；网页里用浏览器播放
+  async makeNarrator() {
+    const { Narrator, NativeNarrator } = await import('./tts.js')
+    this.narrator ||= isNative ? new NativeNarrator(this) : new Narrator(this)
+    return this.narrator
   }
 
   afterUserNav = debounce(() => this.narrator?.active && this.narrator.jumpToView(), 600)
@@ -302,11 +318,20 @@ class Reader {
 
   saveSoon = debounce(() => this.saveProgress(), 1500)
 
+  // 熄屏听书时没有排版，只记下读到的位置
+  saveLocation(location, fraction) {
+    this.loc = { location, fraction }
+    save('shuku.pos.' + this.id, { file_id: this.info?.file_id, location, percent: fraction, at: Date.now() })
+    this.saveSoon()
+  }
+
   saveProgress(keepalive) {
     if (!this.loc || !this.info) return
     const seconds = this.readSecs || 0
     this.readSecs = 0
     const body = JSON.stringify({ file_id: this.info.file_id, location: String(this.loc.location ?? ''), percent: this.loc.fraction || 0, device: deviceName, seconds })
+    // App 里交给原生保存：离线时先存在手机上，联网后再同步
+    if (isNative) { call('saveProgress', this.id, body); return }
     const url = (net.base || '') + `/api/books/${this.id}/progress`
     const headers = { 'Content-Type': 'application/json' }
     const tok = localStorage.getItem('shuku.token')
@@ -322,6 +347,7 @@ class Reader {
     this.nightBtn.replaceChildren(icon(t.dark ? 'sun' : 'moon'))
     this.nightBtn.title = t.dark ? '切换到日间' : '切换到夜间'
     document.querySelector('#theme-color')?.setAttribute('content', t.bg)
+    call('setThemeColor', t.bg, t.dark)
     this.dim.style.opacity = String(1 - this.prefs.brightness)
     this.warm.classList.toggle('on', !!this.prefs.warm)
     this.engine?.applyPrefs(this.prefs, t)
@@ -497,7 +523,7 @@ class Reader {
       const ttsBox = h('div')
       parts.push(ttsBox)
       ;(async () => {
-        if (!this.narrator) { const { Narrator } = await import('./tts.js'); this.narrator ||= new Narrator(this) }
+        if (!this.narrator) await this.makeNarrator()
         fill(ttsBox, ...(await this.narrator.sheetSection()))
       })()
     }
