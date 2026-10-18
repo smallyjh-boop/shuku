@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -68,18 +70,31 @@ func main() {
 			log.Fatalf("创建目录 %s 失败: %v", d, err)
 		}
 	}
+	log.Printf("书库 %s 启动中…", version)
 	if err := openDB(filepath.Join(cfg.DataDir, "shuku.db")); err != nil {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
+	resetPasswordFromEnv()
 	initLibraries()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 恢复备份后要重启：正常关掉（数据库收尾），退出后 Docker 按 restart 设置自动拉起来
+	var restarting atomic.Bool
+	restartHook = func() {
+		restarting.Store(true)
+		stop()
+	}
 
 	appCtx = ctx
-	go inboxLoop(ctx)
-	go scanLoop(ctx)
-	go fulltextLoop(ctx)
+	var wg sync.WaitGroup
+	for _, loop := range []func(context.Context){inboxLoop, scanLoop, fulltextLoop, backupLoop, purgeLoop, suggestionsLoop} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			loop(ctx)
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -87,13 +102,31 @@ func main() {
 		ReadHeaderTimeout: 20 * time.Second,
 	}
 	go func() {
-		log.Printf("书库已启动: http://0.0.0.0:%s  数据目录=%s  投递目录=%s", cfg.Port, cfg.DataDir, cfg.Inbox)
+		log.Printf("书库 %s 已启动: http://0.0.0.0:%s  数据目录=%s  投递目录=%s", version, cfg.Port, cfg.DataDir, cfg.Inbox)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
 	}()
 	<-ctx.Done()
-	sh, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	log.Printf("书库正在停止…")
+	// docker stop 默认等 10 秒：网页请求最多等 4 秒，后台任务最多再等 3 秒，然后关数据库
+	sh, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	srv.Shutdown(sh)
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		log.Printf("后台任务没有及时停下，先关数据库")
+	}
+	db.Close()
+	if restarting.Load() {
+		log.Printf("书库重启")
+		os.Exit(3) // 非 0：restart 设成 on-failure 时也会重启
+	}
+	log.Printf("书库已停止")
 }

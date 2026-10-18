@@ -721,7 +721,7 @@ func handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
 		e := &p.Entries[i]
 		if e.Kind == "book" && e.Title != "" {
 			var n int
-			db.QueryRow(`SELECT COUNT(*) FROM books WHERE title=? OR title=?`, e.Title, toSimplified(e.Title)).Scan(&n)
+			db.QueryRow(`SELECT COUNT(*) FROM books WHERE (title=? OR title=?) AND deleted_at=0`, e.Title, toSimplified(e.Title)).Scan(&n)
 			if n > 0 {
 				e.ID = "have:" + e.ID
 			}

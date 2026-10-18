@@ -762,7 +762,7 @@ func handleEnrichAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ids []int64
-	rows, err := db.Query(`SELECT id FROM books WHERE status='ok' AND enriched_at=0 AND (cover='' OR description='' OR year=0) ORDER BY id`)
+	rows, err := db.Query(`SELECT id FROM books WHERE status='ok' AND deleted_at=0 AND enriched_at=0 AND (cover='' OR description='' OR year=0) ORDER BY id`)
 	if err == nil {
 		for rows.Next() {
 			var id int64

@@ -4,10 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 var db *sql.DB
@@ -106,10 +105,15 @@ CREATE TABLE IF NOT EXISTS ignored_suggestions (key TEXT PRIMARY KEY, created_at
 CREATE TABLE IF NOT EXISTS dict_ai (key TEXT PRIMARY KEY, answer TEXT NOT NULL, created_at INTEGER NOT NULL);
 `
 
+var dbPath string
+
 func openDB(path string) error {
 	var err error
+	dbPath = path
+	ftDBPath = filepath.Join(filepath.Dir(path), "fulltext.db")
+	restorePending(path)
 	// _txlock=immediate：事务一开始就拿写锁，不会读到一半升级写锁失败
-	db, err = sql.Open("sqlite3", "file:"+path+"?_busy_timeout=30000&_journal_mode=WAL&_foreign_keys=on&_synchronous=NORMAL&_txlock=immediate")
+	db, err = sql.Open(shukuDriver(), "file:"+path+"?_busy_timeout=30000&_journal_mode=WAL&_foreign_keys=on&_synchronous=NORMAL&_txlock=immediate")
 	if err != nil {
 		return err
 	}
@@ -120,7 +124,11 @@ func openDB(path string) error {
 	if _, err = db.Exec(schema); err != nil {
 		return err
 	}
-	migrate()
+	dropMainFulltext()
+	if err := migrate(); err != nil {
+		return err
+	}
+	migrateFulltext()
 	return nil
 }
 

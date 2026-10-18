@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
@@ -13,7 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 	"unicode"
 
 	"github.com/nwaples/rardecode/v2"
@@ -26,9 +27,11 @@ type Archive interface {
 	Close() error
 }
 
-func images(a Archive) []string {
+func images(a Archive) []string { return imageNames(a.Names()) }
+
+func imageNames(names []string) []string {
 	var out []string
-	for _, n := range a.Names() {
+	for _, n := range names {
 		base := filepath.Base(n)
 		if strings.HasPrefix(base, ".") || strings.Contains(n, "__MACOSX") {
 			continue
@@ -100,6 +103,19 @@ func (z *zipArchive) Read(name string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(rc, 200<<20))
 }
 
+func (z *zipArchive) ReadHead(name string, n int) ([]byte, error) {
+	f, ok := z.files[name]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(io.LimitReader(rc, int64(n)))
+}
+
 func openZip(path string) (*zipArchive, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -133,6 +149,18 @@ type dirArchive struct {
 
 func (d *dirArchive) Names() []string { return d.names }
 func (d *dirArchive) Close() error    { return nil }
+func (d *dirArchive) ReadHead(name string, n int) ([]byte, error) {
+	p := filepath.Join(d.root, filepath.FromSlash(name))
+	if !strings.HasPrefix(p, d.root) {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(n)))
+}
 func (d *dirArchive) Read(name string) ([]byte, error) {
 	p := filepath.Join(d.root, filepath.FromSlash(name))
 	if !strings.HasPrefix(p, d.root) {
@@ -154,7 +182,8 @@ func openDir(root string) *dirArchive {
 	return d
 }
 
-var extractMu sync.Mutex
+// 同一个压缩包同时只解压一次；不同的压缩包互不等待
+var extractLocks keyedMutex
 
 // 缓存键只看文件内容（大小、修改时间、开头 64KB），文件改名或移动后缓存仍然有效
 func cacheKey(path string) string {
@@ -174,10 +203,12 @@ func cacheKey(path string) string {
 
 // rar、7z、tar 不适合随机读取，第一次打开时解压到缓存目录
 func extractCached(path, format string) (*dirArchive, error) {
-	extractMu.Lock()
-	defer extractMu.Unlock()
-	dir := filepath.Join(cfg.DataDir, "cache", "arc", cacheKey(path))
+	key := cacheKey(path)
+	unlock := extractLocks.Lock(key)
+	defer unlock()
+	dir := filepath.Join(cfg.DataDir, "cache", "arc", key)
 	if _, err := os.Stat(filepath.Join(dir, ".done")); err == nil {
+		touchCache(dir)
 		return openDir(dir), nil
 	}
 	os.RemoveAll(dir)
@@ -198,6 +229,7 @@ func extractCached(path, format string) (*dirArchive, error) {
 		return nil, err
 	}
 	os.WriteFile(filepath.Join(dir, ".done"), nil, 0o644)
+	noteCacheWrite()
 	return openDir(dir), nil
 }
 
@@ -283,11 +315,185 @@ func extract7z(path, dir string) error {
 	if bin == "" {
 		return errors.New("服务器没有安装 7z，无法打开 7z 压缩包")
 	}
-	out, err := exec.Command(bin, "x", "-y", "-o"+dir, path).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "x", "-y", "-o"+dir, path).CombinedOutput()
+	if ctx.Err() != nil {
+		return errors.New("7z 解压超时（10 分钟）")
+	}
 	if err != nil {
 		return fmt.Errorf("7z 解压失败: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func find7z() string {
+	for _, b := range []string{"7z", "7za", "7zz"} {
+		if p, err := exec.LookPath(b); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// ---------- 不解压整包，只看文件列表、读几个文件（入库时取封面和 ComicInfo 用） ----------
+// rar、tar 边读边跳过不要的文件，不写硬盘；7z 用 7z l 列目录、7z e -so 取单个文件
+
+func peekArchive(path, format string, pick func(names []string) []string) (names []string, data map[string][]byte, err error) {
+	data = map[string][]byte{}
+	switch format {
+	case "cbr", "rar":
+		names, err = rarNames(path)
+		if err != nil {
+			return
+		}
+		want := setOf(pick(names))
+		if len(want) == 0 {
+			return
+		}
+		r, err2 := rardecode.OpenReader(path)
+		if err2 != nil {
+			return names, data, err2
+		}
+		defer r.Close()
+		for len(data) < len(want) {
+			h, e := r.Next()
+			if e != nil {
+				break
+			}
+			if want[h.Name] {
+				b, _ := io.ReadAll(io.LimitReader(r, 64<<20))
+				data[h.Name] = b
+			}
+		}
+	case "cbt":
+		names, err = tarNames(path)
+		if err != nil {
+			return
+		}
+		want := setOf(pick(names))
+		f, e := os.Open(path)
+		if e != nil {
+			return names, data, e
+		}
+		defer f.Close()
+		tr := tar.NewReader(f)
+		for len(data) < len(want) {
+			h, e := tr.Next()
+			if e != nil {
+				break
+			}
+			if want[h.Name] {
+				b, _ := io.ReadAll(io.LimitReader(tr, 64<<20))
+				data[h.Name] = b
+			}
+		}
+	case "cb7", "7z":
+		bin := find7z()
+		if bin == "" {
+			return nil, data, errors.New("服务器没有安装 7z")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		out, e := exec.CommandContext(ctx, bin, "l", "-slt", path).Output()
+		if e != nil {
+			return nil, data, fmt.Errorf("7z 列目录失败：%v", e)
+		}
+		var cur string
+		isDir := false
+		flush := func() {
+			if cur != "" && !isDir {
+				names = append(names, filepath.ToSlash(cur))
+			}
+			cur, isDir = "", false
+		}
+		// 输出开头是压缩包本身的信息，“----------”之后才是里面的文件
+		started := false
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimRight(line, "\r")
+			if !started {
+				started = strings.HasPrefix(line, "----------")
+				continue
+			}
+			switch {
+			case strings.HasPrefix(line, "Path = "):
+				flush()
+				cur = strings.TrimPrefix(line, "Path = ")
+			case line == "Folder = +", strings.HasPrefix(line, "Attributes = D"):
+				isDir = true
+			}
+		}
+		flush()
+		sortNatural(names)
+		for _, n := range pick(names) {
+			b, e := exec.CommandContext(ctx, bin, "e", "-so", path, filepath.FromSlash(n)).Output()
+			if e == nil && len(b) > 0 {
+				data[n] = b
+			}
+		}
+	default:
+		err = errors.New("不支持的压缩格式")
+	}
+	sortNatural(names)
+	return
+}
+
+func setOf(list []string) map[string]bool {
+	m := map[string]bool{}
+	for _, s := range list {
+		m[s] = true
+	}
+	return m
+}
+
+func rarNames(path string) ([]string, error) {
+	r, err := rardecode.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var out []string
+	for {
+		h, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if len(out) > 0 {
+				break
+			}
+			return nil, err
+		}
+		if !h.IsDir {
+			out = append(out, h.Name)
+		}
+	}
+	sortNatural(out)
+	return out, nil
+}
+
+func tarNames(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	var out []string
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return out, err
+		}
+		if h.Typeflag == tar.TypeReg {
+			out = append(out, h.Name)
+		}
+	}
+	sortNatural(out)
+	return out, nil
 }
 
 func openArchive(path, format string) (Archive, error) {

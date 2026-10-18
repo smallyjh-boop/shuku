@@ -332,7 +332,11 @@ const aiPrompt = `你是图书管理员。根据电子书文件的信息，判�
 只输出一个 JSON 对象，不要任何解释。字段：title, original_title, author, translator, series, series_index, year, category, tags, language, confidence。`
 
 func aiIdentify(ctx context.Context, fileName string, m Meta, kind string, rule Identity) (Identity, error) {
-	c := aiConfig()
+	return aiIdentifyWith(ctx, aiConfig(), fileName, m, kind, rule)
+}
+
+// 用指定的配置识别（设置页“测试”用填着还没保存的配置，不改动正在用的设置）
+func aiIdentifyWith(ctx context.Context, c AIConfig, fileName string, m Meta, kind string, rule Identity) (Identity, error) {
 	if !c.Enabled || c.BaseURL == "" || c.Model == "" {
 		return rule, errors.New("AI 未配置")
 	}

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +101,43 @@ func dictToSimp(s string) string {
 		}
 	}
 	return toSimplified(string(rs))
+}
+
+// 繁体转简体的字表给阅读器用（繁体书转成简体读）：两个等长的字符串，第 i 个繁体字对应第 i 个简体字。
+// 有本地字典时用字典里 CC-CEDICT 的繁简对照（约三千字），没有时用内置的常用字表
+func handleDictT2S(w http.ResponseWriter, r *http.Request) {
+	var t, s []rune
+	if openDict() != nil {
+		dictState.Lock()
+		m := dictState.t2s
+		dictState.Unlock()
+		keys := make([]rune, 0, len(m))
+		for k, v := range m {
+			if k != v {
+				keys = append(keys, k)
+			}
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		for _, k := range keys {
+			t = append(t, k)
+			s = append(s, m[k])
+		}
+	}
+	// 内置表补上字典里没有的
+	have := map[rune]bool{}
+	for _, k := range t {
+		have[k] = true
+	}
+	bt, bs := []rune(tradChars), []rune(simpChars)
+	for i := range bt {
+		if !have[bt[i]] && bt[i] != bs[i] {
+			t = append(t, bt[i])
+			s = append(s, bs[i])
+			have[bt[i]] = true
+		}
+	}
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	writeJSON(w, 200, map[string]any{"t": string(t), "s": string(s), "source": map[bool]string{true: "dict", false: "builtin"}[dictInstalled()]})
 }
 
 // ---------- 语言 ----------

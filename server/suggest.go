@@ -90,7 +90,7 @@ type bookLite struct {
 }
 
 func loadBooksLite() []bookLite {
-	rows, err := db.Query(`SELECT id,title,author,series,kind,status FROM books`)
+	rows, err := db.Query(`SELECT id,title,author,series,kind,status FROM books WHERE deleted_at=0`)
 	if err != nil {
 		return nil
 	}
@@ -103,7 +103,7 @@ func loadBooksLite() []bookLite {
 		out = append(out, b)
 	}
 	rows.Close()
-	frows, err := db.Query(`SELECT id,book_id,library_id,path,format,size,hash FROM files`)
+	frows, err := db.Query(`SELECT id,book_id,library_id,path,format,size,hash FROM files WHERE missing_since=0`)
 	if err != nil {
 		return out
 	}
@@ -199,6 +199,16 @@ func computeSuggestions() []Suggestion {
 		if len(variants) < 2 {
 			continue
 		}
+		// 拼音一样、汉字不一样的是不同的人（王伟 / 王薇）：只合并汉字写法相同的
+		hanKeys := map[string]bool{}
+		for n := range variants {
+			if hasHan(n) {
+				hanKeys[hanKey(n)] = true
+			}
+		}
+		if len(hanKeys) > 1 {
+			continue
+		}
 		var names []string
 		for n := range variants {
 			names = append(names, n)
@@ -225,6 +235,9 @@ func computeSuggestions() []Suggestion {
 			Items:  items, Count: len(ids),
 			apply: func(batch string) (int, error) {
 				for _, id := range ids {
+					var old string
+					db.QueryRow(`SELECT author FROM books WHERE id=?`, id).Scan(&old)
+					recordMetaChange(batch, "统一作者名", id, "author", old) // 撤销时改回来
 					db.Exec(`UPDATE books SET author=?,updated_at=? WHERE id=?`, keep, now(), id)
 					updateSearchKey(id)
 				}
@@ -433,6 +446,18 @@ func samePathIgnoringSuffix(cur, want string) bool {
 
 func getBookLiteFull(id int64) (*Book, error) { return getBook(id) }
 
+// 作者名的汉字部分（繁转简、去掉国籍前缀、空格和标点），用来区分拼音相同的不同名字
+func hanKey(s string) string {
+	s = toSimplified(strings.TrimSpace(s))
+	s = nationRe.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Han, r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
 func hasHan(s string) bool {
 	for _, r := range s {
 		if unicode.Is(unicode.Han, r) {
@@ -518,21 +543,18 @@ func mergeFolders(items []SugItem, batch string) (int, error) {
 	return n, nil
 }
 
-// 把几本书合并成一本
+// 把几本书合并成一本：每个人的进度留更新的那个，书签笔记、阅读时长都并过来
 func mergeBooks(target int64, others []int64, batch string) (int, error) {
-	var bestPct float64
-	var bestAt int64
-	db.QueryRow(`SELECT percent,updated_at FROM progress WHERE book_id=?`, target).Scan(&bestPct, &bestAt)
 	for _, o := range others {
 		db.Exec(`UPDATE files SET book_id=? WHERE book_id=?`, target, o)
 		db.Exec(`UPDATE bookmarks SET book_id=? WHERE book_id=?`, target, o)
-		var loc string
-		var pct float64
-		var at, fid int64
-		if db.QueryRow(`SELECT file_id,location,percent,updated_at FROM progress WHERE book_id=?`, o).Scan(&fid, &loc, &pct, &at) == nil && at > bestAt {
-			db.Exec(`INSERT INTO progress(book_id,file_id,location,percent,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(book_id) DO UPDATE SET file_id=excluded.file_id,location=excluded.location,percent=excluded.percent,updated_at=excluded.updated_at`, target, fid, loc, pct, at)
-			bestAt = at
-		}
+		db.Exec(`INSERT INTO progress(user_id,book_id,file_id,location,percent,device,updated_at) SELECT user_id,?,file_id,location,percent,device,updated_at FROM progress WHERE book_id=? AND 1
+			ON CONFLICT(user_id,book_id) DO UPDATE SET file_id=excluded.file_id,location=excluded.location,percent=excluded.percent,device=excluded.device,updated_at=excluded.updated_at
+			WHERE excluded.updated_at>progress.updated_at`, target, o)
+		db.Exec(`INSERT OR IGNORE INTO user_books(user_id,book_id,read_state,finished_at,rating,want,prefs,updated_at) SELECT user_id,?,read_state,finished_at,rating,want,prefs,updated_at FROM user_books WHERE book_id=?`, target, o)
+		db.Exec(`INSERT INTO reading_log(user_id,day,book_id,seconds) SELECT user_id,day,?,seconds FROM reading_log WHERE book_id=? AND 1
+			ON CONFLICT(user_id,day,book_id) DO UPDATE SET seconds=seconds+excluded.seconds`, target, o)
+		db.Exec(`DELETE FROM reading_log WHERE book_id=?`, o)
 		if _, err := os.Stat(coverPath(target)); err != nil {
 			os.Rename(coverPath(o), coverPath(target))
 		}

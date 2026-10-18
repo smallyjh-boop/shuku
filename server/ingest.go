@@ -150,7 +150,7 @@ func updateSearchKey(id int64) {
 
 type IngestResult struct {
 	BookID int64
-	Status string // new | attached | duplicate | review | unsupported | error
+	Status string // new | attached | moved | duplicate | review | unsupported | error
 	Msg    string
 }
 
@@ -169,14 +169,21 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	if err != nil {
 		return IngestResult{Status: "error", Msg: err.Error()}
 	}
-	var dupID, dupBook int64
+	var dupID, dupBook, dupDeleted int64
 	var dupPath string
-	if db.QueryRow(`SELECT id,book_id,path FROM files WHERE hash=? LIMIT 1`, hash).Scan(&dupID, &dupBook, &dupPath) == nil {
-		if _, err := os.Stat(dupPath); err == nil && filepath.Clean(dupPath) != filepath.Clean(p) {
+	if db.QueryRow(`SELECT f.id,f.book_id,f.path,b.deleted_at FROM files f JOIN books b ON b.id=f.book_id WHERE f.hash=? ORDER BY b.deleted_at, f.id LIMIT 1`, hash).Scan(&dupID, &dupBook, &dupPath, &dupDeleted) == nil {
+		_, statErr := os.Stat(dupPath)
+		switch {
+		case filepath.Clean(dupPath) == filepath.Clean(p):
+			// 就是这个文件自己（登记过了），不用再处理
+			db.Exec(`UPDATE files SET missing_since=0 WHERE id=?`, dupID)
+			return IngestResult{BookID: dupBook, Status: "duplicate", Msg: "已经登记过"}
+		case statErr == nil && dupDeleted == 0:
 			return IngestResult{BookID: dupBook, Status: "duplicate", Msg: "书库里已有完全相同的文件：" + dupPath}
-		}
-		if err != nil { // 旧记录的文件已经不在了，用新的顶替
-			db.Exec(`DELETE FROM files WHERE id=?`, dupID)
+		case statErr != nil && dupDeleted == 0:
+			// 原来的文件不在了，同样内容的文件出现在别处：是在 File Station 里改名、移动过。
+			// 只改登记的路径，书目、每个人的进度、书签笔记都留着（以前这里会当成新书，进度全丢）
+			return adoptMovedFile(dupID, dupBook, p, fromInbox)
 		}
 	}
 	m := extractMeta(p, fi.Format)
@@ -251,7 +258,7 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 		// 先把书名作者对得上的书目都取出来、关掉查询，再逐个看缺不缺这种格式。
 		// 不能边遍历边查：以前这样写，数据库连接被占着时就互相等待，整个书库卡死
 		var same []int64
-		rows, err := db.Query(`SELECT id,title,author FROM books WHERE kind=?`, kind)
+		rows, err := db.Query(`SELECT id,title,author FROM books WHERE kind=? AND deleted_at=0`, kind)
 		if err == nil {
 			for rows.Next() {
 				var bid int64
@@ -275,12 +282,13 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	ts := now()
 	if !attached {
 		tags, _ := json.Marshal(nonNil(id.Tags))
-		res, err := db.Exec(`INSERT INTO books(title,orig_title,author,translator,series,series_index,year,category,tags,description,isbn,language,publisher,kind,direction,status,confidence,source,orig_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			id.Title, id.OrigTitle, id.Author, id.Translator, id.Series, id.SeriesIndex, id.Year, id.Category, string(tags), id.Description, m.ISBN, id.Language, m.Publisher, kind, m.Direction, status, id.Confidence, id.Source, name, ts, ts)
+		// 书目编号不复用：删掉的书的编号不会给新书（手机、浏览器里按编号记的东西不会串到别的书上）
+		bookID = nextBookID()
+		_, err := db.Exec(`INSERT INTO books(id,title,orig_title,author,translator,series,series_index,year,category,tags,description,isbn,language,publisher,kind,direction,status,confidence,source,orig_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			bookID, id.Title, id.OrigTitle, id.Author, id.Translator, id.Series, id.SeriesIndex, id.Year, id.Category, string(tags), id.Description, m.ISBN, id.Language, m.Publisher, kind, m.Direction, status, id.Confidence, id.Source, name, ts, ts)
 		if err != nil {
 			return IngestResult{Status: "error", Msg: err.Error()}
 		}
-		bookID, _ = res.LastInsertId()
 	}
 	res, err := db.Exec(`INSERT INTO files(book_id,library_id,path,format,size,hash,created_at) VALUES(?,?,?,?,?,?,?)`, bookID, lib.ID, p, fi.Format, size, hash, ts)
 	if err != nil {
@@ -310,23 +318,78 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	if fromInbox {
 		batch := "in-" + newBatch()
 		f, _ := getFile(fileID)
+		toReview := !confident
 		if confident {
 			if err := organizeBook(bookID, batch, "入库整理"); errors.Is(err, sql.ErrNoRows) {
 				r.Msg = "入库过程中这本书被删除了"
 			} else if err != nil {
-				r.Msg = "整理失败：" + err.Error()
+				// 整理失败（建不了文件夹、磁盘满了……）：先放进“_待确认”，别让文件留在投递目录里
+				r.Msg = "按规范整理失败（" + err.Error() + "），先放进了待确认"
+				f, _ = getFile(fileID)
+				toReview = f != nil && insideInbox(f.Path)
 			}
-		} else if f != nil { // 入库过程中被删除时 f 是 nil，文件已经进了回收站
+		}
+		if toReview && f != nil { // 入库过程中被删除时 f 是 nil，文件已经进了回收站
 			// 把握不大：先放到书库的“_待确认”文件夹，能读，等你确认后再按规范整理
 			to := filepath.Join(lib.Path, "_待确认", name)
 			moveMu.Lock()
-			if err := relocate(f, to, batch, "待确认"); err != nil {
-				r.Msg = "移动失败：" + err.Error()
-			}
+			err := relocate(f, to, batch, "待确认")
 			moveMu.Unlock()
-			r.Status = "review"
+			if err != nil {
+				// 连待确认都放不进去：撤销这次登记，文件留在投递目录，由调用方挪到 _出错
+				db.Exec(`DELETE FROM files WHERE id=?`, fileID)
+				if !attached {
+					db.Exec(`DELETE FROM books WHERE id=?`, bookID)
+					os.Remove(coverPath(bookID))
+				}
+				return IngestResult{Status: "error", Msg: "放不进书库：" + err.Error()}
+			}
+			if !confident {
+				r.Status = "review"
+			}
 		}
 	}
+	return r
+}
+
+func insideInbox(p string) bool {
+	return strings.HasPrefix(filepath.Clean(p), filepath.Clean(cfg.Inbox)+string(os.PathSeparator))
+}
+
+// 书目编号：一直往上加，不复用
+func nextBookID() int64 {
+	var maxID, seq int64
+	db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM books`).Scan(&maxID)
+	seq, _ = strconv.ParseInt(getSetting("book_id_seq", "0"), 10, 64)
+	if maxID > seq {
+		seq = maxID
+	}
+	seq++
+	setSetting("book_id_seq", strconv.FormatInt(seq, 10))
+	return seq
+}
+
+// 改了名、换了位置的文件：接着用原来的书目
+func adoptMovedFile(fileID, bookID int64, p string, fromInbox bool) IngestResult {
+	lib, _ := insideLibrary(p)
+	libID := int64(0)
+	if lib != nil {
+		libID = lib.ID
+	}
+	if _, err := db.Exec(`UPDATE files SET path=?,library_id=CASE WHEN ?>0 THEN ? ELSE library_id END,missing_since=0 WHERE id=?`, p, libID, libID, fileID); err != nil {
+		return IngestResult{Status: "error", Msg: err.Error()}
+	}
+	r := IngestResult{BookID: bookID, Status: "moved"}
+	if fromInbox {
+		// 又放回投递目录的：按规范整理回书库
+		if err := organizeBook(bookID, "in-"+newBatch(), "入库整理"); err != nil {
+			r.Msg = "整理失败：" + err.Error()
+		}
+	}
+	if b, _ := getBook(bookID); b != nil {
+		logEvent("info", bookID, fmt.Sprintf("《%s》的文件换了位置，已更新记录（进度、书签都保留）", b.Title))
+	}
+	kickFulltext()
 	return r
 }
 
@@ -432,6 +495,8 @@ func processInbox(ctx context.Context) {
 		r := ingestFile(ctx, p, true)
 		name := filepath.Base(p)
 		switch r.Status {
+		case "moved":
+			// 已经在 ingestFile 里记过日志
 		case "new", "attached":
 			msg := "已入库：" + name
 			if b, err := getBook(r.BookID); err == nil {
@@ -452,6 +517,17 @@ func processInbox(ctx context.Context) {
 			}
 			logEvent("warn", r.BookID, fmt.Sprintf("《%s》识别把握不大，已放进待确认", t))
 		case "duplicate":
+			if r.Msg == "已经登记过" {
+				// 登记过、但还留在投递目录里（以前整理失败留下的）：再整理一次
+				if err := organizeBook(r.BookID, "in-"+newBatch(), "入库整理"); err != nil {
+					to := freePath(filepath.Join(cfg.Inbox, "_出错", name))
+					if moveFile(p, to) == nil {
+						db.Exec(`UPDATE files SET path=? WHERE path=?`, to, p)
+					}
+					logEvent("error", r.BookID, name+" 整理失败："+err.Error()+"，已移到投递目录的 _出错 文件夹")
+				}
+				break
+			}
 			moveAside(p, "_重复")
 			logEvent("warn", r.BookID, name+" 已存在，已移到投递目录的 _重复 文件夹")
 		case "unsupported":
@@ -539,22 +615,39 @@ func scanLibraries(ctx context.Context) {
 		scanState.Running, scanState.Last, scanState.Current = false, now(), ""
 		scanState.Unlock()
 	}()
-	known := map[string]bool{}
-	rows, err := db.Query(`SELECT path FROM files`)
+	type knownFile struct {
+		id, lib int64
+		missing int64
+	}
+	known := map[string]knownFile{}
+	rows, err := db.Query(`SELECT f.id,f.path,f.library_id,f.missing_since FROM files f JOIN books b ON b.id=f.book_id WHERE b.deleted_at=0`)
 	if err == nil {
 		for rows.Next() {
+			var k knownFile
 			var p string
-			rows.Scan(&p)
-			known[p] = true
+			rows.Scan(&k.id, &p, &k.lib, &k.missing)
+			known[p] = k
 		}
 		rows.Close()
 	}
 	present := map[string]bool{}
+	// 这次扫描不可信的书库：根目录不在、读不了，或者一本书都没找到而库里登记了不少
+	unreliable := map[int64]string{}
 	for _, lib := range listLibraries() {
-		os.MkdirAll(lib.Path, 0o755)
-		filepath.WalkDir(lib.Path, func(p string, e os.DirEntry, err error) error {
-			if err != nil || ctx.Err() != nil {
+		if st, err := os.Stat(lib.Path); err != nil || !st.IsDir() {
+			unreliable[lib.ID] = "找不到书库目录 " + lib.Path
+			continue
+		}
+		found := 0
+		walkErr := filepath.WalkDir(lib.Path, func(p string, e os.DirEntry, err error) error {
+			if err != nil {
+				if p == lib.Path {
+					return err // 根目录都读不了
+				}
 				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			if e.IsDir() {
 				// 回收站里是删掉的书，不再登记
@@ -569,54 +662,83 @@ func scanLibraries(ctx context.Context) {
 			if _, ok := formatOf(p); !ok {
 				return nil
 			}
+			found++
 			present[p] = true
 			scanState.Lock()
 			scanState.Found++
 			scanState.Unlock()
-			if known[p] {
+			if k, ok := known[p]; ok {
+				if k.missing > 0 { // 找不到的文件又出现了
+					db.Exec(`UPDATE files SET missing_since=0 WHERE id=?`, k.id)
+				}
 				return nil
 			}
 			scanState.Lock()
 			scanState.Current = e.Name()
 			scanState.Unlock()
 			r := ingestFile(ctx, p, false)
-			if r.Status == "new" || r.Status == "attached" || r.Status == "review" {
+			if r.Status == "new" || r.Status == "attached" || r.Status == "review" || r.Status == "moved" {
 				scanState.Lock()
 				scanState.Added++
 				scanState.Unlock()
 			}
 			return nil
 		})
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	// 文件已经不在了：删掉记录（只删数据库，不碰文件）
-	removed := 0
-	for p := range known {
-		if present[p] {
+		if ctx.Err() != nil {
+			return
+		}
+		if walkErr != nil {
+			unreliable[lib.ID] = "读不了书库目录 " + lib.Path + "：" + walkErr.Error()
 			continue
+		}
+		registered := 0
+		for _, k := range known {
+			if k.lib == lib.ID && k.missing == 0 {
+				registered++
+			}
+		}
+		if found == 0 && registered >= 3 {
+			unreliable[lib.ID] = fmt.Sprintf("书库目录 %s 里一本书都没找到（登记了 %d 个文件），可能是共享文件夹没挂上", lib.Path, registered)
+		}
+	}
+	for _, why := range unreliable {
+		logEvent("warn", 0, why+"。这次不清理找不到的书，等目录恢复后再扫描")
+	}
+	// 文件不在了：先标记“找不到”（书还在书架上，标着找不到文件），30 天后还没找回来才真正删掉。
+	// 改名、移动过的文件在上面登记新路径时已经接回原来的书目了
+	marked := 0
+	for p, k := range known {
+		if present[p] || k.missing > 0 {
+			continue
+		}
+		if _, bad := unreliable[k.lib]; bad {
+			continue
+		}
+		if lib, ok := insideLibrary(p); ok {
+			if _, bad := unreliable[lib.ID]; bad {
+				continue
+			}
 		}
 		if _, err := os.Stat(p); err == nil {
 			continue // 不在书库目录内但仍存在的文件（比如书库路径改过），保留
 		}
-		var fid, bid int64
-		if db.QueryRow(`SELECT id,book_id FROM files WHERE path=?`, p).Scan(&fid, &bid) == nil {
-			db.Exec(`DELETE FROM files WHERE id=?`, fid)
-			var left int
-			db.QueryRow(`SELECT COUNT(*) FROM files WHERE book_id=?`, bid).Scan(&left)
-			if left == 0 {
-				db.Exec(`DELETE FROM books WHERE id=?`, bid)
-				os.Remove(coverPath(bid))
-			}
-			removed++
+		var cur string
+		if db.QueryRow(`SELECT path FROM files WHERE id=?`, k.id).Scan(&cur) == nil && cur != p {
+			continue // 扫描过程中已经接到新路径上了
 		}
+		db.Exec(`UPDATE files SET missing_since=? WHERE id=? AND missing_since=0`, now(), k.id)
+		marked++
 	}
 	scanState.Lock()
-	scanState.Removed = removed
+	scanState.Removed = marked
 	added := scanState.Added
 	scanState.Unlock()
-	if added > 0 || removed > 0 {
-		logEvent("info", 0, fmt.Sprintf("书库扫描完成：新增 %d 个文件，移除 %d 条失效记录", added, removed))
+	if added > 0 || marked > 0 {
+		msg := fmt.Sprintf("书库扫描完成：新增 %d 个文件", added)
+		if marked > 0 {
+			msg += fmt.Sprintf("，%d 个文件找不到了（30 天内找回来会自动恢复）", marked)
+		}
+		logEvent("info", 0, msg)
+		invalidateSuggestions()
 	}
 }

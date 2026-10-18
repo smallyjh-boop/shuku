@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"image"
 	"io"
 	"mime"
 	"net/http"
@@ -26,15 +24,17 @@ const trashDir = "_回收站"
 func routes() http.Handler {
 	mux := http.NewServeMux()
 	a := requireAuth
+	ad := requireAdmin // 只有管理员能做：改书目、整理、设置、加书……
 	mux.HandleFunc("GET /api/ping", handlePing)
 	// 在线升级：各端安装包（不用登录）、通知更新服务
 	mux.HandleFunc("GET /api/clients", handleClients)
 	mux.HandleFunc("GET /dl/{name}", handleDownloadClient)
 	mux.HandleFunc("GET /api/dict", a(handleDict))
+	mux.HandleFunc("GET /api/dict/t2s", a(handleDictT2S))
 	mux.HandleFunc("POST /api/dict/explain", a(handleDictExplain))
 	mux.HandleFunc("POST /api/dict/speak", a(handleDictSpeak))
 	mux.HandleFunc("GET /api/update", a(handleUpdateInfo))
-	mux.HandleFunc("POST /api/update/check", a(handleUpdateCheck))
+	mux.HandleFunc("POST /api/update/check", ad(handleUpdateCheck))
 	mux.HandleFunc("GET /api/auth/state", handleAuthState)
 	mux.HandleFunc("POST /api/auth/setup", handleSetup)
 	mux.HandleFunc("POST /api/auth/login", handleLogin)
@@ -42,22 +42,37 @@ func routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/password", a(handleChangePassword))
 	mux.HandleFunc("POST /api/auth/handoff", a(handleHandoff))
 	mux.HandleFunc("POST /api/auth/exchange", handleExchange)
+	mux.HandleFunc("GET /api/me", a(handleMe))
+	mux.HandleFunc("GET /api/users", ad(handleUsers))
+	mux.HandleFunc("POST /api/users", ad(handleAddUser))
+	mux.HandleFunc("PATCH /api/users/{id}", ad(handleUpdateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", ad(handleDeleteUser))
 
 	mux.HandleFunc("GET /api/books", a(handleBooks))
+	mux.HandleFunc("GET /api/books/states", a(handleBookStates))
+	mux.HandleFunc("POST /api/books/batch", a(handleBatchBooks))
 	mux.HandleFunc("GET /api/facets", a(handleFacets))
+	mux.HandleFunc("GET /api/series", a(handleSeries))
 	mux.HandleFunc("GET /api/books/{id}", a(handleBook))
 	mux.HandleFunc("PATCH /api/books/{id}", a(handleUpdateBook))
-	mux.HandleFunc("DELETE /api/books/{id}", a(handleDeleteBook))
-	mux.HandleFunc("POST /api/books/{id}/confirm", a(handleConfirm))
-	mux.HandleFunc("POST /api/books/{id}/identify", a(handleIdentify))
+	mux.HandleFunc("PATCH /api/books/{id}/me", a(handleUserBook))
+	mux.HandleFunc("DELETE /api/books/{id}", ad(handleDeleteBook))
+	mux.HandleFunc("POST /api/books/{id}/restore", ad(handleRestoreBook))
+	mux.HandleFunc("GET /api/books/{id}/next", a(handleNextInSeries))
+	mux.HandleFunc("POST /api/books/{id}/confirm", ad(handleConfirm))
+	mux.HandleFunc("POST /api/books/{id}/identify", ad(handleIdentify))
 	mux.HandleFunc("GET /api/books/{id}/cover", a(handleCover))
-	mux.HandleFunc("PUT /api/books/{id}/cover", a(handlePutCover))
+	mux.HandleFunc("PUT /api/books/{id}/cover", ad(handlePutCover))
 	mux.HandleFunc("GET /api/books/{id}/read", a(handleRead))
 	mux.HandleFunc("GET /api/books/{id}/progress", a(handleGetProgress))
 	mux.HandleFunc("PUT /api/books/{id}/progress", a(handlePutProgress))
 	mux.HandleFunc("GET /api/books/{id}/bookmarks", a(handleBookmarks))
 	mux.HandleFunc("POST /api/books/{id}/bookmarks", a(handleAddBookmark))
+	mux.HandleFunc("PATCH /api/bookmarks/{bid}", a(handleUpdateBookmark))
 	mux.HandleFunc("DELETE /api/bookmarks/{bid}", a(handleDeleteBookmark))
+	mux.HandleFunc("GET /api/notes", a(handleAllNotes))
+	mux.HandleFunc("GET /api/books/{id}/notes.md", a(handleNotesMarkdown))
+	mux.HandleFunc("GET /api/notes.md", a(handleNotesMarkdown))
 
 	mux.HandleFunc("GET /api/files/{fid}/raw", a(handleRaw))
 	mux.HandleFunc("GET /api/files/{fid}/epub", a(handleConvertedEPUB))
@@ -65,23 +80,30 @@ func routes() http.Handler {
 	mux.HandleFunc("GET /api/files/{fid}/pages", a(handlePages))
 	mux.HandleFunc("GET /api/files/{fid}/pages/{n}", a(handlePage))
 
-	mux.HandleFunc("POST /api/upload", a(handleUpload))
+	mux.HandleFunc("POST /api/upload", ad(handleUpload))
 	mux.HandleFunc("GET /api/status", a(handleStatus))
-	mux.HandleFunc("POST /api/scan", a(handleScan))
-	mux.HandleFunc("GET /api/events", a(handleEvents))
-	mux.HandleFunc("GET /api/suggestions", a(handleSuggestions))
-	mux.HandleFunc("POST /api/suggestions/apply", a(handleApplySuggestion))
-	mux.HandleFunc("POST /api/suggestions/ignore", a(handleIgnoreSuggestion))
-	mux.HandleFunc("GET /api/ops", a(handleOps))
-	mux.HandleFunc("POST /api/ops/{batch}/undo", a(handleUndo))
+	mux.HandleFunc("POST /api/scan", ad(handleScan))
+	mux.HandleFunc("GET /api/events", ad(handleEvents))
+	mux.HandleFunc("GET /api/suggestions", ad(handleSuggestions))
+	mux.HandleFunc("POST /api/suggestions/apply", ad(handleApplySuggestion))
+	mux.HandleFunc("POST /api/suggestions/ignore", ad(handleIgnoreSuggestion))
+	mux.HandleFunc("GET /api/ops", ad(handleOps))
+	mux.HandleFunc("POST /api/ops/{batch}/undo", ad(handleUndo))
 	mux.HandleFunc("GET /api/libraries", a(handleLibraries))
-	mux.HandleFunc("POST /api/libraries", a(handleAddLibrary))
-	mux.HandleFunc("PUT /api/libraries/{id}", a(handleUpdateLibrary))
-	mux.HandleFunc("DELETE /api/libraries/{id}", a(handleDeleteLibrary))
+	mux.HandleFunc("POST /api/libraries", ad(handleAddLibrary))
+	mux.HandleFunc("PUT /api/libraries/{id}", ad(handleUpdateLibrary))
+	mux.HandleFunc("DELETE /api/libraries/{id}", ad(handleDeleteLibrary))
 	mux.HandleFunc("GET /api/settings", a(handleGetSettings))
-	mux.HandleFunc("PUT /api/settings", a(handlePutSettings))
-	mux.HandleFunc("POST /api/ai/test", a(handleAITest))
-	mux.HandleFunc("GET /api/preview-template", a(handlePreviewTemplate))
+	mux.HandleFunc("PUT /api/settings", ad(handlePutSettings))
+	mux.HandleFunc("POST /api/ai/test", ad(handleAITest))
+	mux.HandleFunc("GET /api/preview-template", ad(handlePreviewTemplate))
+	mux.HandleFunc("GET /api/storage", ad(handleStorage))
+	mux.HandleFunc("POST /api/storage/clean", ad(handleStorageClean))
+	mux.HandleFunc("GET /api/backups", ad(handleBackups))
+	mux.HandleFunc("POST /api/backups", ad(handleCreateBackup))
+	mux.HandleFunc("POST /api/backups/restore", ad(handleRestoreBackup))
+	mux.HandleFunc("GET /api/backups/{name}", ad(handleDownloadBackup))
+	mux.HandleFunc("DELETE /api/backups/{name}", ad(handleDeleteBackup))
 
 	routesP1(mux)
 	routesP2(mux)
@@ -131,12 +153,17 @@ type BookListItem struct {
 	CreatedAt   int64   `json:"created_at"`
 	Formats     string  `json:"formats"`
 	Confidence  float64 `json:"confidence"`
+	Rating      int     `json:"rating"`
+	Want        bool    `json:"want"`
+	Missing     bool    `json:"missing,omitempty"`
 }
 
 func handleBooks(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
 	q := r.URL.Query()
-	var where []string
-	var args []any
+	vis, vargs := visibleSQL(u)
+	where := []string{vis}
+	args := append([]any{}, vargs...)
 	if s := strings.TrimSpace(q.Get("q")); s != "" {
 		for _, term := range strings.Fields(toSimplified(strings.ToLower(s))) {
 			where = append(where, `b.search_key LIKE ?`)
@@ -151,10 +178,14 @@ func handleBooks(w http.ResponseWriter, r *http.Request) {
 	}
 	eq("kind", "b.kind")
 	eq("category", "b.category")
-	eq("state", "b.read_state")
+	eq("state", "COALESCE(ub.read_state,'unread')")
 	eq("status", "b.status")
 	eq("author", "b.author")
 	eq("series", "b.series")
+	if v := q.Get("tag"); v != "" {
+		where = append(where, `EXISTS(SELECT 1 FROM json_each(b.tags) t WHERE t.value=?)`)
+		args = append(args, v)
+	}
 	if v := q.Get("format"); v != "" {
 		where = append(where, `EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND f.format=?)`)
 		args = append(args, v)
@@ -164,7 +195,25 @@ func handleBooks(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 	}
 	if q.Get("reading") == "1" {
-		where = append(where, `COALESCE(p.updated_at,0)>0 AND b.read_state<>'done'`)
+		where = append(where, `COALESCE(p.updated_at,0)>0 AND COALESCE(ub.read_state,'unread')<>'done'`)
+	}
+	if q.Get("want") == "1" {
+		where = append(where, `COALESCE(ub.want,0)=1`)
+	}
+	if q.Get("missing") == "1" {
+		where = append(where, `NOT EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND f.missing_since=0)`)
+	}
+	if v := q.Get("ids"); v != "" {
+		var ph []string
+		for _, s := range strings.Split(v, ",") {
+			if id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil && len(ph) < 500 {
+				ph = append(ph, "?")
+				args = append(args, id)
+			}
+		}
+		if len(ph) > 0 {
+			where = append(where, `b.id IN (`+strings.Join(ph, ",")+`)`)
+		}
 	}
 	order := `COALESCE(p.updated_at,0) DESC, b.created_at DESC`
 	switch q.Get("sort") {
@@ -176,21 +225,22 @@ func handleBooks(w http.ResponseWriter, r *http.Request) {
 		order = `b.author_key, b.sort_key`
 	case "series":
 		order = `b.series='' , b.series, b.series_index, b.sort_key`
+	case "rating":
+		order = `COALESCE(ub.rating,0) DESC, COALESCE(p.updated_at,0) DESC, b.sort_key`
 	}
-	w2 := ""
-	if len(where) > 0 {
-		w2 = " WHERE " + strings.Join(where, " AND ")
-	}
+	w2 := " WHERE " + strings.Join(where, " AND ")
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 500 {
 		limit = 120
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	from := ` FROM books b LEFT JOIN progress p ON p.book_id=b.id AND p.user_id=? LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=?`
+	all := append([]any{u.ID, u.ID}, args...)
 	var total int
-	db.QueryRow(`SELECT COUNT(*) FROM books b LEFT JOIN progress p ON p.book_id=b.id`+w2, args...).Scan(&total)
-	rows, err := db.Query(`SELECT b.id,b.title,b.author,b.series,b.series_index,b.category,b.kind,b.status,b.cover,b.read_state,COALESCE(p.percent,0),COALESCE(p.updated_at,0),b.created_at,b.confidence,
-		COALESCE((SELECT GROUP_CONCAT(DISTINCT f.format) FROM files f WHERE f.book_id=b.id),'')
-		FROM books b LEFT JOIN progress p ON p.book_id=b.id`+w2+` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+	db.QueryRow(`SELECT COUNT(*)`+from+w2, all...).Scan(&total)
+	rows, err := db.Query(`SELECT b.id,b.title,b.author,b.series,b.series_index,b.category,b.kind,b.status,b.cover,COALESCE(ub.read_state,'unread'),COALESCE(p.percent,0),COALESCE(p.updated_at,0),b.created_at,b.confidence,
+		COALESCE((SELECT GROUP_CONCAT(DISTINCT f.format) FROM files f WHERE f.book_id=b.id),''),COALESCE(ub.rating,0),COALESCE(ub.want,0),
+		NOT EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND f.missing_since=0)`+from+w2+` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(all, limit, offset)...)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
@@ -199,14 +249,16 @@ func handleBooks(w http.ResponseWriter, r *http.Request) {
 	items := []BookListItem{}
 	for rows.Next() {
 		var b BookListItem
-		rows.Scan(&b.ID, &b.Title, &b.Author, &b.Series, &b.SeriesIndex, &b.Category, &b.Kind, &b.Status, &b.Cover, &b.ReadState, &b.Percent, &b.LastRead, &b.CreatedAt, &b.Confidence, &b.Formats)
+		var want int
+		rows.Scan(&b.ID, &b.Title, &b.Author, &b.Series, &b.SeriesIndex, &b.Category, &b.Kind, &b.Status, &b.Cover, &b.ReadState, &b.Percent, &b.LastRead, &b.CreatedAt, &b.Confidence, &b.Formats, &b.Rating, &want, &b.Missing)
+		b.Want = want == 1
 		items = append(items, b)
 	}
 	writeJSON(w, 200, map[string]any{"total": total, "items": items})
 }
 
-func countBy(query string) []map[string]any {
-	rows, err := db.Query(query)
+func countBy(query string, args ...any) []map[string]any {
+	rows, err := db.Query(query, args...)
 	out := []map[string]any{}
 	if err != nil {
 		return out
@@ -222,45 +274,86 @@ func countBy(query string) []map[string]any {
 }
 
 func handleFacets(w http.ResponseWriter, r *http.Request) {
-	var total, review, reading int
-	db.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&total)
-	db.QueryRow(`SELECT COUNT(*) FROM books WHERE status='review'`).Scan(&review)
-	db.QueryRow(`SELECT COUNT(*) FROM books b JOIN progress p ON p.book_id=b.id WHERE b.read_state<>'done'`).Scan(&reading)
-	writeJSON(w, 200, map[string]any{
-		"total":       total,
-		"review":      review,
-		"reading":     reading,
-		"suggestions": len(cachedSuggestions(false)),
-		"kinds":       countBy(`SELECT kind,COUNT(*) FROM books GROUP BY kind`),
-		"categories":  countBy(`SELECT category,COUNT(*) FROM books WHERE category<>'' GROUP BY category ORDER BY COUNT(*) DESC`),
-		"formats":     countBy(`SELECT format,COUNT(DISTINCT book_id) FROM files GROUP BY format ORDER BY COUNT(*) DESC`),
-		"states":      countBy(`SELECT read_state,COUNT(*) FROM books GROUP BY read_state`),
-		"libraries":   countBy(`SELECT CAST(library_id AS TEXT),COUNT(DISTINCT book_id) FROM files GROUP BY library_id`),
-	})
+	u := me(r)
+	vis, vargs := visibleSQL(u)
+	var total, review, reading, want, series, missing int
+	db.QueryRow(`SELECT COUNT(*) FROM books b WHERE `+vis, vargs...).Scan(&total)
+	db.QueryRow(`SELECT COUNT(*) FROM books b WHERE b.status='review' AND `+vis, vargs...).Scan(&review)
+	db.QueryRow(`SELECT COUNT(*) FROM books b JOIN progress p ON p.book_id=b.id AND p.user_id=? LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=? WHERE COALESCE(ub.read_state,'unread')<>'done' AND `+vis,
+		append([]any{u.ID, u.ID}, vargs...)...).Scan(&reading)
+	db.QueryRow(`SELECT COUNT(*) FROM books b JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=? WHERE ub.want=1 AND `+vis, append([]any{u.ID}, vargs...)...).Scan(&want)
+	db.QueryRow(`SELECT COUNT(DISTINCT b.series) FROM books b WHERE b.series<>'' AND `+vis, vargs...).Scan(&series)
+	db.QueryRow(`SELECT COUNT(*) FROM books b WHERE NOT EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND f.missing_since=0) AND `+vis, vargs...).Scan(&missing)
+	out := map[string]any{
+		"total":      total,
+		"review":     review,
+		"reading":    reading,
+		"want":       want,
+		"series":     series,
+		"missing":    missing,
+		"kinds":      countBy(`SELECT b.kind,COUNT(*) FROM books b WHERE `+vis+` GROUP BY b.kind`, vargs...),
+		"categories": countBy(`SELECT b.category,COUNT(*) FROM books b WHERE b.category<>'' AND `+vis+` GROUP BY b.category ORDER BY COUNT(*) DESC`, vargs...),
+		"formats":    countBy(`SELECT f.format,COUNT(DISTINCT f.book_id) FROM files f JOIN books b ON b.id=f.book_id WHERE `+vis+` GROUP BY f.format ORDER BY COUNT(*) DESC`, vargs...),
+		"states": countBy(`SELECT COALESCE(ub.read_state,'unread'),COUNT(*) FROM books b LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=? WHERE `+vis+` GROUP BY 1`,
+			append([]any{u.ID}, vargs...)...),
+		"libraries": countBy(`SELECT CAST(f.library_id AS TEXT),COUNT(DISTINCT f.book_id) FROM files f JOIN books b ON b.id=f.book_id WHERE `+vis+` GROUP BY f.library_id`, vargs...),
+		"tags":      countBy(`SELECT t.value,COUNT(*) FROM books b, json_each(b.tags) t WHERE `+vis+` GROUP BY t.value ORDER BY COUNT(*) DESC LIMIT 60`, vargs...),
+	}
+	// 整理建议只给管理员看；后台算好的结果，不在这里现算（书多时要好几秒）
+	if u.Admin() {
+		out["suggestions"] = suggestionCount()
+	}
+	writeJSON(w, 200, out)
+}
+
+// 当前这个人能不能看这本书；不能看（或在回收站）就回 404
+func visibleBook(w http.ResponseWriter, r *http.Request, id int64) (*Book, bool) {
+	u := me(r)
+	b, err := getBookFor(id, u.ID)
+	if err != nil || b.DeletedAt > 0 || !canSeeBook(u, id) {
+		errJSON(w, 404, "找不到这本书")
+		return nil, false
+	}
+	return b, true
 }
 
 func handleBook(w http.ResponseWriter, r *http.Request) {
-	b, err := getBook(pathID(r, "id"))
-	if err != nil {
-		errJSON(w, 404, "找不到这本书")
+	b, ok := visibleBook(w, r, pathID(r, "id"))
+	if !ok {
 		return
 	}
 	for i := range b.Files {
 		b.Files[i].Path = relToLib(b.Files[i].Path)
 	}
+	ub := getUserBook(meID(r), b.ID)
+	b.Prefs, b.FinishedAt = ub.Prefs, ub.FinishedAt
 	writeJSON(w, 200, b)
 }
 
+// 改书目信息（管理员）。read_state 是每个人自己的，谁都能改（旧版网页、App 也走这里）
 func handleUpdateBook(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "id")
-	b, err := getBook(id)
-	if err != nil {
-		errJSON(w, 404, "找不到这本书")
+	u := me(r)
+	b, ok := visibleBook(w, r, id)
+	if !ok {
 		return
 	}
 	var req map[string]any
 	if readJSON(r, &req) != nil {
 		errJSON(w, 400, "请求格式不正确")
+		return
+	}
+	if v, ok := req["read_state"].(string); ok {
+		setReadState(u.ID, id, v)
+		delete(req, "read_state")
+	}
+	if len(req) == 0 {
+		nb, _ := getBookFor(id, u.ID)
+		writeJSON(w, 200, map[string]any{"book": nb, "message": ""})
+		return
+	}
+	if !u.Admin() {
+		errJSON(w, 403, "只有管理员可以改书目信息")
 		return
 	}
 	str := func(k string, dst *string) {
@@ -279,7 +372,6 @@ func handleUpdateBook(w http.ResponseWriter, r *http.Request) {
 	str("publisher", &b.Publisher)
 	str("language", &b.Language)
 	str("direction", &b.Direction)
-	str("read_state", &b.ReadState)
 	str("kind", &b.Kind)
 	if v, ok := req["series_index"].(float64); ok {
 		b.SeriesIndex = v
@@ -304,14 +396,12 @@ func handleUpdateBook(w http.ResponseWriter, r *http.Request) {
 		b.Status, b.Confidence, b.Source = "ok", 1, "人工确认"
 	}
 	tags, _ := json.Marshal(nonNil(b.Tags))
-	db.Exec(`UPDATE books SET title=?,orig_title=?,author=?,translator=?,series=?,series_index=?,year=?,category=?,tags=?,description=?,isbn=?,publisher=?,language=?,direction=?,read_state=?,kind=?,status=?,confidence=?,source=?,updated_at=? WHERE id=?`,
-		b.Title, b.OrigTitle, b.Author, b.Translator, b.Series, b.SeriesIndex, b.Year, b.Category, string(tags), b.Description, b.ISBN, b.Publisher, b.Language, b.Direction, b.ReadState, b.Kind, b.Status, b.Confidence, b.Source, now(), id)
-	updateSearchKey(id)
-	if b.ReadState == "done" {
-		db.Exec(`UPDATE books SET finished_at=? WHERE id=? AND finished_at=0`, now(), id)
-	} else {
-		db.Exec(`UPDATE books SET finished_at=0 WHERE id=?`, id)
+	if _, err := db.Exec(`UPDATE books SET title=?,orig_title=?,author=?,translator=?,series=?,series_index=?,year=?,category=?,tags=?,description=?,isbn=?,publisher=?,language=?,direction=?,kind=?,status=?,confidence=?,source=?,updated_at=? WHERE id=?`,
+		b.Title, b.OrigTitle, b.Author, b.Translator, b.Series, b.SeriesIndex, b.Year, b.Category, string(tags), b.Description, b.ISBN, b.Publisher, b.Language, b.Direction, b.Kind, b.Status, b.Confidence, b.Source, now(), id); err != nil {
+		errJSON(w, 500, "保存失败："+err.Error())
+		return
 	}
+	updateSearchKey(id)
 	msg := ""
 	// 已确认的书改了信息，同步改文件名和位置
 	reorg, has := req["organize"].(bool)
@@ -321,7 +411,7 @@ func handleUpdateBook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	invalidateSuggestions()
-	nb, _ := getBook(id)
+	nb, _ := getBookFor(id, u.ID)
 	for i := range nb.Files {
 		nb.Files[i].Path = relToLib(nb.Files[i].Path)
 	}
@@ -364,40 +454,130 @@ func handleIdentify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, id)
 }
 
+// 删除：文件移到书库的 _回收站，书目标记为已删除（进度、书签笔记、统计都留着），
+// 在回收站里能连同这些一起恢复；清空回收站或 30 天后才真正删掉
 func handleDeleteBook(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "id")
 	b, err := getBook(id)
-	if err != nil {
+	if err != nil || b.DeletedAt > 0 {
 		errJSON(w, 404, "找不到这本书")
 		return
 	}
-	// 不真正删除文件：移到书库的 _回收站，需要时可以从操作记录撤销
+	n, err := trashBook(b)
+	if err != nil && n == 0 {
+		errJSON(w, 500, "删除失败："+err.Error())
+		return
+	}
+	logEvent("info", 0, fmt.Sprintf("已删除《%s》，文件移到了 _回收站，30 天内可以在回收站里恢复", b.Title))
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func trashBook(b *Book) (int, error) {
 	batch := "rm-" + newBatch()
 	moveMu.Lock()
+	moved := 0
+	var errs []string
 	for i := range b.Files {
 		f := &b.Files[i]
+		if f.MissingSince > 0 {
+			continue
+		}
 		lib, ok := insideLibrary(f.Path)
 		if !ok {
 			lib = libraryByID(f.LibraryID)
 		}
-		if lib != nil {
-			relocate(f, filepath.Join(lib.Path, trashDir, filepath.Base(f.Path)), batch, "删除《"+b.Title+"》")
+		if lib == nil {
+			continue
+		}
+		if err := relocate(f, filepath.Join(lib.Path, trashDir, filepath.Base(f.Path)), batch, "删除《"+b.Title+"》"); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			moved++
 		}
 	}
 	moveMu.Unlock()
-	db.Exec(`DELETE FROM books WHERE id=?`, id)
-	os.Remove(coverPath(id))
+	if len(errs) > 0 && moved == 0 && len(b.Files) > 0 {
+		return 0, fmt.Errorf("%s", strings.Join(errs, "；"))
+	}
+	db.Exec(`UPDATE books SET deleted_at=?,deleted_batch=? WHERE id=?`, now(), batch, b.ID)
+	for _, f := range b.Files {
+		removeFileIndex(f.ID)
+	}
 	invalidateSuggestions()
-	logEvent("info", 0, fmt.Sprintf("已删除《%s》，文件移到了 _回收站", b.Title))
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	if len(errs) > 0 {
+		return moved + 1, fmt.Errorf("%s", strings.Join(errs, "；"))
+	}
+	return moved + 1, nil
+}
+
+// 从回收站恢复：文件搬回原处，书目、进度、笔记都回来
+func handleRestoreBook(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r, "id")
+	var batch string
+	var deleted int64
+	if db.QueryRow(`SELECT deleted_at,deleted_batch FROM books WHERE id=?`, id).Scan(&deleted, &batch) != nil || deleted == 0 {
+		errJSON(w, 404, "回收站里没有这本书")
+		return
+	}
+	n, err := undoBatch(batch)
+	restoreDeletedBooks(batch)
+	msg := fmt.Sprintf("已恢复，%d 个文件搬回了原处", n)
+	if err != nil {
+		msg += "；" + err.Error()
+	}
+	kickFulltext()
+	logEvent("info", id, msg)
+	writeJSON(w, 200, map[string]any{"ok": true, "message": msg})
+}
+
+// 撤销了删除（回收站里点恢复，或者操作记录里撤销）：书目标回正常
+func restoreDeletedBooks(batch string) {
+	if batch == "" {
+		return
+	}
+	db.Exec(`UPDATE books SET deleted_at=0,deleted_batch='' WHERE deleted_batch=?`, batch)
+	invalidateSuggestions()
+}
+
+// 同一系列的下一本（漫画读到最后一页时提示“下一卷”）
+func handleNextInSeries(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
+	b, ok := visibleBook(w, r, pathID(r, "id"))
+	if !ok {
+		return
+	}
+	if b.Series == "" {
+		writeJSON(w, 200, map[string]any{"next": nil})
+		return
+	}
+	vis, vargs := visibleSQL(u)
+	var sk string
+	db.QueryRow(`SELECT sort_key FROM books WHERE id=?`, b.ID).Scan(&sk)
+	args := append([]any{u.ID, u.ID, b.Series, b.ID, b.SeriesIndex, b.SeriesIndex, sk}, vargs...)
+	nb, err := scanBook(db.QueryRow(`SELECT `+bookCols+bookFrom+` WHERE b.series=? AND b.id<>? AND (b.series_index>? OR (b.series_index=? AND b.sort_key>?)) AND `+vis+`
+		ORDER BY b.series_index, b.sort_key LIMIT 1`, args...))
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"next": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"next": nb})
 }
 
 func handleCover(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r, "id")
+	if !canSeeBook(me(r), id) {
+		// 回收站里的书也要能显示封面（回收站列表里用），只挡住看不到这个书库的家人
+		var deleted int64
+		if db.QueryRow(`SELECT deleted_at FROM books WHERE id=?`, id).Scan(&deleted) != nil || deleted == 0 || !me(r).Admin() {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	if wd, _ := strconv.Atoi(r.URL.Query().Get("w")); wd > 0 && wd < 480 {
-		handleCoverSized(w, r, pathID(r, "id"), wd)
+		handleCoverSized(w, r, id, wd)
 		return
 	}
-	p := coverPath(pathID(r, "id"))
+	p := coverPath(id)
 	if _, err := os.Stat(p); err != nil {
 		http.NotFound(w, r)
 		return
@@ -418,12 +598,22 @@ func handlePutCover(w http.ResponseWriter, r *http.Request) {
 // ---------- 阅读 ----------
 
 func handleRead(w http.ResponseWriter, r *http.Request) {
-	b, err := getBook(pathID(r, "id"))
-	if err != nil || len(b.Files) == 0 {
-		errJSON(w, 404, "找不到这本书")
+	b, ok := visibleBook(w, r, pathID(r, "id"))
+	if !ok {
+		return
+	}
+	if len(b.Files) == 0 {
+		errJSON(w, 404, "找不到这本书的文件")
 		return
 	}
 	f := b.Files[0]
+	// 找不到的文件（被移走了）排到后面
+	for _, x := range b.Files {
+		if x.MissingSince == 0 {
+			f = x
+			break
+		}
+	}
 	if fid, _ := strconv.ParseInt(r.URL.Query().Get("file"), 10, 64); fid > 0 {
 		for _, x := range b.Files {
 			if x.ID == fid {
@@ -433,7 +623,7 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 上次读的是哪个格式就继续用哪个
 		var last int64
-		if db.QueryRow(`SELECT file_id FROM progress WHERE book_id=?`, b.ID).Scan(&last) == nil {
+		if db.QueryRow(`SELECT file_id FROM progress WHERE user_id=? AND book_id=?`, meID(r), b.ID).Scan(&last) == nil {
 			for _, x := range b.Files {
 				if x.ID == last {
 					f = x
@@ -462,12 +652,24 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 	for _, x := range b.Files {
 		formats = append(formats, map[string]any{"id": x.ID, "format": x.Format, "size": x.Size})
 	}
+	ub := getUserBook(meID(r), b.ID)
 	writeJSON(w, 200, map[string]any{
 		"file_id": f.ID, "format": f.Format, "reader": reader, "url": url,
 		"name": name + "." + ext, "title": b.Title, "author": b.Author,
 		"kind": b.Kind, "direction": b.Direction, "has_cover": b.Cover != "",
-		"files": formats,
+		"files": formats, "language": b.Language, "series": b.Series, "series_index": b.SeriesIndex,
+		"prefs": ub.Prefs, "read_state": ub.ReadState, "missing": f.MissingSince > 0,
 	})
+}
+
+// 文件接口：先看这个人能不能看这本书
+func visibleFile(w http.ResponseWriter, r *http.Request) (*File, bool) {
+	f, err := getFile(pathID(r, "fid"))
+	if err != nil || !canSeeFile(me(r), f) {
+		errJSON(w, 404, "文件不存在")
+		return nil, false
+	}
+	return f, true
 }
 
 var contentTypes = map[string]string{
@@ -496,9 +698,8 @@ func serveFile(w http.ResponseWriter, r *http.Request, p, format, downloadName s
 }
 
 func handleRaw(w http.ResponseWriter, r *http.Request) {
-	f, err := getFile(pathID(r, "fid"))
-	if err != nil {
-		errJSON(w, 404, "文件不存在")
+	f, ok := visibleFile(w, r)
+	if !ok {
 		return
 	}
 	dl := ""
@@ -509,9 +710,8 @@ func handleRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleConvertedEPUB(w http.ResponseWriter, r *http.Request) {
-	f, err := getFile(pathID(r, "fid"))
-	if err != nil {
-		errJSON(w, 404, "文件不存在")
+	f, ok := visibleFile(w, r)
+	if !ok {
 		return
 	}
 	b, _ := getBook(f.BookID)
@@ -528,9 +728,8 @@ func handleConvertedEPUB(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleConvertedPDF(w http.ResponseWriter, r *http.Request) {
-	f, err := getFile(pathID(r, "fid"))
-	if err != nil {
-		errJSON(w, 404, "文件不存在")
+	f, ok := visibleFile(w, r)
+	if !ok {
 		return
 	}
 	out, err := ensurePDF(f.Path)
@@ -541,60 +740,9 @@ func handleConvertedPDF(w http.ResponseWriter, r *http.Request) {
 	serveFile(w, r, out, "pdf", "")
 }
 
-// 漫画页列表缓存（页名 + 每页宽高，前端据此判断跨页大图）
-type comicInfo struct {
-	names []string
-	dims  [][2]int
-}
-
-var pageCache = struct {
-	sync.Mutex
-	m map[int64]*comicInfo
-}{m: map[int64]*comicInfo{}}
-
-func comicPagesInfo(f *File) (*comicInfo, error) {
-	pageCache.Lock()
-	if p, ok := pageCache.m[f.ID]; ok {
-		pageCache.Unlock()
-		return p, nil
-	}
-	pageCache.Unlock()
-	a, err := pooledArchive(f)
-	if err != nil {
-		return nil, err
-	}
-	arcReadMu.Lock()
-	imgs := images(a)
-	info := &comicInfo{names: imgs, dims: make([][2]int, len(imgs))}
-	for i, n := range imgs {
-		if b, err := a.Read(n); err == nil {
-			if c, _, err := image.DecodeConfig(bytes.NewReader(b)); err == nil {
-				info.dims[i] = [2]int{c.Width, c.Height}
-			}
-		}
-	}
-	arcReadMu.Unlock()
-	pageCache.Lock()
-	if len(pageCache.m) > 200 {
-		pageCache.m = map[int64]*comicInfo{}
-	}
-	pageCache.m[f.ID] = info
-	pageCache.Unlock()
-	return info, nil
-}
-
-func comicPages(f *File) ([]string, error) {
-	info, err := comicPagesInfo(f)
-	if err != nil {
-		return nil, err
-	}
-	return info.names, nil
-}
-
 func handlePages(w http.ResponseWriter, r *http.Request) {
-	f, err := getFile(pathID(r, "fid"))
-	if err != nil {
-		errJSON(w, 404, "文件不存在")
+	f, ok := visibleFile(w, r)
+	if !ok {
 		return
 	}
 	info, err := comicPagesInfo(f)
@@ -605,42 +753,9 @@ func handlePages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"count": len(info.names), "dims": info.dims})
 }
 
-// 保持最近打开的几个压缩包，避免每页都重新打开
-var arcPool = struct {
-	sync.Mutex
-	m     map[int64]Archive
-	order []int64
-}{m: map[int64]Archive{}}
-
-func pooledArchive(f *File) (Archive, error) {
-	arcPool.Lock()
-	defer arcPool.Unlock()
-	if a, ok := arcPool.m[f.ID]; ok {
-		return a, nil
-	}
-	a, err := openArchive(f.Path, f.Format)
-	if err != nil {
-		return nil, err
-	}
-	arcPool.m[f.ID] = a
-	arcPool.order = append(arcPool.order, f.ID)
-	if len(arcPool.order) > 6 {
-		old := arcPool.order[0]
-		arcPool.order = arcPool.order[1:]
-		if oa, ok := arcPool.m[old]; ok {
-			oa.Close()
-			delete(arcPool.m, old)
-		}
-	}
-	return a, nil
-}
-
-var arcReadMu sync.Mutex
-
 func handlePage(w http.ResponseWriter, r *http.Request) {
-	f, err := getFile(pathID(r, "fid"))
-	if err != nil {
-		errJSON(w, 404, "文件不存在")
+	f, ok := visibleFile(w, r)
+	if !ok {
 		return
 	}
 	n, _ := strconv.Atoi(r.PathValue("n"))
@@ -656,19 +771,13 @@ func handlePage(w http.ResponseWriter, r *http.Request) {
 		width = (width + 199) / 200 * 200 // 取整，提高缓存命中
 		cachePath = filepath.Join(cfg.DataDir, "cache", "pages", cacheKey(f.Path), fmt.Sprintf("%d_%d.jpg", n, width))
 		if _, err := os.Stat(cachePath); err == nil {
+			touchCache(filepath.Dir(cachePath))
 			w.Header().Set("Content-Type", "image/jpeg")
 			http.ServeFile(w, r, cachePath)
 			return
 		}
 	}
-	a, err := pooledArchive(f)
-	if err != nil {
-		errJSON(w, 500, err.Error())
-		return
-	}
-	arcReadMu.Lock()
-	data, err := a.Read(pages[n])
-	arcReadMu.Unlock()
+	data, err := readArchivePage(f, pages[n])
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
@@ -676,7 +785,10 @@ func handlePage(w http.ResponseWriter, r *http.Request) {
 	if width > 0 {
 		if out, err := resizeImage(data, width, 86); err == nil {
 			os.MkdirAll(filepath.Dir(cachePath), 0o755)
-			os.WriteFile(cachePath, out, 0o644)
+			if os.WriteFile(cachePath, out, 0o644) == nil {
+				touchCache(filepath.Dir(cachePath))
+				noteCacheWrite()
+			}
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.Write(out)
 			return
@@ -690,80 +802,141 @@ func handlePage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// ---------- 进度、书签 ----------
+// ---------- 进度、书签笔记（每个人自己的） ----------
 
-func handleGetProgress(w http.ResponseWriter, r *http.Request) {
-	var p struct {
-		FileID    int64   `json:"file_id"`
-		Location  string  `json:"location"`
-		Percent   float64 `json:"percent"`
-		Device    string  `json:"device"`
-		UpdatedAt int64   `json:"updated_at"`
-	}
-	db.QueryRow(`SELECT file_id,location,percent,device,updated_at FROM progress WHERE book_id=?`, pathID(r, "id")).Scan(&p.FileID, &p.Location, &p.Percent, &p.Device, &p.UpdatedAt)
-	writeJSON(w, 200, p)
+type progressRow struct {
+	FileID    int64   `json:"file_id"`
+	Location  string  `json:"location"`
+	Percent   float64 `json:"percent"`
+	Device    string  `json:"device"`
+	UpdatedAt int64   `json:"updated_at"`
 }
 
+func getProgress(uid, bookID int64) progressRow {
+	var p progressRow
+	db.QueryRow(`SELECT file_id,location,percent,device,updated_at FROM progress WHERE user_id=? AND book_id=?`, uid, bookID).Scan(&p.FileID, &p.Location, &p.Percent, &p.Device, &p.UpdatedAt)
+	return p
+}
+
+func handleGetProgress(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r, "id")
+	if !canSeeBook(me(r), id) {
+		errJSON(w, 404, "找不到这本书")
+		return
+	}
+	writeJSON(w, 200, getProgress(meID(r), id))
+}
+
+// 存进度。冲突时以别的设备上更新的为准：客户端带上打开这本书时拿到的 updated_at（base），
+// 服务器上的进度比它新（期间在别处读过）、位置又不一样，就不覆盖，只记阅读时长，回 conflict 和服务器上的进度。
+// 写库失败回 500，客户端留着下次再传。
 func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "id")
+	u := me(r)
+	if !canSeeBook(u, id) {
+		errJSON(w, 404, "找不到这本书")
+		return
+	}
 	var req struct {
-		FileID   int64   `json:"file_id"`
-		Location string  `json:"location"`
-		Percent  float64 `json:"percent"`
-		Device   string  `json:"device"`
-		Seconds  int     `json:"seconds"` // 距上次上报实际阅读的秒数
+		FileID   int64    `json:"file_id"`
+		Location string   `json:"location"`
+		Percent  float64  `json:"percent"`
+		Device   string   `json:"device"`
+		Seconds  int      `json:"seconds"` // 距上次上报实际阅读的秒数
+		Base     *int64   `json:"base"`    // 客户端知道的服务器进度时间
+		At       *float64 `json:"at"`      // 客户端记下这个位置的时间（毫秒），只用来判断离线排队的先后
 	}
 	if readJSON(r, &req) != nil {
 		errJSON(w, 400, "格式不正确")
 		return
 	}
-	ts := now()
-	addReadingTime(id, req.Seconds)
-	db.Exec(`INSERT INTO progress(book_id,file_id,location,percent,device,updated_at) VALUES(?,?,?,?,?,?)
-		ON CONFLICT(book_id) DO UPDATE SET file_id=excluded.file_id,location=excluded.location,percent=excluded.percent,device=excluded.device,updated_at=excluded.updated_at`,
-		id, req.FileID, req.Location, req.Percent, req.Device, ts)
-	state := "reading"
-	if req.Percent >= 0.995 {
-		state = "done"
+	if err := addReadingTime(u.ID, id, req.Seconds); err != nil {
+		errJSON(w, 500, "记录阅读时长失败："+err.Error())
+		return
 	}
-	db.Exec(`UPDATE books SET read_state=? WHERE id=? AND (read_state<>'done' OR ?='done')`, state, id, state)
-	if state == "done" {
-		db.Exec(`UPDATE books SET finished_at=? WHERE id=? AND finished_at=0`, ts, id)
+	cur := getProgress(u.ID, id)
+	if req.Base != nil && cur.UpdatedAt > *req.Base && (cur.Location != req.Location || cur.FileID != req.FileID) && cur.UpdatedAt > 0 {
+		writeJSON(w, 200, map[string]any{"updated_at": cur.UpdatedAt, "conflict": true, "current": cur})
+		return
+	}
+	ts := now()
+	if ts <= cur.UpdatedAt {
+		ts = cur.UpdatedAt + 1 // 同一秒里存两次，也要让 updated_at 变，客户端靠它判断新旧
+	}
+	if _, err := db.Exec(`INSERT INTO progress(user_id,book_id,file_id,location,percent,device,updated_at) VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(user_id,book_id) DO UPDATE SET file_id=excluded.file_id,location=excluded.location,percent=excluded.percent,device=excluded.device,updated_at=excluded.updated_at`,
+		u.ID, id, req.FileID, req.Location, req.Percent, req.Device, ts); err != nil {
+		errJSON(w, 500, "保存进度失败："+err.Error())
+		return
+	}
+	ub := getUserBook(u.ID, id)
+	switch {
+	case req.Percent >= 0.995:
+		if ub.ReadState != "done" {
+			setReadState(u.ID, id, "done")
+		}
+	case ub.ReadState == "unread":
+		setReadState(u.ID, id, "reading")
 	}
 	writeJSON(w, 200, map[string]int64{"updated_at": ts})
 }
 
+// 书签和笔记在同一张表：kind = bookmark（书签）| highlight（划线，可以带笔记）
 type Bookmark struct {
 	ID        int64  `json:"id"`
+	BookID    int64  `json:"book_id,omitempty"`
+	Kind      string `json:"kind"`
 	Location  string `json:"location"`
 	Label     string `json:"label"`
 	Text      string `json:"text"`
 	Note      string `json:"note"`
 	Color     string `json:"color"`
 	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
 func handleBookmarks(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT id,location,label,text,note,color,created_at FROM bookmarks WHERE book_id=? ORDER BY id`, pathID(r, "id"))
+	id := pathID(r, "id")
+	if !canSeeBook(me(r), id) {
+		errJSON(w, 404, "找不到这本书")
+		return
+	}
+	writeJSON(w, 200, bookmarksOf(meID(r), id))
+}
+
+func bookmarksOf(uid, bookID int64) []Bookmark {
+	rows, err := db.Query(`SELECT id,book_id,kind,location,label,text,note,color,created_at,updated_at FROM bookmarks WHERE book_id=? AND user_id=? ORDER BY id`, bookID, uid)
 	out := []Bookmark{}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var b Bookmark
-			rows.Scan(&b.ID, &b.Location, &b.Label, &b.Text, &b.Note, &b.Color, &b.CreatedAt)
+			rows.Scan(&b.ID, &b.BookID, &b.Kind, &b.Location, &b.Label, &b.Text, &b.Note, &b.Color, &b.CreatedAt, &b.UpdatedAt)
 			out = append(out, b)
 		}
 	}
-	writeJSON(w, 200, out)
+	return out
 }
 
 func handleAddBookmark(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r, "id")
+	if !canSeeBook(me(r), id) {
+		errJSON(w, 404, "找不到这本书")
+		return
+	}
 	var b Bookmark
 	if readJSON(r, &b) != nil || b.Location == "" {
 		errJSON(w, 400, "格式不正确")
 		return
 	}
-	res, err := db.Exec(`INSERT INTO bookmarks(book_id,location,label,text,note,color,created_at) VALUES(?,?,?,?,?,?,?)`, pathID(r, "id"), b.Location, b.Label, truncate(b.Text, 2000), b.Note, b.Color, now())
+	if b.Kind != "highlight" {
+		b.Kind = "bookmark"
+	}
+	b.CreatedAt, b.UpdatedAt, b.BookID = now(), now(), id
+	b.Text = truncate(b.Text, 4000)
+	b.Note = truncate(b.Note, 8000)
+	res, err := db.Exec(`INSERT INTO bookmarks(book_id,user_id,kind,location,label,text,note,color,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		id, meID(r), b.Kind, b.Location, b.Label, b.Text, b.Note, b.Color, b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
@@ -772,9 +945,146 @@ func handleAddBookmark(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, b)
 }
 
+// 改笔记内容、颜色
+func handleUpdateBookmark(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Note  *string `json:"note"`
+		Color *string `json:"color"`
+		Label *string `json:"label"`
+	}
+	if readJSON(r, &req) != nil {
+		errJSON(w, 400, "格式不正确")
+		return
+	}
+	bid, uid := pathID(r, "bid"), meID(r)
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE id=? AND user_id=?`, bid, uid).Scan(&n)
+	if n == 0 {
+		errJSON(w, 404, "没有这条笔记")
+		return
+	}
+	if req.Note != nil {
+		db.Exec(`UPDATE bookmarks SET note=?,updated_at=? WHERE id=?`, truncate(*req.Note, 8000), now(), bid)
+	}
+	if req.Color != nil {
+		db.Exec(`UPDATE bookmarks SET color=?,updated_at=? WHERE id=?`, *req.Color, now(), bid)
+	}
+	if req.Label != nil {
+		db.Exec(`UPDATE bookmarks SET label=?,updated_at=? WHERE id=?`, *req.Label, now(), bid)
+	}
+	var b Bookmark
+	db.QueryRow(`SELECT id,book_id,kind,location,label,text,note,color,created_at,updated_at FROM bookmarks WHERE id=?`, bid).Scan(&b.ID, &b.BookID, &b.Kind, &b.Location, &b.Label, &b.Text, &b.Note, &b.Color, &b.CreatedAt, &b.UpdatedAt)
+	writeJSON(w, 200, b)
+}
+
 func handleDeleteBookmark(w http.ResponseWriter, r *http.Request) {
-	db.Exec(`DELETE FROM bookmarks WHERE id=?`, pathID(r, "bid"))
+	db.Exec(`DELETE FROM bookmarks WHERE id=? AND user_id=?`, pathID(r, "bid"), meID(r))
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// 全部笔记（划线和书签），按书分组，最近的在前
+func handleAllNotes(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
+	vis, vargs := visibleSQL(u)
+	kind := r.URL.Query().Get("kind")
+	q := `SELECT m.id,m.book_id,m.kind,m.location,m.label,m.text,m.note,m.color,m.created_at,m.updated_at,b.title,b.author FROM bookmarks m JOIN books b ON b.id=m.book_id WHERE m.user_id=? AND ` + vis
+	args := append([]any{u.ID}, vargs...)
+	if kind != "" {
+		q += ` AND m.kind=?`
+		args = append(args, kind)
+	}
+	rows, err := db.Query(q+` ORDER BY m.created_at DESC LIMIT 2000`, args...)
+	if err != nil {
+		errJSON(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	type item struct {
+		Bookmark
+		Title  string `json:"title"`
+		Author string `json:"author"`
+	}
+	out := []item{}
+	for rows.Next() {
+		var it item
+		rows.Scan(&it.ID, &it.BookID, &it.Kind, &it.Location, &it.Label, &it.Text, &it.Note, &it.Color, &it.CreatedAt, &it.UpdatedAt, &it.Title, &it.Author)
+		out = append(out, it)
+	}
+	writeJSON(w, 200, out)
+}
+
+// 导出笔记为 Markdown：一本书（/api/books/{id}/notes.md）或全部（/api/notes.md）
+func handleNotesMarkdown(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
+	var ids []int64
+	if id := pathID(r, "id"); id > 0 {
+		if !canSeeBook(u, id) {
+			errJSON(w, 404, "找不到这本书")
+			return
+		}
+		ids = []int64{id}
+	} else {
+		vis, vargs := visibleSQL(u)
+		rows, err := db.Query(`SELECT DISTINCT m.book_id FROM bookmarks m JOIN books b ON b.id=m.book_id WHERE m.user_id=? AND m.kind='highlight' AND `+vis+` ORDER BY b.sort_key`, append([]any{u.ID}, vargs...)...)
+		if err == nil {
+			for rows.Next() {
+				var id int64
+				rows.Scan(&id)
+				ids = append(ids, id)
+			}
+			rows.Close()
+		}
+	}
+	var sb strings.Builder
+	name := "书库笔记"
+	if len(ids) == 1 && pathID(r, "id") > 0 {
+		if b, err := getBook(ids[0]); err == nil {
+			name = b.Title + " 笔记"
+		}
+	}
+	sb.WriteString("# " + name + "\n\n")
+	for _, id := range ids {
+		b, err := getBook(id)
+		if err != nil {
+			continue
+		}
+		marks := bookmarksOf(u.ID, id)
+		var hl []Bookmark
+		for _, m := range marks {
+			if m.Kind == "highlight" {
+				hl = append(hl, m)
+			}
+		}
+		if len(hl) == 0 {
+			continue
+		}
+		if len(ids) > 1 {
+			sb.WriteString("## 《" + b.Title + "》")
+			if b.Author != "" {
+				sb.WriteString(" " + b.Author)
+			}
+			sb.WriteString("\n\n")
+		} else if b.Author != "" {
+			sb.WriteString(b.Author + "\n\n")
+		}
+		chapter := ""
+		for _, m := range hl {
+			if m.Label != "" && m.Label != chapter {
+				chapter = m.Label
+				sb.WriteString(strings.Repeat("#", 2+map[bool]int{true: 1, false: 0}[len(ids) > 1]) + " " + chapter + "\n\n")
+			}
+			for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
+				sb.WriteString("> " + line + "\n")
+			}
+			if m.Note != "" {
+				sb.WriteString("\n" + strings.TrimSpace(m.Note) + "\n")
+			}
+			sb.WriteString("\n")
+		}
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": safeName(name) + ".md"}))
+	w.Write([]byte(sb.String()))
 }
 
 // ---------- 上传 ----------
@@ -861,26 +1171,78 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 整理建议 ----------
 
+// 整理建议要遍历整个书库目录，书多时要好几秒：放在后台算，页面上直接用算好的结果。
+// 书目有变化（invalidateSuggestions）时 5 秒后在后台重算，同时最多一个在算
 var sugCache = struct {
 	sync.Mutex
-	at   time.Time
-	list []Suggestion
+	at       time.Time
+	list     []Suggestion
+	computed bool
+	stale    bool
 }{}
+
+var sugComputing sync.Mutex
+var sugKick = make(chan struct{}, 1)
 
 func invalidateSuggestions() {
 	sugCache.Lock()
-	sugCache.at = time.Time{}
+	sugCache.stale = true
 	sugCache.Unlock()
+	select {
+	case sugKick <- struct{}{}:
+	default:
+	}
 }
 
+func recomputeSuggestions() []Suggestion {
+	sugComputing.Lock()
+	defer sugComputing.Unlock()
+	list := computeSuggestions()
+	sugCache.Lock()
+	sugCache.list, sugCache.at, sugCache.computed, sugCache.stale = list, time.Now(), true, false
+	sugCache.Unlock()
+	return list
+}
+
+func suggestionsLoop(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(20 * time.Second):
+	}
+	recomputeSuggestions()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sugKick:
+			time.Sleep(5 * time.Second) // 连着改好几本书时只算一次
+			select {
+			case <-sugKick:
+			default:
+			}
+			recomputeSuggestions()
+		case <-time.After(30 * time.Minute):
+			recomputeSuggestions()
+		}
+	}
+}
+
+// fresh：用户点了“重新检查”，现算；否则用后台算好的（还没算过就现算一次）
 func cachedSuggestions(fresh bool) []Suggestion {
 	sugCache.Lock()
-	defer sugCache.Unlock()
-	if fresh || time.Since(sugCache.at) > 2*time.Minute {
-		sugCache.list = computeSuggestions()
-		sugCache.at = time.Now()
+	computed, list := sugCache.computed, sugCache.list
+	sugCache.Unlock()
+	if fresh || !computed {
+		return recomputeSuggestions()
 	}
-	return sugCache.list
+	return list
+}
+
+func suggestionCount() int {
+	sugCache.Lock()
+	defer sugCache.Unlock()
+	return len(sugCache.list)
 }
 
 func handleSuggestions(w http.ResponseWriter, r *http.Request) {
@@ -941,10 +1303,14 @@ func handleUndo(w http.ResponseWriter, r *http.Request) {
 // ---------- 书库、设置 ----------
 
 func handleLibraries(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
 	out := []map[string]any{}
 	for _, l := range listLibraries() {
+		if !canSeeLibrary(u, l.ID) {
+			continue
+		}
 		var n int
-		db.QueryRow(`SELECT COUNT(DISTINCT book_id) FROM files WHERE library_id=?`, l.ID).Scan(&n)
+		db.QueryRow(`SELECT COUNT(DISTINCT f.book_id) FROM files f JOIN books b ON b.id=f.book_id WHERE f.library_id=? AND b.deleted_at=0`, l.ID).Scan(&n)
 		_, err := os.Stat(l.Path)
 		out = append(out, map[string]any{"id": l.ID, "name": l.Name, "path": l.Path, "kind": l.Kind, "template": l.Template, "count": n, "exists": err == nil})
 	}
@@ -1032,7 +1398,11 @@ func handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "至少要保留一个书库")
 		return
 	}
-	// 只移除登记，不动文件
+	// 只移除登记，不动文件。登记连同每个人的进度、笔记一起删，先备份一份，删错了能从备份恢复
+	if _, err := backupDB("manual"); err != nil {
+		errJSON(w, 500, "移除前备份数据库失败："+err.Error())
+		return
+	}
 	db.Exec(`DELETE FROM files WHERE library_id=?`, id)
 	db.Exec(`DELETE FROM books WHERE NOT EXISTS(SELECT 1 FROM files WHERE files.book_id=books.id)`)
 	db.Exec(`DELETE FROM libraries WHERE id=?`, id)
@@ -1065,6 +1435,22 @@ func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		tts.OpenAI.APIKey = k[:3] + strings.Repeat("•", 8) + k[len(k)-4:]
 	} else if k != "" {
 		tts.OpenAI.APIKey = "••••"
+	}
+	// 家人账号只拿到阅读、听书要用的部分（AI、整理规则、路径这些是管理员的事）
+	if !me(r).Admin() {
+		if tts.OpenAI.APIKey != "" {
+			tts.OpenAI.APIKey = "••••"
+		}
+		writeJSON(w, 200, map[string]any{
+			"tts":         tts,
+			"fulltext":    fulltextStatus(),
+			"opds_path":   "/opds",
+			"server_name": getSetting("server_name", "我的书库"),
+			"categories":  categories(),
+			"network":     net,
+			"version":     version,
+		})
+		return
 	}
 	writeJSON(w, 200, map[string]any{
 		"tts":             tts,
@@ -1157,14 +1543,11 @@ func handleAITest(w http.ResponseWriter, r *http.Request) {
 		a.APIKey = old.APIKey
 	}
 	a.Enabled = true
-	// 临时用这份配置测试
-	prev := getSetting("ai", "")
-	setSetting("ai", toJSON(a))
-	defer setSetting("ai", prev)
+	// 用这份配置测试（不写进设置：测试的时候别的书照常用原来的配置识别）
 	name := "[www.xxbook.com]三体2黑暗森林(精校版)_1.txt"
 	m := Meta{Sample: "序章 褐蚁已经忘记这里曾是它的家园。这段漫长的时光对于暮色中的大地和刚刚出现的星星来说短得可以忽略不计"}
 	start := time.Now()
-	id, err := aiIdentify(r.Context(), name, m, "book", ruleIdentify(name, m, "book"))
+	id, err := aiIdentifyWith(r.Context(), a, name, m, "book", ruleIdentify(name, m, "book"))
 	if err != nil {
 		errJSON(w, 502, err.Error())
 		return
@@ -1209,6 +1592,10 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 		p = filepath.Join(cfg.WebDir, "index.html")
 	}
 	base := filepath.Base(p)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if base == "index.html" {
+		w.Header().Set("Content-Security-Policy", pageCSP)
+	}
 	switch {
 	case base == "index.html" || base == "sw.js" || base == "manifest.webmanifest":
 		w.Header().Set("Cache-Control", "no-cache")
@@ -1222,5 +1609,13 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	http.ServeFile(w, r, p)
 }
+
+// 网页的内容安全策略：只运行本站的脚本文件。
+// 书的每一章在 iframe 里（blob: 地址，继承这个策略），书里夹带的脚本不会运行，也就碰不到登录状态；
+// 书里的样式、图片、字体（blob:、data:）照常显示
+const pageCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' blob: data:; " +
+	"img-src 'self' blob: data: http: https:; font-src 'self' blob: data:; media-src 'self' blob: data:; " +
+	"connect-src 'self' blob: data: http: https:; frame-src 'self' blob: data: about:; worker-src 'self' blob:; " +
+	"object-src 'none'; base-uri 'self'; form-action 'self'"
 
 var execLookPath = exec.LookPath

@@ -32,11 +32,37 @@ import (
 
 var ftAvailable bool
 
+// 全文索引的表在单独的 fulltext.db 里（连接时挂成 fts，见 migrate.go）。
+// 1.0.0.7 以前放在 shuku.db 里：删掉旧表、腾出空间，索引在后台重建。
+// 在升级前备份之前做：索引能重建，不用备份，备份文件也就不会大得离谱
+func dropMainFulltext() {
+	var old int
+	db.QueryRow(`SELECT COUNT(*) FROM main.sqlite_master WHERE name IN ('ft','ft_chunks','ft_files')`).Scan(&old)
+	if old > 0 {
+		for _, t := range []string{"ft", "ft_chunks", "ft_files"} {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS main.` + t); err != nil {
+				log.Printf("删除旧的全文索引表 %s 失败：%v", t, err)
+			}
+		}
+		// 旧索引占的空间很大：整理一次数据库文件（只在这次升级时做）
+		var free, size int64
+		db.QueryRow(`PRAGMA main.freelist_count`).Scan(&free)
+		db.QueryRow(`PRAGMA main.page_size`).Scan(&size)
+		if free*size > 32<<20 {
+			log.Printf("全文索引已经搬到单独的 fulltext.db，正在整理数据库文件（释放 %d MB）…", free*size>>20)
+			if _, err := db.Exec(`VACUUM main`); err != nil {
+				log.Printf("整理数据库失败（不影响使用）：%v", err)
+			}
+		}
+		logEvent("info", 0, "全文索引搬到了单独的文件，正在后台重建，书内搜索暂时可能不全")
+	}
+}
+
 func migrateFulltext() {
-	db.Exec(`CREATE TABLE IF NOT EXISTS ft_chunks (id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL, file_id INTEGER NOT NULL, sec INTEGER NOT NULL, part INTEGER NOT NULL DEFAULT 0, label TEXT NOT NULL DEFAULT '')`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ft_chunks_file ON ft_chunks(file_id)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS ft_files (file_id INTEGER PRIMARY KEY, hash TEXT NOT NULL, chunks INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', indexed_at INTEGER NOT NULL)`)
-	_, err := db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ft USING fts5(body, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0')`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS fts.ft_chunks (id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL, file_id INTEGER NOT NULL, sec INTEGER NOT NULL, part INTEGER NOT NULL DEFAULT 0, label TEXT NOT NULL DEFAULT '')`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS fts.idx_ft_chunks_file ON ft_chunks(file_id)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS fts.ft_files (file_id INTEGER PRIMARY KEY, hash TEXT NOT NULL, chunks INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', indexed_at INTEGER NOT NULL)`)
+	_, err := db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS fts.ft USING fts5(body, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0')`)
 	ftAvailable = err == nil
 	if err != nil {
 		logEvent("warn", 0, "当前程序没有编译全文搜索支持（需要 sqlite_fts5），书内搜索不可用："+err.Error())
@@ -632,7 +658,7 @@ func fulltextPass(ctx context.Context) {
 		var f File
 		err := db.QueryRow(`SELECT f.id,f.book_id,f.library_id,f.path,f.format,f.size,f.hash FROM files f JOIN books b ON b.id=f.book_id
 			LEFT JOIN ft_files t ON t.file_id=f.id
-			WHERE b.kind='book' AND f.format IN ('epub','txt','fb2','fbz','mobi','azw','azw3','pdf','docx','doc','rtf','odt','html','md','chm')
+			WHERE b.kind='book' AND b.deleted_at=0 AND f.missing_since=0 AND f.format IN ('epub','txt','fb2','fbz','mobi','azw','azw3','pdf','docx','doc','rtf','odt','html','md','chm')
 			AND (t.file_id IS NULL OR t.hash<>f.hash) ORDER BY f.id LIMIT 1`).Scan(&f.ID, &f.BookID, &f.LibraryID, &f.Path, &f.Format, &f.Size, &f.Hash)
 		if err != nil {
 			return
@@ -654,7 +680,7 @@ func fulltextStatus() map[string]any {
 	var indexed, skipped, total int
 	db.QueryRow(`SELECT COUNT(*) FROM ft_files WHERE status='ok'`).Scan(&indexed)
 	db.QueryRow(`SELECT COUNT(*) FROM ft_files WHERE status<>'ok'`).Scan(&skipped)
-	db.QueryRow(`SELECT COUNT(*) FROM files f JOIN books b ON b.id=f.book_id WHERE b.kind='book' AND f.format IN ('epub','txt','fb2','fbz','mobi','azw','azw3','pdf','docx','doc','rtf','odt','html','md','chm')`).Scan(&total)
+	db.QueryRow(`SELECT COUNT(*) FROM files f JOIN books b ON b.id=f.book_id WHERE b.kind='book' AND b.deleted_at=0 AND f.missing_since=0 AND f.format IN ('epub','txt','fb2','fbz','mobi','azw','azw3','pdf','docx','doc','rtf','odt','html','md','chm')`).Scan(&total)
 	ftState.Lock()
 	defer ftState.Unlock()
 	return map[string]any{"available": ftAvailable, "enabled": fulltextEnabled(), "indexed": indexed, "skipped": skipped, "total": total, "running": ftState.Running, "current": ftState.Current}
@@ -764,9 +790,14 @@ func handleFulltext(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 	out := []ftBook{}
 	secCache := map[int64][]Section{}
+	u := me(r)
 	for _, bid := range order {
 		if len(out) >= limit {
 			break
+		}
+		// 回收站里的书、家人看不到的书库里的书不出现在结果里
+		if !canSeeBook(u, bid) {
+			continue
 		}
 		b, err := getBook(bid)
 		if err != nil {
@@ -779,7 +810,7 @@ func handleFulltext(w http.ResponseWriter, r *http.Request) {
 			}
 			secs, ok := secCache[x.file]
 			if !ok {
-				if f, err := getFile(x.file); err == nil {
+				if f, err := getFile(x.file); err == nil && f.MissingSince == 0 {
 					secs = loadSections(f)
 				}
 				secCache[x.file] = secs

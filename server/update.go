@@ -162,7 +162,31 @@ func triggerUpdate(ctx context.Context) map[string]any {
 	case resp.StatusCode/100 != 2:
 		return map[string]any{"ok": false, "code": "failed", "reason": "更新服务返回错误（" + http.StatusText(resp.StatusCode) + "）"}
 	}
-	return map[string]any{"ok": true, "reason": "已经是最新版本（" + version + "）"}
+	// 更新服务回了“成功”只说明它检查过了：拉取失败（比如 ghcr.io 的令牌过期）它也会这样回。
+	// 能走到这里说明书库没被换掉，所以只能说“没有换新版本”
+	return map[string]any{"ok": true, "reason": "已检查，没有换新版本（当前 " + version + "）。如果确定发布了更新的版本，请在 Container Station 里看 taihaoshuo-updater 的日志，可能是拉取失败了"}
+}
+
+// 设置页“存储与状态”：更新服务有没有配好、连不连得上（只试着连一下端口，不触发更新）
+func updateStatus(ctx context.Context) map[string]any {
+	u, tok := updaterURL(), updaterToken()
+	if u == "" || tok == "" {
+		return map[string]any{"configured": false}
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(u, "http://"), "https://")
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if !strings.Contains(host, ":") {
+		host += ":80"
+	}
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", host)
+	if err != nil {
+		return map[string]any{"configured": true, "reachable": false, "url": u}
+	}
+	c.Close()
+	return map[string]any{"configured": true, "reachable": true, "url": u}
 }
 
 // POST /api/update/check

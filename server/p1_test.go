@@ -32,6 +32,25 @@ func setupDB(t *testing.T) string {
 	return dir
 }
 
+// 测试用账号：role 是 admin 或 member，libs 是家人能看的书库（空 = 全部）
+func addTestUser(t *testing.T, name, pass, role string, libs ...int64) *User {
+	t.Helper()
+	h, _ := hashPassword(pass)
+	if libs == nil {
+		libs = []int64{}
+	}
+	res, err := db.Exec(`INSERT INTO users(name,pass,role,libraries,created_at) VALUES(?,?,?,?,?)`, name, h, role, toJSON(libs), now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	u, err := getUser(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
 func TestTokenize(t *testing.T) {
 	got := strings.Join(tokenizeCJK("黑暗森林 Dark Forest 2"), " ")
 	if got != "黑暗 暗森 森林 dark forest 2" {
@@ -251,8 +270,7 @@ func TestSearchOnline(t *testing.T) {
 
 func TestOPDS(t *testing.T) {
 	setupDB(t)
-	h, _ := hashPassword("secret1")
-	setSetting("password_hash", h)
+	addTestUser(t, "管理员", "secret1", "admin")
 	db.Exec(`INSERT INTO books(title,author,kind,category,cover,created_at,updated_at,sort_key,author_key,search_key) VALUES('三体','刘慈欣','book','小说','v1',1,1,'santi','liucixin','三体 | santi | st')`)
 	db.Exec(`INSERT INTO files(book_id,path,format,size,hash,created_at) VALUES(1,'/x/三体.epub','epub',100,'h',1)`)
 	srv := httptest.NewServer(routes())

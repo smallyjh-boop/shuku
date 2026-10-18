@@ -5,6 +5,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/xml"
@@ -16,6 +17,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -591,13 +594,16 @@ func pdfString(raw []byte) string {
 }
 
 var pdfFieldRe = map[string]*regexp.Regexp{}
+var pdfFieldMu sync.Mutex // 入库和“重新识别”可能同时在读 PDF 信息
 
 func pdfField(b []byte, key string) string {
+	pdfFieldMu.Lock()
 	re, ok := pdfFieldRe[key]
 	if !ok {
 		re = regexp.MustCompile(`/` + key + `\s*(\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]*>)`)
 		pdfFieldRe[key] = re
 	}
+	pdfFieldMu.Unlock()
 	mm := re.FindAllSubmatch(b, -1)
 	for i := len(mm) - 1; i >= 0; i-- { // 增量更新的 PDF，后面的信息更新
 		if s := cleanSpace(pdfString(mm[i][1])); s != "" {
@@ -652,10 +658,13 @@ func renderPDFCover(p string) []byte {
 	}
 	defer os.RemoveAll(tmp)
 	out := filepath.Join(tmp, "c.png")
+	// 坏文件可能让转换程序一直卡着：最多等 1 分钟（入库是一本一本做的，卡住会挡住后面所有的书）
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	if bin, err := exec.LookPath("mutool"); err == nil {
-		exec.Command(bin, "draw", "-q", "-w", "480", "-o", out, p, "1").Run()
+		exec.CommandContext(ctx, bin, "draw", "-q", "-w", "480", "-o", out, p, "1").Run()
 	} else if bin, err := exec.LookPath("pdftoppm"); err == nil {
-		exec.Command(bin, "-png", "-f", "1", "-l", "1", "-scale-to", "480", "-singlefile", p, filepath.Join(tmp, "c")).Run()
+		exec.CommandContext(ctx, bin, "-png", "-f", "1", "-l", "1", "-scale-to", "480", "-singlefile", p, filepath.Join(tmp, "c")).Run()
 	}
 	b, _ := os.ReadFile(out)
 	return b
@@ -692,23 +701,53 @@ func docxMeta(p string) Meta {
 
 func comicMeta(p, format string) Meta {
 	var m Meta
-	a, err := openArchive(p, format)
-	if err != nil {
-		return m
+	var names []string
+	var read func(string) ([]byte, error)
+	switch format {
+	case "cbz", "zip", "epub", "fbz":
+		a, err := openArchive(p, format)
+		if err != nil {
+			return m
+		}
+		defer a.Close()
+		names, read = a.Names(), a.Read
+	default:
+		// rar、7z、tar：只读封面和 ComicInfo，不把整包解压到缓存（以前入库时整包解压，占的空间和漫画本身一样大）
+		ns, data, err := peekArchive(p, format, func(all []string) []string {
+			var want []string
+			if imgs := imageNames(all); len(imgs) > 0 {
+				want = append(want, imgs[0])
+			}
+			for _, n := range all {
+				if strings.EqualFold(filepath.Base(n), "ComicInfo.xml") {
+					want = append(want, n)
+					break
+				}
+			}
+			return want
+		})
+		if err != nil {
+			return m
+		}
+		names = ns
+		read = func(n string) ([]byte, error) {
+			if b, ok := data[n]; ok {
+				return b, nil
+			}
+			return nil, os.ErrNotExist
+		}
 	}
-	defer a.Close()
-	imgs := images(a)
-	names := a.Names()
+	imgs := imageNames(names)
 	// 压缩包里只要有电子书或大量非图片文件，就不当作漫画
 	if len(imgs) == 0 || len(imgs)*2 < len(names)-2 {
 		return m
 	}
 	m.IsComic = true
 	m.Pages = len(imgs)
-	m.Cover, _ = a.Read(imgs[0])
+	m.Cover, _ = read(imgs[0])
 	for _, n := range names {
 		if strings.EqualFold(filepath.Base(n), "ComicInfo.xml") {
-			b, _ := a.Read(n)
+			b, _ := read(n)
 			var ci struct {
 				Title, Series, Number, Volume, Writer, Summary, Genre, Tags, Manga, LanguageISO, Publisher string
 				Year                                                                                       int

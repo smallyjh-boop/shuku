@@ -38,50 +38,74 @@ type Book struct {
 	Source      string   `json:"source"`
 	OrigName    string   `json:"orig_name"`
 	Cover       string   `json:"cover"`
-	ReadState   string   `json:"read_state"`
+	ReadState   string   `json:"read_state"` // 下面这几项是当前这个人的：读完状态、进度、评分、想读
 	CreatedAt   int64    `json:"created_at"`
 	UpdatedAt   int64    `json:"updated_at"`
 	Files       []File   `json:"files,omitempty"`
 	Percent     float64  `json:"percent"`
 	LastRead    int64    `json:"last_read"`
+	Rating      int      `json:"rating"`
+	Want        bool     `json:"want"`
+	DeletedAt   int64    `json:"deleted_at,omitempty"`
+	Missing     bool     `json:"missing,omitempty"` // 文件都找不到了（被移走、共享文件夹没挂上）
+	Prefs       string   `json:"prefs,omitempty"`   // 这个人给这本书单独记的阅读设置（JSON）
+	FinishedAt  int64    `json:"finished_at,omitempty"`
 }
 
 type File struct {
-	ID        int64  `json:"id"`
-	BookID    int64  `json:"book_id"`
-	LibraryID int64  `json:"library_id"`
-	Path      string `json:"path"`
-	Format    string `json:"format"`
-	Size      int64  `json:"size"`
-	Hash      string `json:"-"`
-	Reader    string `json:"reader"`
+	ID           int64  `json:"id"`
+	BookID       int64  `json:"book_id"`
+	LibraryID    int64  `json:"library_id"`
+	Path         string `json:"path"`
+	Format       string `json:"format"`
+	Size         int64  `json:"size"`
+	Hash         string `json:"-"`
+	Reader       string `json:"reader"`
+	MissingSince int64  `json:"missing_since,omitempty"`
 }
 
-const bookCols = `b.id,b.title,b.orig_title,b.author,b.translator,b.series,b.series_index,b.year,b.category,b.tags,b.description,b.isbn,b.language,b.publisher,b.kind,b.direction,b.status,b.confidence,b.source,b.orig_name,b.cover,b.read_state,b.created_at,b.updated_at,COALESCE(p.percent,0),COALESCE(p.updated_at,0)`
+// 书目字段 + 当前这个人的读书状态。用法：SELECT bookCols + bookFrom + WHERE …，参数先放两次用户 id
+const bookCols = `b.id,b.title,b.orig_title,b.author,b.translator,b.series,b.series_index,b.year,b.category,b.tags,b.description,b.isbn,b.language,b.publisher,b.kind,b.direction,b.status,b.confidence,b.source,b.orig_name,b.cover,COALESCE(ub.read_state,'unread'),b.created_at,b.updated_at,COALESCE(p.percent,0),COALESCE(p.updated_at,0),COALESCE(ub.rating,0),COALESCE(ub.want,0),b.deleted_at`
+
+const bookFrom = ` FROM books b LEFT JOIN progress p ON p.book_id=b.id AND p.user_id=? LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=?`
 
 func scanBook(sc interface{ Scan(...any) error }) (*Book, error) {
 	var b Book
 	var tags string
-	err := sc.Scan(&b.ID, &b.Title, &b.OrigTitle, &b.Author, &b.Translator, &b.Series, &b.SeriesIndex, &b.Year, &b.Category, &tags, &b.Description, &b.ISBN, &b.Language, &b.Publisher, &b.Kind, &b.Direction, &b.Status, &b.Confidence, &b.Source, &b.OrigName, &b.Cover, &b.ReadState, &b.CreatedAt, &b.UpdatedAt, &b.Percent, &b.LastRead)
+	var want int
+	err := sc.Scan(&b.ID, &b.Title, &b.OrigTitle, &b.Author, &b.Translator, &b.Series, &b.SeriesIndex, &b.Year, &b.Category, &tags, &b.Description, &b.ISBN, &b.Language, &b.Publisher, &b.Kind, &b.Direction, &b.Status, &b.Confidence, &b.Source, &b.OrigName, &b.Cover, &b.ReadState, &b.CreatedAt, &b.UpdatedAt, &b.Percent, &b.LastRead, &b.Rating, &want, &b.DeletedAt)
 	if err != nil {
 		return nil, err
 	}
+	b.Want = want == 1
 	b.Tags = []string{}
 	jsonUnmarshal(tags, &b.Tags)
 	return &b, nil
 }
 
-func getBook(id int64) (*Book, error) {
-	b, err := scanBook(db.QueryRow(`SELECT `+bookCols+` FROM books b LEFT JOIN progress p ON p.book_id=b.id WHERE b.id=?`, id))
+// 不分人的书目信息（整理、入库等内部用）
+func getBook(id int64) (*Book, error) { return getBookFor(id, 0) }
+
+// 带上某个人的进度、读完状态
+func getBookFor(id, uid int64) (*Book, error) {
+	b, err := scanBook(db.QueryRow(`SELECT `+bookCols+bookFrom+` WHERE b.id=?`, uid, uid, id))
 	if err != nil {
 		return nil, err
 	}
 	b.Files = bookFiles(id)
+	if len(b.Files) > 0 {
+		b.Missing = true
+		for _, f := range b.Files {
+			if f.MissingSince == 0 {
+				b.Missing = false
+			}
+		}
+	}
 	return b, nil
 }
 
 func bookFiles(id int64) []File {
-	rows, err := db.Query(`SELECT id,book_id,library_id,path,format,size,hash FROM files WHERE book_id=?`, id)
+	rows, err := db.Query(`SELECT id,book_id,library_id,path,format,size,hash,missing_since FROM files WHERE book_id=?`, id)
 	if err != nil {
 		return nil
 	}
@@ -89,7 +113,7 @@ func bookFiles(id int64) []File {
 	var out []File
 	for rows.Next() {
 		var f File
-		rows.Scan(&f.ID, &f.BookID, &f.LibraryID, &f.Path, &f.Format, &f.Size, &f.Hash)
+		rows.Scan(&f.ID, &f.BookID, &f.LibraryID, &f.Path, &f.Format, &f.Size, &f.Hash, &f.MissingSince)
 		f.Reader = readerFor(f.Format)
 		out = append(out, f)
 	}
@@ -107,7 +131,7 @@ func sortFiles(fs []File) {
 
 func getFile(id int64) (*File, error) {
 	var f File
-	err := db.QueryRow(`SELECT id,book_id,library_id,path,format,size,hash FROM files WHERE id=?`, id).Scan(&f.ID, &f.BookID, &f.LibraryID, &f.Path, &f.Format, &f.Size, &f.Hash)
+	err := db.QueryRow(`SELECT id,book_id,library_id,path,format,size,hash,missing_since FROM files WHERE id=?`, id).Scan(&f.ID, &f.BookID, &f.LibraryID, &f.Path, &f.Format, &f.Size, &f.Hash, &f.MissingSince)
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +295,9 @@ func copyThenRemove(from, to string) error {
 	}
 	_, err = io.Copy(dst, src)
 	src.Close()
+	if err == nil {
+		err = dst.Sync() // 确认写到盘上了，再删原文件：中途断电也不会两边都没有
+	}
 	if cerr := dst.Close(); err == nil {
 		err = cerr
 	}
@@ -281,6 +308,10 @@ func copyThenRemove(from, to string) error {
 	os.Chtimes(tmp, st.ModTime(), st.ModTime())
 	if err := os.Rename(tmp, to); err != nil {
 		return err
+	}
+	if d, err := os.Open(filepath.Dir(to)); err == nil {
+		d.Sync()
+		d.Close()
 	}
 	return os.Remove(from)
 }
@@ -428,9 +459,49 @@ func listBatches(limit int) []OpBatch {
 	return out
 }
 
+// 整理时改了书目信息（比如统一作者名）：记下原来的值，撤销时改回来。
+// 同时记一条空的操作记录，这样即使没有移动文件，操作记录里也能看到、能撤销
+func recordMetaChange(batch, label string, bookID int64, field, old string) {
+	db.Exec(`INSERT INTO op_meta(batch,book_id,field,old) VALUES(?,?,?,?)`, batch, bookID, field, old)
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM ops WHERE batch=?`, batch).Scan(&n)
+	if n == 0 {
+		db.Exec(`INSERT INTO ops(batch,label,from_path,to_path,file_id,created_at) VALUES(?,?,'','',0,?)`, batch, label, now())
+	}
+}
+
+func undoMeta(batch string) int {
+	rows, err := db.Query(`SELECT id,book_id,field,old FROM op_meta WHERE batch=? ORDER BY id DESC`, batch)
+	if err != nil {
+		return 0
+	}
+	type m struct {
+		id, book   int64
+		field, old string
+	}
+	var list []m
+	for rows.Next() {
+		var x m
+		rows.Scan(&x.id, &x.book, &x.field, &x.old)
+		list = append(list, x)
+	}
+	rows.Close()
+	for _, x := range list {
+		switch x.field {
+		case "author", "series", "title", "category":
+			db.Exec(`UPDATE books SET `+x.field+`=?,updated_at=? WHERE id=?`, x.old, now(), x.book)
+			updateSearchKey(x.book)
+		}
+		db.Exec(`DELETE FROM op_meta WHERE id=?`, x.id)
+	}
+	return len(list)
+}
+
 func undoBatch(batch string) (int, error) {
 	moveMu.Lock()
 	defer moveMu.Unlock()
+	undoMeta(batch)
+	defer restoreDeletedBooks(batch) // 撤销的是删除：书从回收站回来
 	rows, err := db.Query(`SELECT id,from_path,to_path,file_id FROM ops WHERE batch=? AND undone=0 ORDER BY id DESC`, batch)
 	if err != nil {
 		return 0, err
@@ -449,6 +520,10 @@ func undoBatch(batch string) (int, error) {
 	n := 0
 	var errs []string
 	for _, o := range ops {
+		if o.from == "" && o.to == "" { // 只改了书目信息的记录
+			db.Exec(`UPDATE ops SET undone=1 WHERE id=?`, o.id)
+			continue
+		}
 		if _, err := os.Stat(o.to); err != nil {
 			errs = append(errs, filepath.Base(o.to)+" 已不在原处")
 			continue

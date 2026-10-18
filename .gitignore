@@ -3,3 +3,4 @@ server/shuku
 *.db-wal
 *.db-shm
 data/
+.claude/

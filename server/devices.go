@@ -27,7 +27,7 @@ import (
 
 type pairCode struct {
 	created time.Time
-	by      string
+	uid     int64 // 谁生成的配对码：连上的设备就是这个人的
 }
 
 var pairMu sync.Mutex
@@ -77,7 +77,7 @@ func handlePairCreate(w http.ResponseWriter, r *http.Request) {
 			delete(pairCodes, c)
 		}
 	}
-	pairCodes[code] = pairCode{created: time.Now(), by: tokenFrom(r)}
+	pairCodes[code] = pairCode{created: time.Now(), uid: meID(r)}
 	pairMu.Unlock()
 	info := serverInfo(r)
 	q := url.Values{}
@@ -97,16 +97,7 @@ func handlePairCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePairClaim(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	failMu.Lock()
-	recent := 0
-	for _, t := range fails[ip] {
-		if time.Since(t) < 10*time.Minute {
-			recent++
-		}
-	}
-	failMu.Unlock()
-	if recent >= 8 {
+	if tooManyFails(r) {
 		errJSON(w, 429, "尝试次数过多，请 10 分钟后再试")
 		return
 	}
@@ -121,10 +112,13 @@ func handlePairClaim(w http.ResponseWriter, r *http.Request) {
 	delete(pairCodes, code)
 	pairMu.Unlock()
 	if !ok || time.Since(p.created) > 10*time.Minute {
-		failMu.Lock()
-		fails[ip] = append(fails[ip], time.Now())
-		failMu.Unlock()
+		noteFail(r)
 		errJSON(w, 401, "配对码无效或已过期，请在网页上重新生成")
+		return
+	}
+	owner, err := getUser(p.uid)
+	if err != nil {
+		errJSON(w, 401, "生成配对码的账号已经删除了")
 		return
 	}
 	device := strings.TrimSpace(req.Device)
@@ -132,8 +126,9 @@ func handlePairClaim(w http.ResponseWriter, r *http.Request) {
 		device = "App"
 	}
 	info := serverInfo(r)
-	info["token"] = newSession(w, device)
-	logEvent("info", 0, "新设备已连接："+device)
+	info["token"] = newSession(w, device, owner.ID)
+	info["user"] = map[string]any{"id": owner.ID, "name": owner.Name, "role": owner.Role}
+	logEvent("info", 0, "新设备已连接："+device+"（"+owner.Name+"）")
 	writeJSON(w, 200, info)
 }
 
@@ -144,25 +139,34 @@ func sessionID(token string) string {
 	return hex.EncodeToString(s[:6])
 }
 
+// 登录过的设备：管理员看到所有人的，家人只看到自己的
 func handleSessions(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
 	cur := tokenFrom(r)
-	rows, err := db.Query(`SELECT token,device,created_at,last_seen FROM sessions ORDER BY last_seen DESC`)
+	q := `SELECT s.token,s.device,s.created_at,s.last_seen,s.user_id,COALESCE(u.name,'') FROM sessions s LEFT JOIN users u ON u.id=s.user_id`
+	var args []any
+	if !u.Admin() {
+		q += ` WHERE s.user_id=?`
+		args = append(args, u.ID)
+	}
+	rows, err := db.Query(q+` ORDER BY s.last_seen DESC`, args...)
 	out := []map[string]any{}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var t, d string
-			var c, l int64
-			rows.Scan(&t, &d, &c, &l)
-			out = append(out, map[string]any{"id": sessionID(t), "device": ifs(d != "", d, "未知设备"), "created_at": c, "last_seen": l, "current": t == cur})
+			var t, d, name string
+			var c, l, uid int64
+			rows.Scan(&t, &d, &c, &l, &uid, &name)
+			out = append(out, map[string]any{"id": sessionID(t), "device": ifs(d != "", d, "未知设备"), "created_at": c, "last_seen": l, "current": t == cur, "user_id": uid, "user": name})
 		}
 	}
 	writeJSON(w, 200, out)
 }
 
 func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
 	id := r.PathValue("id")
-	rows, err := db.Query(`SELECT token FROM sessions`)
+	rows, err := db.Query(`SELECT token,user_id FROM sessions`)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
@@ -170,8 +174,9 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	var del []string
 	for rows.Next() {
 		var t string
-		rows.Scan(&t)
-		if sessionID(t) == id {
+		var uid int64
+		rows.Scan(&t, &uid)
+		if sessionID(t) == id && (u.Admin() || uid == u.ID) {
 			del = append(del, t)
 		}
 	}
@@ -179,6 +184,7 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	for _, t := range del {
 		db.Exec(`DELETE FROM sessions WHERE token=?`, t)
 	}
+	forgetSessions()
 	writeJSON(w, 200, map[string]any{"ok": true, "count": len(del)})
 }
 
@@ -414,13 +420,12 @@ func resumePoint(chs []WatchChapter, loc string, percent float64) (int, float64)
 }
 
 func chapterBook(w http.ResponseWriter, r *http.Request) (*Book, *File, []WatchChapter, bool) {
-	b, err := getBook(pathID(r, "id"))
-	if err != nil {
-		errJSON(w, 404, "找不到这本书")
+	b, ok := visibleBook(w, r, pathID(r, "id"))
+	if !ok {
 		return nil, nil, nil, false
 	}
 	var last int64
-	db.QueryRow(`SELECT file_id FROM progress WHERE book_id=?`, b.ID).Scan(&last)
+	db.QueryRow(`SELECT file_id FROM progress WHERE user_id=? AND book_id=?`, meID(r), b.ID).Scan(&last)
 	if fid, _ := strconv.ParseInt(r.URL.Query().Get("file"), 10, 64); fid > 0 {
 		last = fid
 	}
@@ -446,18 +451,16 @@ func handleChapters(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var loc string
-	var pct float64
-	var fid int64
-	db.QueryRow(`SELECT file_id,location,percent FROM progress WHERE book_id=?`, b.ID).Scan(&fid, &loc, &pct)
-	if fid != 0 && fid != f.ID && !strings.HasPrefix(loc, "sec:") {
+	p := getProgress(meID(r), b.ID)
+	loc := p.Location
+	if p.FileID != 0 && p.FileID != f.ID && !strings.HasPrefix(loc, "sec:") {
 		loc = "" // 换了格式，只能按百分比
 	}
-	i, frac := resumePoint(chs, loc, pct)
+	i, frac := resumePoint(chs, loc, p.Percent)
 	total := chs[len(chs)-1].Start + chs[len(chs)-1].Chars
 	writeJSON(w, 200, map[string]any{
 		"book_id": b.ID, "file_id": f.ID, "format": f.Format, "title": b.Title, "author": b.Author,
-		"total": total, "chapters": chs, "resume": map[string]any{"i": i, "frac": frac, "percent": pct},
+		"total": total, "chapters": chs, "resume": map[string]any{"i": i, "frac": frac, "percent": p.Percent, "updated_at": p.UpdatedAt},
 	})
 }
 
@@ -522,6 +525,7 @@ func trashDirs() []string {
 	return out
 }
 
+// 回收站：删掉的书（能连同进度、笔记一起恢复）+ 文件夹里的占用
 func handleTrash(w http.ResponseWriter, r *http.Request) {
 	var files int
 	var size int64
@@ -534,10 +538,39 @@ func handleTrash(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 	}
-	writeJSON(w, 200, map[string]any{"files": files, "size": size})
+	books := []map[string]any{}
+	rows, err := db.Query(`SELECT id,title,author,kind,cover,deleted_at FROM books WHERE deleted_at>0 ORDER BY deleted_at DESC LIMIT 500`)
+	if err == nil {
+		for rows.Next() {
+			var id, at int64
+			var title, author, kind, cover string
+			rows.Scan(&id, &title, &author, &kind, &cover, &at)
+			books = append(books, map[string]any{"id": id, "title": title, "author": author, "kind": kind, "cover": cover, "deleted_at": at,
+				"expires_at": at + keepDays*24*3600})
+		}
+		rows.Close()
+	}
+	writeJSON(w, 200, map[string]any{"files": files, "size": size, "books": books, "keep_days": keepDays})
 }
 
+// 清空回收站：删掉的书彻底删除（文件、书目、每个人的进度笔记、缓存），回收站文件夹清空
 func handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
+	var ids []int64
+	rows, err := db.Query(`SELECT id FROM books WHERE deleted_at>0`)
+	if err == nil {
+		for rows.Next() {
+			var id int64
+			rows.Scan(&id)
+			ids = append(ids, id)
+		}
+		rows.Close()
+	}
+	for _, id := range ids {
+		for _, f := range bookFiles(id) {
+			removeFileCaches(&f)
+		}
+		purgeBook(id)
+	}
 	n := 0
 	for _, d := range trashDirs() {
 		entries, _ := os.ReadDir(d)
@@ -547,8 +580,8 @@ func handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	logEvent("info", 0, fmt.Sprintf("已清空回收站（%d 项）", n))
-	writeJSON(w, 200, map[string]any{"ok": true, "count": n})
+	logEvent("info", 0, fmt.Sprintf("已清空回收站（%d 本书，%d 个文件）", len(ids), n))
+	writeJSON(w, 200, map[string]any{"ok": true, "count": n, "books": len(ids)})
 }
 
 func routesP2(mux *http.ServeMux) {
@@ -561,19 +594,21 @@ func routesP2(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/sessions/{id}", a(handleDeleteSession))
 	mux.HandleFunc("GET /api/books/{id}/chapters", a(handleChapters))
 	mux.HandleFunc("GET /api/books/{id}/chapters/{n}", a(handleChapter))
-	mux.HandleFunc("GET /api/trash", a(handleTrash))
-	mux.HandleFunc("DELETE /api/trash", a(handleEmptyTrash))
+	ad := requireAdmin
+	mux.HandleFunc("GET /api/trash", ad(handleTrash))
+	mux.HandleFunc("DELETE /api/trash", ad(handleEmptyTrash))
 
-	mux.HandleFunc("POST /api/fetch", a(handleFetch))
-	mux.HandleFunc("GET /api/fetch", a(handleFetchList))
-	mux.HandleFunc("DELETE /api/fetch/{id}", a(handleFetchCancel))
+	// 发现、从链接添加：往书库里加书，只有管理员能做
+	mux.HandleFunc("POST /api/fetch", ad(handleFetch))
+	mux.HandleFunc("GET /api/fetch", ad(handleFetchList))
+	mux.HandleFunc("DELETE /api/fetch/{id}", ad(handleFetchCancel))
 
-	mux.HandleFunc("GET /api/catalogs", a(handleCatalogs))
-	mux.HandleFunc("POST /api/catalogs", a(handleAddCatalog))
-	mux.HandleFunc("POST /api/catalogs/restore", a(handleRestoreCatalogs))
-	mux.HandleFunc("DELETE /api/catalogs/{id}", a(handleDeleteCatalog))
-	mux.HandleFunc("GET /api/catalogs/{id}/browse", a(handleCatalogBrowse))
-	mux.HandleFunc("GET /api/catalog-image", a(handleCatalogImage))
+	mux.HandleFunc("GET /api/catalogs", ad(handleCatalogs))
+	mux.HandleFunc("POST /api/catalogs", ad(handleAddCatalog))
+	mux.HandleFunc("POST /api/catalogs/restore", ad(handleRestoreCatalogs))
+	mux.HandleFunc("DELETE /api/catalogs/{id}", ad(handleDeleteCatalog))
+	mux.HandleFunc("GET /api/catalogs/{id}/browse", ad(handleCatalogBrowse))
+	mux.HandleFunc("GET /api/catalog-image", ad(handleCatalogImage))
 }
 
 // ---------- 网页文件清单（App 预先缓存，离线也能打开阅读器） ----------

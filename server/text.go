@@ -387,6 +387,7 @@ func ensureEPUB(srcPath, format, title, author string) (string, error) {
 	}
 	out := convertedPath(srcPath, ext)
 	if _, err := os.Stat(out); err == nil {
+		touchCache(out)
 		return out, nil
 	}
 	m, _ := convMu.LoadOrStore(out, &sync.Mutex{})
@@ -428,13 +429,18 @@ func ensureEPUB(srcPath, format, title, author string) (string, error) {
 			return "", fmt.Errorf("Calibre 转换失败: %s", lines[len(lines)-1])
 		}
 	}
-	return out, os.Rename(tmp, out)
+	if err := os.Rename(tmp, out); err != nil {
+		return "", err
+	}
+	noteCacheWrite()
+	return out, nil
 }
 
 // DJVU 转 PDF
 func ensurePDF(srcPath string) (string, error) {
 	out := convertedPath(srcPath, "pdf")
 	if _, err := os.Stat(out); err == nil {
+		touchCache(out)
 		return out, nil
 	}
 	m, _ := convMu.LoadOrStore(out, &sync.Mutex{})
@@ -450,9 +456,15 @@ func ensurePDF(srcPath string) (string, error) {
 		return "", errors.New("服务器没有安装 djvulibre，无法打开 DJVU")
 	}
 	tmp := out + ".tmp.pdf"
-	if o, err := exec.Command(bin, "-format=pdf", "-quality=85", srcPath, tmp).CombinedOutput(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if o, err := exec.CommandContext(ctx, bin, "-format=pdf", "-quality=85", srcPath, tmp).CombinedOutput(); err != nil {
 		os.Remove(tmp)
+		if ctx.Err() != nil {
+			return "", errors.New("DJVU 转换超时（15 分钟）")
+		}
 		return "", fmt.Errorf("DJVU 转换失败: %s", strings.TrimSpace(string(o)))
 	}
+	noteCacheWrite()
 	return out, os.Rename(tmp, out)
 }

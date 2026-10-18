@@ -1,7 +1,8 @@
 package main
 
 // OPDS 1.2 书目：KOReader、静读天下、Panels、Librera 等阅读器可以直接浏览、搜索、下载书库里的书
-// 地址：http(s)://NAS:27200/opds（SHUKU_PORT，威联通上用宿主机网络直接监听）   用户名随意，密码就是书库密码
+// 地址：http(s)://NAS:27200/opds（SHUKU_PORT，威联通上用宿主机网络直接监听）
+// 用户名填书库里的名字（只有管理员一个人时随意），密码就是这个人的书库密码
 
 import (
 	"crypto/sha256"
@@ -21,12 +22,14 @@ import (
 
 func routesP1(mux *http.ServeMux) {
 	a := requireAuth
+	ad := requireAdmin
 	mux.HandleFunc("GET /api/stats", a(handleStats))
-	mux.HandleFunc("POST /api/books/{id}/enrich", a(handleEnrichBook))
-	mux.HandleFunc("POST /api/books/{id}/cover-url", a(handleCoverFromURL))
-	mux.HandleFunc("POST /api/enrich-all", a(handleEnrichAll))
+	mux.HandleFunc("GET /api/stats/today", a(handleStatsToday))
+	mux.HandleFunc("POST /api/books/{id}/enrich", ad(handleEnrichBook))
+	mux.HandleFunc("POST /api/books/{id}/cover-url", ad(handleCoverFromURL))
+	mux.HandleFunc("POST /api/enrich-all", ad(handleEnrichAll))
 	mux.HandleFunc("GET /api/fulltext", a(handleFulltext))
-	mux.HandleFunc("POST /api/fulltext/rebuild", a(handleFulltextRebuild))
+	mux.HandleFunc("POST /api/fulltext/rebuild", ad(handleFulltextRebuild))
 	mux.HandleFunc("GET /api/tts/voices", a(handleTTSVoices))
 	mux.HandleFunc("POST /api/tts", a(handleTTS))
 
@@ -50,23 +53,34 @@ var basicCache = struct {
 	ok map[string]time.Time
 }{ok: map[string]time.Time{}}
 
-func basicAuthOK(r *http.Request) bool {
-	_, pass, ok := r.BasicAuth()
+// 用户名对上书库里的名字就是那个人；对不上（旧的 OPDS 设置里用户名是随便填的）就当管理员
+func basicAuthUser(r *http.Request) *User {
+	name, pass, ok := r.BasicAuth()
 	if !ok || pass == "" {
-		return false
+		return nil
 	}
-	hash := getSetting("password_hash", "")
-	sum := sha256.Sum256([]byte(hash + "|" + pass))
+	u, err := userByName(strings.TrimSpace(name))
+	if err != nil {
+		u = firstAdmin()
+	}
+	if u == nil || u.pass == "" {
+		return nil // OPDS 只能用设了密码的账号
+	}
+	sum := sha256.Sum256([]byte(u.pass + "|" + pass))
 	key := hex.EncodeToString(sum[:])
 	basicCache.Lock()
 	t, hit := basicCache.ok[key]
 	basicCache.Unlock()
 	if hit && time.Since(t) < 30*time.Minute {
-		return true
+		return u
+	}
+	if tooManyFails(r) {
+		return nil
 	}
 	// bcrypt 比较慢，成功一次后缓存半小时，翻目录、加载封面时不会卡
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) != nil {
-		return false
+	if bcrypt.CompareHashAndPassword([]byte(u.pass), []byte(pass)) != nil {
+		noteFail(r) // 和登录一样限速，不能拿 OPDS 猜密码
+		return nil
 	}
 	basicCache.Lock()
 	if len(basicCache.ok) > 50 {
@@ -74,17 +88,25 @@ func basicAuthOK(r *http.Request) bool {
 	}
 	basicCache.ok[key] = time.Now()
 	basicCache.Unlock()
-	return true
+	return u
 }
 
 func requireOPDS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !authed(r) && !basicAuthOK(r) {
+		u := optionalUser(r)
+		if u == nil {
+			u = basicAuthUser(r)
+		}
+		if u == nil {
 			w.Header().Set("WWW-Authenticate", `Basic realm="shuku", charset="UTF-8"`)
-			http.Error(w, "需要登录：用户名随意，密码是书库密码", http.StatusUnauthorized)
+			msg := "需要登录：用户名填你在书库里的名字，密码是书库密码"
+			if tooManyFails(r) {
+				msg = "尝试次数过多，请 10 分钟后再试"
+			}
+			http.Error(w, msg, http.StatusUnauthorized)
 			return
 		}
-		h(w, r)
+		h(w, withUser(r, u))
 	}
 }
 
@@ -193,13 +215,18 @@ func (f *feed) write(w http.ResponseWriter, kind string) {
 
 const opdsPage = 50
 
-func queryBooks(where string, args []any, order string, page int) ([]*Book, int) {
+func queryBooks(r *http.Request, where string, args []any, order string, page int) ([]*Book, int) {
+	u := me(r)
+	vis, vargs := visibleSQL(u)
 	if where != "" {
-		where = " WHERE " + where
+		where = " WHERE " + where + " AND " + vis
+	} else {
+		where = " WHERE " + vis
 	}
+	all := append(append([]any{u.ID, u.ID}, args...), vargs...)
 	var total int
-	db.QueryRow(`SELECT COUNT(*) FROM books b LEFT JOIN progress p ON p.book_id=b.id`+where, args...).Scan(&total)
-	rows, err := db.Query(`SELECT `+bookCols+` FROM books b LEFT JOIN progress p ON p.book_id=b.id`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(args, opdsPage, page*opdsPage)...)
+	db.QueryRow(`SELECT COUNT(*)`+bookFrom+where, all...).Scan(&total)
+	rows, err := db.Query(`SELECT `+bookCols+bookFrom+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(all, opdsPage, page*opdsPage)...)
 	if err != nil {
 		return nil, 0
 	}
@@ -232,7 +259,7 @@ func withPage(u *url.URL, page int) string {
 
 func acquisitionFeed(w http.ResponseWriter, r *http.Request, id, title, where string, args []any, order string) {
 	page := pageOf(r)
-	books, total := queryBooks(where, args, order, page)
+	books, total := queryBooks(r, where, args, order, page)
 	f := newFeed(id, title, r.URL.RequestURI(), opdsAcq)
 	fmt.Fprintf(&f.b, `<opensearch:totalResults>%d</opensearch:totalResults><opensearch:itemsPerPage>%d</opensearch:itemsPerPage><opensearch:startIndex>%d</opensearch:startIndex>`, total, opdsPage, page*opdsPage+1)
 	if (page+1)*opdsPage < total {
@@ -257,9 +284,12 @@ func opdsRoot(w http.ResponseWriter, r *http.Request) {
 	name := getSetting("server_name", "我的书库")
 	f := newFeed("root", name, "/opds", opdsNav)
 	var reading, total, comics int
-	db.QueryRow(`SELECT COUNT(*) FROM books b JOIN progress p ON p.book_id=b.id WHERE b.read_state<>'done'`).Scan(&reading)
-	db.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&total)
-	db.QueryRow(`SELECT COUNT(*) FROM books WHERE kind='comic'`).Scan(&comics)
+	u := me(r)
+	vis, vargs := visibleSQL(u)
+	db.QueryRow(`SELECT COUNT(*) FROM books b JOIN progress p ON p.book_id=b.id AND p.user_id=? LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=? WHERE COALESCE(ub.read_state,'unread')<>'done' AND `+vis,
+		append([]any{u.ID, u.ID}, vargs...)...).Scan(&reading)
+	db.QueryRow(`SELECT COUNT(*) FROM books b WHERE `+vis, vargs...).Scan(&total)
+	db.QueryRow(`SELECT COUNT(*) FROM books b WHERE b.kind='comic' AND `+vis, vargs...).Scan(&comics)
 	f.nav("reading", "在读", fmt.Sprintf("%d 本，按最近阅读排序", reading), "/opds/books/reading", opdsAcq)
 	f.nav("new", "最近添加", "新入库的书", "/opds/books/new", opdsAcq)
 	f.nav("all", "全部图书", fmt.Sprintf("共 %d 本，按书名排序", total-comics), "/opds/books/all", opdsAcq)
@@ -276,7 +306,7 @@ func opdsList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	switch r.PathValue("list") {
 	case "reading":
-		acquisitionFeed(w, r, "reading", "在读", `COALESCE(p.updated_at,0)>0 AND b.read_state<>'done'`, nil, `p.updated_at DESC`)
+		acquisitionFeed(w, r, "reading", "在读", `COALESCE(p.updated_at,0)>0 AND COALESCE(ub.read_state,'unread')<>'done'`, nil, `p.updated_at DESC`)
 	case "new":
 		acquisitionFeed(w, r, "new", "最近添加", "", nil, `b.created_at DESC, b.id DESC`)
 	case "all":
@@ -297,10 +327,12 @@ func opdsList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// query 里的 {vis} 换成这个人能看的书的条件
 func groupNav(w http.ResponseWriter, r *http.Request, id, title, query, list string) {
 	page := pageOf(r)
 	f := newFeed(id, title, r.URL.RequestURI(), opdsNav)
-	rows, err := db.Query(query+` LIMIT ? OFFSET ?`, 101, page*100)
+	vis, vargs := visibleSQL(me(r))
+	rows, err := db.Query(strings.Replace(query, "{vis}", vis, 1)+` LIMIT ? OFFSET ?`, append(vargs, 101, page*100)...)
 	if err != nil {
 		f.write(w, opdsNav)
 		return
@@ -324,15 +356,15 @@ func groupNav(w http.ResponseWriter, r *http.Request, id, title, query, list str
 }
 
 func opdsCategories(w http.ResponseWriter, r *http.Request) {
-	groupNav(w, r, "categories", "分类", `SELECT category,COUNT(*) FROM books WHERE category<>'' GROUP BY category ORDER BY COUNT(*) DESC`, "category")
+	groupNav(w, r, "categories", "分类", `SELECT b.category,COUNT(*) FROM books b WHERE b.category<>'' AND {vis} GROUP BY b.category ORDER BY COUNT(*) DESC`, "category")
 }
 
 func opdsAuthors(w http.ResponseWriter, r *http.Request) {
-	groupNav(w, r, "authors", "作者", `SELECT author,COUNT(*) FROM books WHERE author<>'' GROUP BY author ORDER BY MIN(author_key)`, "author")
+	groupNav(w, r, "authors", "作者", `SELECT b.author,COUNT(*) FROM books b WHERE b.author<>'' AND {vis} GROUP BY b.author ORDER BY MIN(b.author_key)`, "author")
 }
 
 func opdsSeries(w http.ResponseWriter, r *http.Request) {
-	groupNav(w, r, "series", "系列", `SELECT series,COUNT(*) FROM books WHERE series<>'' GROUP BY series ORDER BY series`, "series")
+	groupNav(w, r, "series", "系列", `SELECT b.series,COUNT(*) FROM books b WHERE b.series<>'' AND {vis} GROUP BY b.series ORDER BY b.series`, "series")
 }
 
 func opdsSearch(w http.ResponseWriter, r *http.Request) {

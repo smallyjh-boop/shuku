@@ -7,32 +7,19 @@ import (
 	"time"
 )
 
-// 数据库升级：给旧库补列、补表（重复执行没有副作用）
-var migrations = []string{
-	`ALTER TABLE books ADD COLUMN finished_at INTEGER NOT NULL DEFAULT 0`,
-	`ALTER TABLE books ADD COLUMN enriched_at INTEGER NOT NULL DEFAULT 0`,
-	`CREATE TABLE IF NOT EXISTS reading_log (day TEXT NOT NULL, book_id INTEGER NOT NULL, seconds INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, book_id))`,
-	`CREATE INDEX IF NOT EXISTS idx_reading_log_book ON reading_log(book_id)`,
-}
-
-func migrate() {
-	for _, m := range migrations {
-		db.Exec(m) // 列已存在会报错，忽略
-	}
-	migrateFulltext()
-}
-
 func today() string { return time.Now().Format("2006-01-02") }
 
-// 记录阅读时长：客户端每次上报进度时带上这段时间实际阅读的秒数
-func addReadingTime(bookID int64, seconds int) {
+// 记录阅读时长：客户端每次上报进度时带上这段时间实际阅读的秒数。
+// 一次最多算 4 小时（手机离线读了很久，联网后一次补传）；一本书一天最多算 16 小时，防止挂机、重复上传
+func addReadingTime(uid, bookID int64, seconds int) error {
 	if seconds <= 0 {
-		return
+		return nil
 	}
-	if seconds > 600 {
-		seconds = 600 // 两次上报之间最多算 10 分钟，防止挂机
+	if seconds > 4*3600 {
+		seconds = 4 * 3600
 	}
-	db.Exec(`INSERT INTO reading_log(day,book_id,seconds) VALUES(?,?,?) ON CONFLICT(day,book_id) DO UPDATE SET seconds=seconds+excluded.seconds`, today(), bookID, seconds)
+	_, err := db.Exec(`INSERT INTO reading_log(user_id,day,book_id,seconds) VALUES(?,?,?,?) ON CONFLICT(user_id,day,book_id) DO UPDATE SET seconds=MIN(seconds+excluded.seconds, 57600)`, uid, today(), bookID, seconds)
+	return err
 }
 
 type dayStat struct {
@@ -52,10 +39,11 @@ type bookStat struct {
 }
 
 func handleStats(w http.ResponseWriter, r *http.Request) {
+	uid := meID(r)
 	now := time.Now()
 	sum := func(from string) int {
 		var n int
-		db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE day>=?`, from).Scan(&n)
+		db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE user_id=? AND day>=?`, uid, from).Scan(&n)
 		return n
 	}
 	weekday := int(now.Weekday())
@@ -68,7 +56,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 
 	// 最近 90 天每天的时长
 	byDay := map[string]int{}
-	rows, err := db.Query(`SELECT day,SUM(seconds) FROM reading_log WHERE day>=? GROUP BY day`, now.AddDate(0, 0, -89).Format("2006-01-02"))
+	rows, err := db.Query(`SELECT day,SUM(seconds) FROM reading_log WHERE user_id=? AND day>=? GROUP BY day`, uid, now.AddDate(0, 0, -89).Format("2006-01-02"))
 	if err == nil {
 		for rows.Next() {
 			var d string
@@ -89,7 +77,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		d := now.AddDate(0, 0, -i).Format("2006-01-02")
 		s, ok := byDay[d]
 		if !ok && i >= 90 {
-			db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE day=?`, d).Scan(&s)
+			db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE user_id=? AND day=?`, uid, d).Scan(&s)
 		}
 		if s >= 60 {
 			streak++
@@ -98,12 +86,12 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var total, finishedYear, booksRead int
-	db.QueryRow(`SELECT COALESCE(SUM(seconds),0), COUNT(DISTINCT book_id) FROM reading_log`).Scan(&total, &booksRead)
+	db.QueryRow(`SELECT COALESCE(SUM(seconds),0), COUNT(DISTINCT book_id) FROM reading_log WHERE user_id=?`, uid).Scan(&total, &booksRead)
 	yearStartTS, _ := time.ParseInLocation("2006-01-02", yearStart, time.Local)
-	db.QueryRow(`SELECT COUNT(*) FROM books WHERE finished_at>=?`, yearStartTS.Unix()).Scan(&finishedYear)
+	db.QueryRow(`SELECT COUNT(*) FROM user_books ub JOIN books b ON b.id=ub.book_id WHERE ub.user_id=? AND ub.finished_at>=? AND b.deleted_at=0`, uid, yearStartTS.Unix()).Scan(&finishedYear)
 
 	top := []bookStat{}
-	rows, err = db.Query(`SELECT b.id,b.title,b.author,b.cover,b.kind,SUM(l.seconds) s,COALESCE(p.percent,0) FROM reading_log l JOIN books b ON b.id=l.book_id LEFT JOIN progress p ON p.book_id=b.id WHERE l.day>=? GROUP BY b.id ORDER BY s DESC LIMIT 8`, now.AddDate(0, 0, -29).Format("2006-01-02"))
+	rows, err = db.Query(`SELECT b.id,b.title,b.author,b.cover,b.kind,SUM(l.seconds) s,COALESCE(p.percent,0) FROM reading_log l JOIN books b ON b.id=l.book_id LEFT JOIN progress p ON p.book_id=b.id AND p.user_id=l.user_id WHERE l.user_id=? AND l.day>=? AND b.deleted_at=0 GROUP BY b.id ORDER BY s DESC LIMIT 8`, uid, now.AddDate(0, 0, -29).Format("2006-01-02"))
 	if err == nil {
 		for rows.Next() {
 			var b bookStat
@@ -113,7 +101,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 	}
 	finished := []bookStat{}
-	rows, err = db.Query(`SELECT b.id,b.title,b.author,b.cover,b.kind,COALESCE((SELECT SUM(seconds) FROM reading_log WHERE book_id=b.id),0),b.finished_at FROM books b WHERE b.finished_at>0 ORDER BY b.finished_at DESC LIMIT 12`)
+	rows, err = db.Query(`SELECT b.id,b.title,b.author,b.cover,b.kind,COALESCE((SELECT SUM(seconds) FROM reading_log WHERE book_id=b.id AND user_id=ub.user_id),0),ub.finished_at FROM user_books ub JOIN books b ON b.id=ub.book_id WHERE ub.user_id=? AND ub.finished_at>0 AND b.deleted_at=0 ORDER BY ub.finished_at DESC LIMIT 12`, uid)
 	if err == nil {
 		for rows.Next() {
 			var b bookStat
@@ -128,4 +116,21 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		"total": total, "books_read": booksRead, "finished_year": finishedYear, "streak": streak,
 		"days": days, "top": top, "finished": finished,
 	})
+}
+
+// 今天读了多久 + 最近在读的一本（手表的 Tile、表盘用）
+func handleStatsToday(w http.ResponseWriter, r *http.Request) {
+	u := me(r)
+	var secs int
+	db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE user_id=? AND day=?`, u.ID, today()).Scan(&secs)
+	vis, vargs := visibleSQL(u)
+	var book map[string]any
+	var id int64
+	var title, kind string
+	var pct float64
+	if db.QueryRow(`SELECT b.id,b.title,b.kind,p.percent FROM progress p JOIN books b ON b.id=p.book_id LEFT JOIN user_books ub ON ub.book_id=b.id AND ub.user_id=p.user_id
+		WHERE p.user_id=? AND COALESCE(ub.read_state,'unread')<>'done' AND `+vis+` ORDER BY p.updated_at DESC LIMIT 1`, append([]any{u.ID}, vargs...)...).Scan(&id, &title, &kind, &pct) == nil {
+		book = map[string]any{"id": id, "title": title, "kind": kind, "percent": pct}
+	}
+	writeJSON(w, 200, map[string]any{"seconds": secs, "book": book})
 }
