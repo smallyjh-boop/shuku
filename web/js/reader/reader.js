@@ -7,6 +7,7 @@ import { isNative, call, callJSON, onNative } from '../native.js'
 import { putProgress, queueProgress, takeQueued, rememberUser, setActiveBook } from './sync.js'
 import { Notes } from './notes.js'
 import { placePopup } from './dict.js'
+import { targetLang, setTargetLang, loadDefaultLang, langOptions, translateTexts, needsTranslation } from './translate.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -205,6 +206,8 @@ class Reader {
     this.applyPrefs()
     this.drawPanel()
     this.ttsBtn.hidden = this.ttsTool.hidden = !this.engine.ttsSegments // 漫画没有文字，不显示听书
+    this.trTool.hidden = !this.canTranslate() // 漫画、固定版式的 EPUB 没有文字可翻
+    if (!this.trTool.hidden) loadDefaultLang() // 先问好书库设置的默认语言，阅读设置里的下拉框才对
     // 从书内搜索结果跳过来：定位到那一章并找到那句话
     const sq = this.params.get('q')
     if (sq && this.engine.find) {
@@ -277,9 +280,11 @@ class Reader {
         tool('back', '上一页', () => this.engine?.prev()),
         tool('next', '下一页', () => this.engine?.next()),
         (this.ttsTool = tool('headphones', '听书', () => this.toggleNarration())),
+        (this.trTool = tool('translate', '翻译', () => this.toggleTranslate())),
         // 快速排版：三档字号（PDF 是三档缩放），点一下就换，不用进设置调细节。原来的“全屏”按钮用处不大，换成这个（F 键还能全屏）
         (this.quickTool = tool('textsize', '字号', () => this.toggleQuick())),
         tool('type', '设置', () => this.toggleSheet())))
+    this.trTool.hidden = true // 书打开以后看有没有文字可翻
     this.quick = h('div', { class: 'r-quick', role: 'group', 'aria-label': '快速排版', hidden: true })
     bottom.insertBefore(this.quick, bottom.querySelector('.r-tools'))
     this.panelTitle = h('div', { class: 't' })
@@ -386,6 +391,100 @@ class Reader {
   }
 
   afterUserNav = debounce(() => this.narrator?.active && this.narrator.jumpToView(), 600)
+
+  // ---------- 翻译本页 ----------
+  // EPUB、TXT 这类：译文显示在书里每段原文后面（引擎自己做，翻页时接着翻）；
+  // PDF：打开对照面板，列出这一页的原文和译文（翻页时跟着换）。译成哪种语言在面板或阅读设置里选
+  canTranslate() {
+    const e = this.engine
+    return !!e && !e.fxl && !!(e.toggleTranslate || e.translateParas)
+  }
+
+  async toggleTranslate() {
+    const e = this.engine
+    if (!this.canTranslate()) return
+    if (e.toggleTranslate) {
+      this.showUI(false)
+      const on = await e.toggleTranslate()
+      this.trTool.classList.toggle('on', !!on)
+      return
+    }
+    if (this.trOpen) this.closeTranslate()
+    else this.openTranslate()
+  }
+
+  get trOpen() { return !!this.trSheet?.classList.contains('show') }
+
+  openTranslate() {
+    if (!this.trSheet) {
+      this.trSheet = h('div', { class: 'r-sheet r-trsheet', role: 'dialog', 'aria-label': '翻译' })
+      for (const ev of ['click', 'pointerdown', 'wheel']) this.trSheet.addEventListener(ev, e => e.stopPropagation())
+      swipeDown(this.trSheet, () => this.closeTranslate())
+      this.root.append(this.trSheet)
+    }
+    this.closeOverlays()
+    this.trSheet.classList.add('show')
+    this.trTool.classList.add('on')
+    this.drawTranslate()
+  }
+
+  closeTranslate() {
+    this.trGen = (this.trGen || 0) + 1
+    this.trSheet?.classList.remove('show')
+    this.trTool.classList.remove('on')
+  }
+
+  drawTranslateSoon = debounce(() => this.drawTranslate(), 400)
+
+  // 换了目标语言：PDF 的面板重新翻，EPUB 的书页里重新翻
+  changeTranslateLang(v) {
+    setTargetLang(v)
+    if (this.trOpen) this.drawTranslate()
+    this.engine?.setTranslateLang?.()
+  }
+
+  async drawTranslate() {
+    if (!this.trOpen || !this.engine?.translateParas) return
+    const gen = this.trGen = (this.trGen || 0) + 1
+    await loadDefaultLang()
+    if (gen !== this.trGen) return
+    const to = targetLang()
+    const title = h('b', null, '翻译')
+    const sel = h('select', { class: 'input tr-lang', 'aria-label': '译成', onchange: e => this.changeTranslateLang(e.target.value) }, langOptions(to, h))
+    const body = h('div', { class: 'tr-body' }, h('p', { class: 'muted tr-note' }, '正在读取这一页的文字…'))
+    fill(this.trSheet, h('div', { class: 'r-sheet-hd' }, h('span', { class: 'grab' }), title, sel, iconBtn('close', '关闭', () => this.closeTranslate())), body)
+    let src
+    try { src = await this.engine.translateParas() } catch (e) {
+      if (gen === this.trGen) fill(body, h('p', { class: 'tr-note' }, '读不出这一页的文字：' + (e.message || e)))
+      return
+    }
+    if (gen !== this.trGen) return
+    this.trKey = src.key
+    title.textContent = '翻译 · ' + src.title
+    if (!src.paras.length) {
+      fill(body, h('p', { class: 'muted tr-note' }, src.scanned ? '这一页没有文字，也没识别出字' : '这一页没有文字'))
+      return
+    }
+    const lang = this.engine.lang?.() || ''
+    const pairs = src.paras.map(p => {
+      const t = h('div', { class: 't' })
+      return { p, t, need: needsTranslation(p, to, lang), el: h('div', { class: 'tr-pair' }, h('div', { class: 'o' }, p), t) }
+    })
+    fill(body, pairs.map(x => x.el))
+    const todo = pairs.filter(x => x.need)
+    if (!todo.length) { body.prepend(h('p', { class: 'muted tr-note' }, '这一页已经是要译成的语言')); return }
+    for (const x of todo) { x.t.textContent = '翻译中…'; x.t.classList.add('muted') }
+    try {
+      const out = await translateTexts(todo.map(x => x.p), to)
+      if (gen !== this.trGen) return
+      todo.forEach((x, i) => { x.t.classList.remove('muted'); x.t.textContent = out[i] || '' })
+    } catch (e) {
+      if (gen !== this.trGen) return
+      for (const x of todo) { x.t.textContent = ''; x.t.classList.remove('muted') }
+      body.prepend(h('div', { class: 'tr-err' }, '翻译失败：' + (e.message || e) + ' ',
+        h('button', { class: 'btn small', type: 'button', onclick: () => this.drawTranslate() }, '重试')))
+    }
+  }
 
   // 选中了文字：划线工具 + 查字典（阅读设置里可以关掉查字典）
   async onSelectText(sel) {
@@ -510,6 +609,7 @@ class Reader {
     else if (k === 'ArrowDown' && this.engine?.paged?.()) { e.preventDefault(); this.engine.next() }
     else if (k === 'ArrowUp' && this.engine?.paged?.()) { e.preventDefault(); this.engine.prev() }
     else if (k === 'Escape' && this.popOpen) this.hidePopover()
+    else if (k === 'Escape' && this.trOpen) this.closeTranslate()
     else if (k === 'Escape' && this.notes?.open) this.notes.hide()
     else if (k === 'Escape' && this.dict?.open) this.dict.hide()
     else if (k === 'Escape') { if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) this.closeOverlays(); else if (document.fullscreenElement) document.exitFullscreen(); else this.back() }
@@ -551,6 +651,8 @@ class Reader {
     this.showTimeLeft(units)
     if (moved) this.chipTick()
     if (fraction >= 0.995) this.onEnd()
+    // PDF 的翻译面板开着：翻到别的页时跟着换
+    if (this.trOpen && this.engine?.translateKey?.() !== this.trKey) this.drawTranslateSoon()
   }
 
   saveSoon = debounce(() => this.saveProgress(), 1500)
@@ -951,6 +1053,17 @@ class Reader {
         class: 'btn small', type: 'button', style: { background: f.id === this.info.file_id ? 'var(--r-rule)' : 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' },
         onclick: () => { if (f.id !== this.info.file_id) location.hash = `#/read/${this.id}?file=${f.id}` },
       }, f.format.toUpperCase()))))
+    }
+    if (this.canTranslate()) {
+      const flow = !!this.engine.toggleTranslate
+      const on = flow ? !!this.engine.trOn : this.trOpen
+      parts.push(h('h4', null, '翻译'),
+        h('div', { class: 'row', style: { gap: '8px' } },
+          h('select', { class: 'input tr-lang', style: { flex: 1 }, 'aria-label': '译成', onchange: e => this.changeTranslateLang(e.target.value) }, langOptions(targetLang(), h)),
+          h('button', { class: 'btn small tr-toggle', type: 'button', style: { background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.closeOverlays(); this.toggleTranslate() } },
+            on ? '关掉翻译' : flow ? '翻译这一页' : '打开对照')),
+        h('small', { style: { display: 'block', marginTop: '6px', fontSize: '12px', opacity: .7 } },
+          flow ? '译文显示在每段原文后面，翻页时接着翻。翻译方式（微软翻译或 AI）在书库的设置里选' : '这一页的原文和译文对照着看，翻页时跟着换'))
     }
     if (this.engine?.ttsSegments) {
       const ttsBox = h('div')

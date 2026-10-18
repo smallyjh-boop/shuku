@@ -10,8 +10,15 @@ import { isNative, callJSON } from '../native.js'
 import { splitSentences } from './tts.js'
 import { around } from './dict.js'
 import { colorOf } from './notes.js'
+import { targetLang, loadDefaultLang, translateTexts, needsTranslation } from './translate.js'
 
 const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dd,dt,td,th,figcaption,pre,div'
+
+// 翻译本页：译文放在段落的 data-shuku-tr 属性里，用 CSS（::after）显示在原文后面。
+// 不往书里加节点：位置（CFI）、划线、听书、搜索都还按原文算，关掉翻译时去掉属性就行
+const TR = 'data-shuku-tr'
+const TR_LANG = 'data-shuku-tr-to' // 这一段已经按哪种语言处理过（不用翻的也记上，免得每次翻页都再看一遍）
+const TR_AHEAD = 6 // 这一页后面再顺手翻几段，翻到下一页时不用等
 
 const FONT_STACKS = {
   serif: '"Songti SC", "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", Georgia, serif',
@@ -131,6 +138,7 @@ export class Engine {
     view.addEventListener('relocate', e => {
       this.last = e.detail
       this.emitRelocate()
+      if (this.trOn) this.translateSoon()
     })
     view.addEventListener('load', e => this.onDocLoad(e.detail.doc))
     // 划线：每一节排好版时把这一节的划线画上
@@ -256,6 +264,7 @@ export class Engine {
       ${t.dark ? 'img, svg image { filter: brightness(.82) contrast(1.05); }' : ''}
       pre { white-space: pre-wrap !important; }
       ::highlight(tts) { background-color: ${t.dark ? 'rgba(134,182,203,.28)' : 'rgba(47,111,143,.16)'}; }
+      ${this.trCSS(t)}
       ::selection { background: ${t.dark ? 'rgba(134,182,203,.35)' : 'rgba(47,111,143,.22)'}; }
       aside[epub|type~="footnote"], aside[epub|type~="endnote"] { display: none; }
     `
@@ -307,6 +316,107 @@ export class Engine {
     } finally {
       this.t2sBusy = false
       if (!this.t2sFailed && !!this.shell.prefs.t2s !== !!this.t2sOn) this.setT2S(!!this.shell.prefs.t2s)
+    }
+  }
+
+  // ---------- 翻译本页（译文、原文对照） ----------
+  // 译文的样子：小一点、淡一点、左边一道竖线；墨水屏上灰色看不清，用纯黑
+  trCSS(t) {
+    const eink = isEInk()
+    const rule = eink ? '#000' : t.dark ? 'rgba(255,255,255,.22)' : 'rgba(0,0,0,.16)'
+    return `[${TR}]::after {
+        content: attr(${TR}); display: block; white-space: pre-line; text-indent: 0; text-align: start;
+        margin: .3em 0 .25em; padding-left: .7em; border-left: ${eink ? 3 : 2}px solid ${rule};
+        font-size: .9em; line-height: 1.6; font-weight: normal; font-style: normal; letter-spacing: normal;
+        color: ${eink ? '#000' : 'inherit'}; opacity: ${eink ? 1 : 0.72};
+      }
+      h1[${TR}]::after, h2[${TR}]::after, h3[${TR}]::after, h4[${TR}]::after, h5[${TR}]::after, h6[${TR}]::after { font-size: .62em; }`
+  }
+
+  async toggleTranslate() {
+    if (this.fxl) return false
+    this.trOn = !this.trOn
+    this.trFailed = false
+    if (this.trOn) {
+      await loadDefaultLang()
+      await this.translateVisible(true)
+    } else this.clearTranslations()
+    return this.trOn
+  }
+
+  // 换了目标语言：去掉旧的译文，开着翻译的话按新语言重翻这一页
+  setTranslateLang() {
+    if (!this.trOn) return
+    this.trFailed = false
+    this.clearTranslations(false)
+    this.translateVisible(true)
+  }
+
+  translateSoon = debounce(() => this.translateVisible(false), 350)
+
+  clearTranslations(relayout = true) {
+    let n = 0
+    for (const c of this.view?.renderer.getContents?.() || []) {
+      for (const el of c.doc.querySelectorAll(`[${TR}], [${TR_LANG}]`)) { el.removeAttribute(TR); el.removeAttribute(TR_LANG); n++ }
+    }
+    if (n && relayout) this.relayout()
+  }
+
+  // 译文改变了版面：让 foliate 重新分页（停在原来那一页开头）
+  relayout() { try { this.view?.renderer?.render?.() } catch (e) {} }
+
+  // 这一页能看到的段落，再加后面几段
+  visibleBlocks() {
+    const range = this.last?.range
+    const doc = range?.startContainer?.ownerDocument
+    if (!doc?.body) return []
+    const out = []
+    let ahead = 0
+    for (const el of leafBlocks(doc)) {
+      let hit = false
+      try { hit = range.intersectsNode(el) } catch (e) {}
+      if (hit) out.push(el)
+      else if (out.length) { if (ahead++ >= TR_AHEAD) break; out.push(el) }
+    }
+    return out
+  }
+
+  async translateVisible(first) {
+    if (!this.trOn || this.trFailed) return
+    if (this.trBusy) { this.trAgain = true; return }
+    const to = targetLang()
+    const lang = this.lang()
+    const items = []
+    for (const el of this.visibleBlocks()) {
+      if (el.getAttribute(TR_LANG) === to) continue
+      if (!el.getClientRects().length) continue // 看不见的（隐藏的注释之类）
+      const text = el.textContent.replace(/\s+/g, ' ').trim()
+      if (!needsTranslation(text, to, lang)) { el.setAttribute(TR_LANG, to); continue }
+      items.push([el, text])
+    }
+    if (!items.length) {
+      if (first) toast('这一页不用翻译（已经是要译成的语言）', { key: 'translate', duration: 2200 })
+      return
+    }
+    this.trBusy = true
+    if (first) toast('正在翻译…', { key: 'translate', duration: 20000 })
+    try {
+      const out = await translateTexts(items.map(x => x[1]), to)
+      if (!this.trOn || targetLang() !== to) return
+      items.forEach(([el, text], i) => {
+        const tr = (out[i] || '').trim()
+        if (tr && tr !== text) el.setAttribute(TR, tr)
+        el.setAttribute(TR_LANG, to)
+      })
+      this.relayout()
+      if (first) toast('译文在每段原文后面，翻页时接着翻', { key: 'translate', duration: 2400 })
+    } catch (e) {
+      // 出错就停下，不每翻一页都重试；再点一次“翻译”重新开始
+      this.trFailed = true
+      toast('翻译失败：' + (e.message || e) + '。再点一次“翻译”重试', { key: 'translate', error: true, duration: 6000 })
+    } finally {
+      this.trBusy = false
+      if (this.trAgain) { this.trAgain = false; if (this.trOn && !this.trFailed) this.translateVisible(false) }
     }
   }
 
@@ -565,6 +675,18 @@ export class Engine {
     try { this.view?.close() } catch {}
     this.view?.remove()
   }
+}
+
+// 要翻译的段落：最内层的块（和听书一样），代码块（pre）不翻。一个文档只算一次（翻译只改属性，结构不变）
+const leafCache = new WeakMap()
+function leafBlocks(doc) {
+  let list = leafCache.get(doc)
+  if (!list) {
+    const all = [...doc.body.querySelectorAll(BLOCKS)]
+    list = all.filter(el => !el.closest('pre') && el.textContent.trim() && ![...el.querySelectorAll(BLOCKS)].some(x => x.textContent.trim()))
+    leafCache.set(doc, list)
+  }
+  return list
 }
 
 // 一个文档里要朗读的句子：只取最内层的块，避免 li > p 这种重复朗读

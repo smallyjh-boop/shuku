@@ -42,6 +42,8 @@ def section(name):
 # ---------------------------------------------------------------- 模拟服务
 
 TTS_LOG, AI_LOG, FETCH_LOG, WS_LOG, OPDS_AUTH, EXT_LOG, WT_LOG, DICT_LOG = [], [], [], [], [], [], [], []
+MSTR_LOG, AI_TR_LOG = [], []  # 翻译：微软翻译收到的（目标语言, 段落），AI 翻译收到的段落
+MS_TOKEN = "aaa.eyJleHAiOjQxMDI0NDQ4MDB9.ccc"
 WT_TOKEN = "wt-test-token"
 # 浏览器插件测试：这些网站的域名在浏览器里指向模拟服务（--host-resolver-rules），书库服务器解析不到它们
 EXT_SITES = ["www.gutenberg.org", "archive.org", "standardebooks.org", "zh.wikisource.org"]
@@ -128,6 +130,8 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, f'<div id="info" class=""><span class="pl">出版社:</span> <a href="#">{pub}</a><br/><span class="pl">ISBN:</span> {isbn}<br/></div><div class="intro"><p>{intro}</p></div>', "text/html; charset=utf-8")
         if p == "/ol/search.json":
             return self.send(200, {"docs": []})
+        if p == "/mstr/auth":  # 微软翻译：发令牌（JWT 的样子，过期时间 2100 年）
+            return self.send(200, MS_TOKEN, "text/plain")
         if p == "/google/books/v1/volumes":
             return self.send(200, {"items": []})
         if p.startswith("/img/"):
@@ -374,8 +378,19 @@ class Mock(BaseHTTPRequestHandler):
                 return self.send(200, {"data": [{"id": 12, "name": "進撃の巨人", "name_cn": "进击的巨人", "summary": "巨人与人类的战斗。", "date": "2010-03-17",
                                                  "images": {"large": f"{MOCK}/img/bgm.jpg"}, "tags": [{"name": "热血"}], "infobox": [{"key": "作者", "value": "諫山創"}]}]})
             return self.send(200, {"data": []})
+        if p == "/mstr/translate":  # 微软翻译：每段变成“[目标语言]原文”
+            to = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("to", [""])[0]
+            if self.headers.get("Authorization") != "Bearer " + MS_TOKEN or not to:
+                return self.send(401, {"error": "unauthorized"})
+            items = json.loads(raw or b"[]")
+            MSTR_LOG.append((to, [x["Text"] for x in items]))
+            return self.send(200, [{"translations": [{"text": f"[{to}]" + x["Text"], "to": to}]} for x in items])
         if p == "/ai/v1/chat/completions":
             j = json.loads(raw or b"{}")
+            if "书籍翻译" in j["messages"][0]["content"]:  # AI 翻译：收到字符串数组，每项加“AI译:”
+                texts = json.loads(j["messages"][1]["content"])
+                AI_TR_LOG.append(texts)
+                return self.send(200, {"choices": [{"message": {"content": "<think>想一想</think>" + json.dumps(["AI译:" + t for t in texts], ensure_ascii=False)}}]})
             if "读书助手" in j["messages"][0]["content"]:
                 DICT_LOG.append(j["messages"][1]["content"])
                 return self.send(200, {"choices": [{"message": {"content": "<think>想一想</think>mí màn：烟雾、气味等充满某个地方。这里是说面包的香气飘满了街道。"}}]})
@@ -491,6 +506,7 @@ def setup(fresh=True):
                SHUKU_CATALOG_GUTENBERG=MOCK + "/opds/root.xml", SHUKU_CATALOG_IA=MOCK + "/ia",
                SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export",
                SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN, SHUKU_DICT=dict_db,
+               SHUKU_MS_TRANSLATE_AUTH=MOCK + "/mstr/auth", SHUKU_MS_TRANSLATE_BASE=MOCK + "/mstr",
                SHUKU_NO_RESTART="1")
     log = open(os.path.join(T, "server.log"), "w")
     server_proc = subprocess.Popen([os.path.join(T, "shuku-e2e-server")], cwd=T, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -1635,7 +1651,9 @@ def ui_tests():
         make_epub(os.path.join(T, "remote", "浮生六记.epub"), "浮生六记", "沈复", [("闺房记乐", ["余生乾隆癸未冬十一月二十有二日。" * 30])])
         pg.fill(".link-add input", MOCK + "/files/" + urllib.parse.quote("浮生六记.epub"))
         pg.click(".link-add button")
-        pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('浮生六记'))", timeout=40000)
+        # 和上一本差不多同时入库时，提示合成一条“已入库 2 本（最近：《…》）”，不一定写着这本书名：书库里有这本书、有入库提示就算
+        wait(lambda: book_by_title("浮生六记"), 40, 0.5, "粘贴链接入库")
+        pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('浮生六记') || /已入库 \\d+ 本/.test(t.textContent))", timeout=40000)
         check("粘贴链接下载入库", True)
         pg.fill(".link-add input", MOCK + "/page.html")
         pg.click(".link-add button")
@@ -1886,6 +1904,7 @@ def ui_tests():
             if "连续入库测试" in b["title"]:
                 api("DELETE", f"/api/books/{b['id']}")
         ui_reader_v7(browser, context, attach, reader_ready, shot)
+        ui_translate_ocr(browser, context, attach, reader_ready, shot)
         ui_v8_eink_legacy(browser, context, attach, reader_ready, shot)
         browser.close()
 
@@ -2311,6 +2330,176 @@ def ui_reader_v7(browser, context, attach, reader_ready, shot):
     ctx.close()
 
     check("网页自己的脚本、样式没有违反内容安全策略", not own_csp, own_csp[:5])
+
+
+# ---- 1.0.0.8：翻译本页、扫描版 PDF 识别文字 ----
+
+# 这一页开头的位置记在 window.__start 上；之后检查它还在这一页上（翻译加了译文以后，读到的地方不能跑掉）
+MARK_START_JS = "() => { const r = document.querySelector('foliate-view').lastLocation.range; window.__start = [r.startContainer, r.startOffset]; return true }"
+START_VISIBLE_JS = """() => { const r = document.querySelector('foliate-view').lastLocation.range, s = window.__start
+  try { return r.comparePoint(s[0], s[1]) === 0 } catch (e) { return false } }"""
+# 译文真的显示出来了（::after 的内容）
+TR_SHOWN_JS = """(prefix) => { const doc = document.querySelector('foliate-view').renderer.getContents()[0].doc
+  const el = doc.querySelector('[data-shuku-tr]')
+  return !!el && doc.defaultView.getComputedStyle(el, '::after').content.includes(prefix) }"""
+# 这一页能看到的段落里有没有译文
+TR_ON_PAGE_JS = """() => { const r = document.querySelector('foliate-view').lastLocation.range, doc = r.startContainer.ownerDocument
+  return [...doc.querySelectorAll('[data-shuku-tr]')].some(el => r.intersectsNode(el)) }"""
+
+
+def ui_translate_ocr(browser, context, attach, reader_ready, shot):
+    section("网页：翻译本页、扫描版 PDF 识别文字（1.0.0.8）")
+    tr_reqs = []
+    ai_before = j("GET", "/api/settings")["ai"]
+
+    # ---- 设置：用哪个翻译、默认译成哪种语言 ----
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v8-settings")
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-translate .tr-engine button")
+    pg.click("#set-translate .tr-engine button:has-text('AI')")
+    pg.select_option("#set-translate select.tr-default", "ja")
+    pg.click("#set-translate button:has-text('保存')")
+    s = wait(lambda: (lambda x: x if x.get("translate", {}).get("engine") == "ai" else None)(j("GET", "/api/settings")), 10, 0.3, "翻译设置保存")
+    check("设置里选翻译方式（AI）、默认语言，保存", s["translate"] == {"engine": "ai", "to": "ja"}, s.get("translate"))
+    pg.locator("#set-translate").scroll_into_view_if_needed()
+    shot(pg, "60-settings-translate")
+    j("PUT", "/api/settings", json={"ai": {"enabled": True, "base_url": MOCK + "/ai/v1", "api_key": "", "model": "mock-1"}})
+    r = j("POST", "/api/translate", json={"texts": ["你好，世界"], "to": "en"})
+    check("选了 AI：翻译交给 AI", r["engine"] == "ai" and r["translations"][0] == "AI译:你好，世界", r)
+    pg.reload()
+    pg.wait_for_selector("#set-translate .tr-engine button")
+    pg.click("#set-translate .tr-engine button:has-text('微软翻译')")
+    pg.select_option("#set-translate select.tr-default", "zh-Hans")
+    pg.click("#set-translate button:has-text('保存')")
+    wait(lambda: j("GET", "/api/settings")["translate"] == {"engine": "microsoft", "to": "zh-Hans"} or None, 10, 0.3, "翻译设置改回")
+    check("换回微软翻译", True)
+    ctx.close()
+    j("PUT", "/api/settings", json={"ai": ai_before})
+
+    # ---- EPUB：译文显示在每段原文后面，翻页接着翻；划线、进度还按原文算 ----
+    book = book_by_title("三体")
+    j("PATCH", f"/api/books/{book['id']}/me", json={"restart": True})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v8-epub-translate")
+    pg.on("request", lambda rq: "/api/translate" in rq.url and tr_reqs.append(rq.url))
+    pg.goto(BASE + f"/#/read/{book['id']}")
+    reader_ready(pg)
+    pg.wait_for_timeout(2300)  # 等工具栏自动收起
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-top button[title='阅读设置']")
+    pg.wait_for_selector(".r-sheet.show select.tr-lang")
+    pg.select_option(".r-sheet.show select.tr-lang", "en")  # 书是中文的，译成英文
+    pg.evaluate("() => document.activeElement && document.activeElement.blur()")
+    pg.keyboard.press("Escape")
+    pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(900)  # 翻到正文中间的一页
+    pg.evaluate(MARK_START_JS)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-tools button[title='翻译']")
+    pg.wait_for_function(TR_SHOWN_JS, arg="[en]", timeout=15000)
+    check("EPUB 翻译本页：译文显示在每段原文后面", pg.evaluate(TR_ON_PAGE_JS) and pg.locator(".r-tools button[title='翻译'].on").count() == 1)
+    pg.wait_for_timeout(800)
+    check("加了译文以后还停在原来那一页", pg.evaluate(START_VISIBLE_JS))
+    shot(pg, "61-epub-translate")
+    sent = sum(len(x[1]) for x in MSTR_LOG if x[0] == "en")
+    for _ in range(3):
+        pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(700)
+    pg.wait_for_function(TR_ON_PAGE_JS, timeout=15000)
+    check("开着翻译翻页：新的一页也有译文", True)
+    check("同样的段落只翻一次（书里每段都一样）", sum(len(x[1]) for x in MSTR_LOG if x[0] == "en") <= sent + 2, MSTR_LOG[-3:])
+    # 开着翻译划线
+    check("开着翻译选中文字", pg.evaluate(SELECT_JS, "晴朗的早晨"))
+    pg.wait_for_selector(".r-dict.show .seltools .dot", timeout=8000)
+    pg.locator(".r-dict .seltools .dot").first.click()
+    hl = wait(lambda: [b for b in j("GET", f"/api/books/{book['id']}/bookmarks") if b["kind"] == "highlight" and b["text"] == "晴朗的早晨"], 10, 0.3, "划线保存")
+    pg.wait_for_timeout(2600)  # 进度 1.5 秒后上传
+    prog = j("GET", f"/api/books/{book['id']}/progress")
+    # 关掉翻译
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    n_req = len(tr_reqs)
+    pg.click(".r-tools button[title='翻译']")
+    pg.wait_for_function("() => !document.querySelector('foliate-view').renderer.getContents()[0].doc.querySelector('[data-shuku-tr]')", timeout=8000)
+    check("再点一次“翻译”：译文去掉", pg.locator(".r-tools button[title='翻译'].on").count() == 0)
+    RESOLVE = """(cfi) => { const v = document.querySelector('foliate-view'), r = v.resolveCFI(cfi)
+      const c = v.renderer.getContents().find(x => x.index === r.index); return c ? r.anchor(c.doc).toString() : null }"""
+    got = pg.evaluate(RESOLVE, hl[0]["location"])
+    check("开着翻译划的线，位置按原文算（关掉翻译后还是那几个字）", got == "晴朗的早晨", got)
+    got = pg.evaluate("""(cfi) => { const v = document.querySelector('foliate-view'), r = v.resolveCFI(cfi)
+      const c = v.renderer.getContents().find(x => x.index === r.index); if (!c) return null
+      const range = r.anchor(c.doc), vis = v.lastLocation.range
+      try { return vis.comparePoint(range.startContainer, range.startOffset) === 0 } catch (e) { return String(e) } }""", prog["location"])
+    check("开着翻译时存的进度，关掉翻译后还在这一页", got is True, (prog["location"], got))
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-tools button[title='翻译']")
+    pg.wait_for_function(TR_SHOWN_JS, arg="[en]", timeout=10000)
+    check("同一页再翻译不用再请求（本机记着译文）", len(tr_reqs) == n_req, len(tr_reqs) - n_req)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-tools button[title='翻译']")
+    for b in hl:
+        api("DELETE", f"/api/bookmarks/{b['id']}")
+    ctx.close()
+
+    # ---- PDF：对照面板（这一页的原文、译文），翻页跟着换 ----
+    pdf = [b for b in all_books() if "深度学习" in b["title"]][0]
+    j("PATCH", f"/api/books/{pdf['id']}/me", json={"prefs": {"pdfMode": "page"}, "restart": True})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v8-pdf-translate")
+    pg.goto(BASE + f"/#/read/{pdf['id']}")
+    pg.wait_for_selector(".pdfv .pg .textLayer[data-ready]", timeout=30000)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-tools button[title='翻译']")
+    pg.wait_for_function("() => [...document.querySelectorAll('.r-trsheet.show .tr-pair .t')].some(e => e.textContent.startsWith('[zh-Hans]'))", timeout=15000)
+    text = pg.inner_text(".r-trsheet")
+    check("PDF 翻译本页：对照面板里是这一页的原文和译文", "第 1 页" in text and "Neural networks" in text and "[zh-Hans]" in text, text[:200])
+    shot(pg, "62-pdf-translate")
+    pg.evaluate("() => document.querySelector('.reader').classList.remove('ui')")
+    pg.keyboard.press("ArrowRight")
+    pg.wait_for_function("() => document.querySelector('.r-trsheet .r-sheet-hd b').textContent.includes('第 2 页')", timeout=10000)
+    check("翻页后对照面板跟着换到这一页", True)
+    pg.select_option(".r-trsheet select.tr-lang", "ja")
+    pg.wait_for_function("() => [...document.querySelectorAll('.r-trsheet .tr-pair .t')].some(e => e.textContent.startsWith('[ja]'))", timeout=10000)
+    check("面板里换要译成的语言", True)
+    pg.evaluate("() => document.activeElement && document.activeElement.blur()")
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(300)
+    check("按 Esc（安卓返回键）关掉对照面板，不退出阅读器", not pg.is_visible(".r-trsheet.show") and pg.is_visible(".reader"))
+    ctx.close()
+
+    # ---- 扫描版 PDF：书库识别出文字，能选字、划线、搜索、翻译 ----
+    if not (shutil.which("tesseract") and (shutil.which("mutool") or shutil.which("pdftoppm"))):
+        check("扫描版 PDF 识别文字（本机没有 tesseract，跳过）", True)
+        return
+    shutil.copy(os.path.join(ROOT, "server", "testdata", "scan-en.pdf"), os.path.join(T, "inbox", "扫描版测试.pdf"))
+    # 书名取 PDF 属性里的（scan-en），属性里没有时用文件名
+    sb = wait(lambda: next((b for b in all_books() if "扫描" in b["title"] or b["title"] == "scan-en"), None), 60, 0.5, "扫描版入库")
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v8-ocr")
+    pg.goto(BASE + f"/#/read/{sb['id']}")
+    pg.wait_for_selector(".pdfv .pg .textLayer.ocr[data-ready]", timeout=90000)
+    layer = pg.evaluate("() => document.querySelector('.pdfv .pg .textLayer.ocr').textContent")
+    check("扫描版 PDF：书库识别出文字，铺成透明文字层", "12345" in layer and "quick" in layer.lower(), layer)
+    ok = pg.evaluate("""() => { const tl = document.querySelector('.pdfv .pg .textLayer.ocr'); const w = document.createTreeWalker(tl, NodeFilter.SHOW_TEXT); let n
+      while ((n = w.nextNode())) { const i = n.nodeValue.indexOf('12345'); if (i >= 0) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + 5); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.querySelector('.pdfv').dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return getSelection().toString() } }
+      return '' }""")
+    pg.wait_for_selector(".r-dict.show .seltools .dot", timeout=8000)
+    check("扫描版能选字（选到 12345，弹出查字典和划线）", ok == "12345" and "12345" in pg.inner_text(".r-dict"), ok)
+    shot(pg, "63-pdf-ocr")
+    pg.locator(".r-dict .seltools .dot").nth(1).click()
+    hl = wait(lambda: [b for b in j("GET", f"/api/books/{sb['id']}/bookmarks") if b["kind"] == "highlight"], 10, 0.3, "扫描版划线")
+    check("扫描版也能划线（存页码和字的位置）", re.match(r"^p:1:[\d.]+:\d+-\d+$", hl[0]["location"]) is not None and hl[0]["text"] == "12345", hl)
+    pg.keyboard.press("t")
+    pg.wait_for_selector(".r-panel.show")
+    pg.click(".r-panel .ptabs button:has-text('搜索')")
+    pg.fill(".r-search input", "quick brown")
+    pg.press(".r-search input", "Enter")
+    pg.wait_for_selector(".r-panel .hit", timeout=30000)
+    check("扫描版书内搜索（用识别出的文字）", "quick brown" in pg.inner_text(".r-panel .hit").lower())
+    pg.keyboard.press("Escape")
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-tools button[title='翻译']")
+    pg.wait_for_function("() => [...document.querySelectorAll('.r-trsheet.show .tr-pair .t')].some(e => e.textContent.includes('12345'))", timeout=15000)
+    check("扫描版翻译本页（用识别出的文字）", "[zh-Hans]" in pg.inner_text(".r-trsheet"))
+    ctx.close()
 
 
 def offline_v7():
