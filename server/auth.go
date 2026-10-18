@@ -111,10 +111,14 @@ func requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// 新登录。w 为 nil 时不写 cookie：手机、手表、插件配对用请求头带令牌，
+// 写了 cookie 反而会让浏览器网页也用上插件的登录（插件断开时网页跟着退出）
 func newSession(w http.ResponseWriter, device string, uid int64) string {
 	t := randToken(32)
 	db.Exec(`INSERT INTO sessions(token,device,created_at,last_seen,user_id) VALUES(?,?,?,?,?)`, t, device, now(), now(), uid)
-	http.SetCookie(w, &http.Cookie{Name: "shuku_token", Value: t, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600 * 24 * 365})
+	if w != nil {
+		http.SetCookie(w, &http.Cookie{Name: "shuku_token", Value: t, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600 * 24 * 365})
+	}
 	return t
 }
 

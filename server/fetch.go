@@ -110,6 +110,14 @@ func runFetch(j *FetchJob) {
 	case fetchSem <- struct{}{}:
 		defer func() { <-fetchSem }()
 	case <-ctx.Done():
+		// 还在排队就取消了、超时了：也要标成结束，不然一直显示“排队中”
+		setJob(j, func(j *FetchJob) {
+			j.Finished = now()
+			j.Status, j.Error = "error", "排队太久，没有开始下载"
+			if errors.Is(ctx.Err(), context.Canceled) {
+				j.Error = "已取消"
+			}
+		})
 		return
 	}
 	setJob(j, func(j *FetchJob) { j.Status = "downloading" })

@@ -126,7 +126,7 @@ func handlePairClaim(w http.ResponseWriter, r *http.Request) {
 		device = "App"
 	}
 	info := serverInfo(r)
-	info["token"] = newSession(w, device, owner.ID)
+	info["token"] = newSession(nil, device, owner.ID)
 	info["user"] = map[string]any{"id": owner.ID, "name": owner.Name, "role": owner.Role}
 	logEvent("info", 0, "新设备已连接："+device+"（"+owner.Name+"）")
 	writeJSON(w, 200, info)

@@ -238,7 +238,6 @@ class NarrationService : Service() {
         Events.emit("tts", JSONObject().put("type", "seg").put("id", seg.id))
         tick()
         if (!webAlive()) notePosition(seg)
-        WearSync.pushState(this, stateJson())
         askMore()
         if (useDevice) return speakDevice(seg)
         val job = audioFor(seg)
@@ -548,23 +547,41 @@ class NarrationService : Service() {
         .put("status", status).put("title", book.optString("title")).put("author", book.optString("author"))
         .put("text", queue.getOrNull(index)?.text ?: "")
 
+    // 锁屏的媒体控制、手表只在播放/暂停、换书、换封面、定时、语速、出错这些变化时更新。
+    // 以前每读一句都更新一次：手机的媒体会话会同步到手表（Wear OS 的媒体控制），再加上发给书库手表版的状态，
+    // 手表每隔几秒就被叫醒一次，很费电。手表要看当前读到哪一句时自己来要（打开首页时）
+    private var lastShown = ""
+    private var lastNotifyAt = 0L
+
     private fun publish() {
         if (stopped) return // 停止以后不要再把通知和手表状态带回来
-        Events.emit("tts", stateJson().put("type", "state"))
+        Events.emit("tts", stateJson().put("type", "state")) // 给网页（手机本机），每句都发
+        val shownStatus = if (status == "合成中…" || status == "加载下一章…") "" else status
+        val sig = listOf(playing, book.optString("title"), book.optString("author"), System.identityHashCode(cover), timerMin, speed, shownStatus).joinToString("|")
+        val now = SystemClock.elapsedRealtime()
+        if (sig == lastShown) {
+            // 只是换了一句：通知栏里显示的句子最多 15 秒更新一次（这条通知只在手机上显示，不转到手表）
+            if (now - lastNotifyAt >= 15_000) {
+                lastNotifyAt = now
+                getSystemService(android.app.NotificationManager::class.java)?.notify(NOTIF_ID, notification())
+            }
+            return
+        }
+        lastShown = sig
+        lastNotifyAt = now
         val actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE or
             PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_STOP
         session.setPlaybackState(PlaybackState.Builder().setActions(actions)
-            .setState(if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, index.toLong() * 1000, if (playing) 1f else 0f).build())
-        val text = queue.getOrNull(index)?.text ?: ""
+            .setState(if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, PlaybackState.PLAYBACK_POSITION_UNKNOWN, if (playing) 1f else 0f).build())
         session.setMetadata(MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, book.optString("title"))
             .putString(MediaMetadata.METADATA_KEY_ARTIST, book.optString("author"))
             .putString(MediaMetadata.METADATA_KEY_ALBUM, "书库 · 听书")
-            .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, text.take(60))
+            .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, shownStatus.ifEmpty { book.optString("author") })
             .apply { cover?.let { putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it) } }
             .build())
         getSystemService(android.app.NotificationManager::class.java)?.notify(NOTIF_ID, notification())
-        WearSync.pushState(this, stateJson())
+        WearSync.pushState(this, stateJson(), force = true)
     }
 
     private fun goForeground() {
@@ -589,6 +606,8 @@ class NarrationService : Service() {
             .setOngoing(playing)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(Notification.CATEGORY_TRANSPORT)
+            .setOnlyAlertOnce(true)
+            .setLocalOnly(true) // 不转到手表：手表上有系统的媒体控制和书库手表版，转过去只会频繁叫醒手表
             .addAction(action(android.R.drawable.ic_media_previous, "上一句", ACT_PREV, 1))
             .addAction(if (playing) action(android.R.drawable.ic_media_pause, "暂停", ACT_PAUSE, 2) else action(android.R.drawable.ic_media_play, "继续", ACT_PLAY, 3))
             .addAction(action(android.R.drawable.ic_media_next, "下一句", ACT_NEXT, 4))
