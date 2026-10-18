@@ -1148,6 +1148,11 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	scanState.Unlock()
 	var lastEvent int64
 	db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM events`).Scan(&lastEvent)
+	if !me(r).Admin() {
+		// 家人账号不看入库、整理的动态（/api/events 只给管理员），只要知道版本有没有变
+		writeJSON(w, 200, map[string]any{"inbox": map[string]any{"pending": 0, "current": ""}, "scan": map[string]any{"running": false, "found": 0}, "last_event": 0, "version": version})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"inbox": inboxStatus(), "scan": sc, "last_event": lastEvent, "ai": aiReady(), "enrich": enrichStatus(), "fulltext": fulltextStatus(), "version": version})
 }
 

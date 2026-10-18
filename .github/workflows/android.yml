@@ -408,6 +408,11 @@ jobs:
           SHA256SUMS.txt 是校验值。安装方法见 README。
           EOF
           sed -i 's/^          //' "$RUNNER_TEMP/notes.md"
+          # 这次更新了什么：CHANGES.md 最上面那一节
+          awk '/^## /{n++} n==1' "$GITHUB_WORKSPACE/CHANGES.md" 2>/dev/null | tail -n +2 > "$RUNNER_TEMP/changes.md" || true
+          if [ -s "$RUNNER_TEMP/changes.md" ]; then
+            { echo; echo "### 这次更新"; cat "$RUNNER_TEMP/changes.md"; } >> "$RUNNER_TEMP/notes.md"
+          fi
           gh release create "v$V" * --title "书库 $V" --target "${{ github.sha }}" --notes-file "$RUNNER_TEMP/notes.md"
 
       - name: ghcr.io 上只留最近 10 个版本（省存储；新版本有问题时可以退回旧版本）

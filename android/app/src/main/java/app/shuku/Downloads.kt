@@ -488,7 +488,8 @@ class Downloads(private val app: ShukuApp) {
         if (s.optString("read_state") != "done") return false
         val fin = s.optLong("finished_at") * 1000
         val at = st.optLong("at")
-        return fin <= 0 || at <= 0 || fin >= at
+        // 不知道什么时候读完的（很早以前标的“已读”）就不删：可能是下载来重读的
+        return fin > 0 && (at <= 0 || fin >= at)
     }
 
     /** 书库上这些书的阅读状态 {"12":{"read_state":"done","finished_at":…},…}；连不上、旧版书库没有这个接口时返回 null */
