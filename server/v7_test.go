@@ -347,8 +347,12 @@ func TestProgressConflict(t *testing.T) {
 	if getProgress(admin.ID, b).Location != "B" {
 		t.Error("冲突时不应该保存")
 	}
+	// 同一台设备连着翻页，上一次的回复还没到（base 落后一步）：不算冲突
+	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "B2", "base": t1, "device": "手机"}); m["conflict"] != nil || getProgress(admin.ID, b).Location != "B2" {
+		t.Error("同一台设备", m)
+	}
 	// 位置一样不算冲突；不带 base 的旧客户端照常保存
-	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "B", "base": t1}); m["conflict"] != nil {
+	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "B2", "base": t1, "device": "平板"}); m["conflict"] != nil {
 		t.Error("同一位置", m)
 	}
 	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "D"}); m["conflict"] != nil || getProgress(admin.ID, b).Location != "D" {

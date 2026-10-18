@@ -855,7 +855,10 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur := getProgress(u.ID, id)
-	if req.Base != nil && cur.UpdatedAt > *req.Base && (cur.Location != req.Location || cur.FileID != req.FileID) && cur.UpdatedAt > 0 {
+	// 冲突：客户端打开以后，别的设备又存过不一样的位置。同一台设备自己连着翻页时，
+	// 上一次保存的回复可能还没到（App 里是原生排队上传），base 落后一步不算冲突
+	sameDevice := req.Device != "" && cur.Device == req.Device
+	if req.Base != nil && cur.UpdatedAt > *req.Base && (cur.Location != req.Location || cur.FileID != req.FileID) && cur.UpdatedAt > 0 && !sameDevice {
 		writeJSON(w, 200, map[string]any{"updated_at": cur.UpdatedAt, "conflict": true, "current": cur})
 		return
 	}

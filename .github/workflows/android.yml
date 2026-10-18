@@ -9,7 +9,7 @@
 # Dockerfile 里 base 那一段没改就一直用同一个：每次升级 NAS 只下载程序、网页和安装包这几十 MB。
 #
 # 为了省 Actions 分钟数和存储：只有一个任务；只打 x86 版（NAS 是 Intel 处理器）；不建缓存、不上传 Artifacts；
-# ghcr.io 上只留最近 3 个版本；超过 30 分钟自动停止。
+# ghcr.io 上只留最近 10 个版本（新版本有问题时可以退回 :v旧版本号）；超过 35 分钟自动停止。
 #
 # 版本号：填的版本号（或 android/gradle.properties 里的）后面接第几次打包，比如 1.0.0.12。各端都按它判断新旧。
 #
@@ -56,7 +56,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -143,12 +143,21 @@ jobs:
 
       # ---------- NAS 服务器镜像 ----------
 
-      - name: 编译 NAS 服务器
+      - name: 编译 NAS 服务器（先跑自动测试）
         run: |
           set -o pipefail
-          # 在和运行环境同样的 Debian bookworm 里编译（glibc 一致）
+          # 在和运行环境同样的 Debian bookworm 里编译（glibc 一致）。
+          # 先跑测试（数据库升级、家人账号、回收站、扫描、备份恢复等），没通过就不打包；
+          # 测试和编译用同样的参数，SQLite 只编译一次
           docker run --rm -e V="$V" -v "$PWD/server:/src" -v "$RUNNER_TEMP/ctx:/ctx" -w /src golang:1.24-bookworm \
-            sh -ec 'CGO_ENABLED=1 go build -mod=vendor -tags sqlite_fts5 -trimpath -ldflags "-s -w -X main.version=$V" -o /ctx/out/shuku .' \
+            sh -ec 'export CGO_ENABLED=1
+              go vet -mod=vendor -tags sqlite_fts5 .
+              if go test -mod=vendor -tags sqlite_fts5 -trimpath -count=1 -v . > /tmp/test.log 2>&1; then
+                grep -E "^(--- |ok|PASS)" /tmp/test.log | grep -v "^--- PASS" || true; echo "自动测试：$(grep -c "^--- PASS" /tmp/test.log) 项通过"
+              else
+                grep -v "数据库已升级" /tmp/test.log | tail -n 120; echo "自动测试没通过"; exit 1
+              fi
+              go build -mod=vendor -tags sqlite_fts5 -trimpath -ldflags "-s -w -X main.version=$V" -o /ctx/out/shuku .' \
             2>&1 | tee -a "$RUNNER_TEMP/build.log"
           file "$RUNNER_TEMP/ctx/out/shuku"
 
@@ -193,7 +202,10 @@ jobs:
           if curl -fsSL --retry 3 "$CEDICT_URL" | gunzip > "$D/cedict.txt" && [ -s "$D/cedict.txt" ]; then
             cedict="-cedict $D/cedict.txt"
           else
-            echo "::warning::CC-CEDICT 下载失败，这次的字典里没有大陆拼音和繁简对照"
+            # 不带 CC-CEDICT 的字典不能用正式标签保存，否则以后一直用这个缺了一块的：换个标签，下次打包会重新下载
+            R="$R-nocedict"
+            echo "RUNTIME=$R" >> "$GITHUB_ENV"
+            echo "::warning::CC-CEDICT 下载失败，这次的字典里没有大陆拼音和繁简对照（下次打包会再试）"
           fi
           ls -l "$D"
           "$RUNNER_TEMP/ctx/out/shuku" -build-dict "$RUNNER_TEMP/ctx/out/dict/dict.db" -moe "$D/moe.json" -ecdict "$D/ecdict.csv" $cedict 2>&1 | tee -a "$RUNNER_TEMP/build.log"
@@ -201,6 +213,16 @@ jobs:
           docker buildx build --platform linux/amd64 --target runtime --build-context base="docker-image://$BASE" --build-context build="$RUNNER_TEMP/ctx" \
             -t "$R" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           docker push "$R"
+
+      - name: 取上一版镜像（试运行时测试从上一版升级）
+        continue-on-error: true
+        run: |
+          if docker pull -q "$IMAGE:latest"; then
+            docker tag "$IMAGE:latest" shuku-prev:latest
+            docker image inspect shuku-prev:latest --format '上一版镜像：{{.Created}}'
+          else
+            echo "::warning::取不到上一版镜像，这次不测升级"
+          fi
 
       - name: 打包服务器镜像并试运行
         run: |
@@ -246,6 +268,14 @@ jobs:
           assert zh["installed"] and w["pinyin"][0] == "jì yú" and "希望得到" in json.dumps(w, ensure_ascii=False), "中文"
           assert en["words"][0]["word"] == "go", "英文"
           EOF
+          # 转换工具（Calibre、djvu、7z、PDF 封面）和本地字典都要在
+          curl -fsS -H "Authorization: Bearer $tok" http://127.0.0.1:18080/api/settings > "$RUNNER_TEMP/settings-check.json" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP/settings-check.json" <<'EOF' || { ok=""; echo "转换工具不全"; }
+          import json, sys
+          tools = json.load(open(sys.argv[1]))["tools"]
+          print("转换工具：", tools)
+          assert all(tools.values()), [k for k, v in tools.items() if not v]
+          EOF
           for f in shuku-android.apk shuku-wear.apk shuku-extension.zip; do
             curl -fsS http://127.0.0.1:18080/dl/$f -o "$RUNNER_TEMP/dl-$f" 2>/dev/null || true
             cmp -s "$RUNNER_TEMP/dl-$f" "dist/$f" && echo "下载 $f：正常" || { ok=""; echo "从书库下载的 $f 不对"; }
@@ -264,6 +294,83 @@ jobs:
           docker image ls "$IMAGE" --format '{{.Repository}}:{{.Tag}} {{.Size}}'
           if [ -z "$ok" ]; then echo "::error::服务器镜像试运行没通过"; exit 1; fi
           cp docker-compose.yml dist/shuku-compose.yml
+
+      - name: 从上一版升级试运行（书、进度、笔记、读完状态、登录都要还在）
+        run: |
+          set -o pipefail
+          if ! docker image inspect shuku-prev:latest > /dev/null 2>&1; then echo "没有上一版镜像，跳过"; exit 0; fi
+          U="$RUNNER_TEMP/upgrade"
+          mkdir -p "$U/data" "$U/inbox" "$U/books" "$U/comics"
+          start() {
+            docker run -d --name "$1" --network host -e SHUKU_PORT=18081 \
+              -v "$U/data:/data" -v "$U/inbox:/inbox" -v "$U/books:/books" -v "$U/comics:/comics" "$2" > /dev/null
+            for i in $(seq 1 90); do
+              curl -fsS http://127.0.0.1:18081/api/ping > /dev/null 2>&1 && return 0
+              sleep 1
+            done
+            docker logs "$1" 2>&1 | tail -n 40 | tee -a "$RUNNER_TEMP/build.log"
+            echo "::error::$1 没有启动起来"
+            return 1
+          }
+          cat > "$RUNNER_TEMP/req.py" <<'EOF'
+          import json, urllib.parse, urllib.request
+          B = "http://127.0.0.1:18081"
+          def req(method, path, body=None, tok="", raw=None):
+              data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+              r = urllib.request.Request(B + path, data=data, method=method)
+              if tok:
+                  r.add_header("Authorization", "Bearer " + tok)
+              if body is not None:
+                  r.add_header("Content-Type", "application/json")
+              with urllib.request.urlopen(r, timeout=60) as resp:
+                  return json.loads(resp.read() or b"null")
+          EOF
+          sed -i 's/^          //' "$RUNNER_TEMP/req.py"
+          # 上一版：设密码、放一本书、记进度和笔记、标成读完
+          start shuku-old shuku-prev:latest
+          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF'
+          import json, sys, time, urllib.parse
+          from req import req
+          tok = req("POST", "/api/auth/setup", {"Password": "upgrade-test-1", "Device": "ci"})["token"]
+          text = ("第一章 开始\n" + "这是一本用来测试升级的书。" * 300 + "\n第二章 继续\n" + "第二章的内容。" * 300).encode()
+          req("POST", "/api/upload?path=" + urllib.parse.quote("升级测试 - 测试作者.txt"), raw=text, tok=tok)
+          for i in range(90):
+              books = req("GET", "/api/books", tok=tok)
+              if books["total"] >= 1:
+                  break
+              time.sleep(1)
+          assert books["total"] == 1, books
+          bid = books["items"][0]["id"]
+          req("PUT", f"/api/books/{bid}/progress", {"location": "sec:1", "percent": 0.42, "device": "ci", "seconds": 120}, tok=tok)
+          req("POST", f"/api/books/{bid}/bookmarks", {"location": "sec:1", "label": "第二章", "text": "原文", "note": "升级测试笔记"}, tok=tok)
+          req("PATCH", f"/api/books/{bid}", {"read_state": "done"}, tok=tok)
+          json.dump({"tok": tok, "id": bid}, open(sys.argv[1] + "/state.json", "w"))
+          print("上一版：已放入《升级测试》，记了进度、笔记、读完")
+          EOF
+          docker stop -t 20 shuku-old > /dev/null && docker rm shuku-old > /dev/null
+          # 这一版：同一个数据目录启动，自动升级数据库
+          start shuku-new "$IMAGE:latest"
+          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF'
+          import json, sys
+          from req import req
+          st = json.load(open(sys.argv[1] + "/state.json"))
+          tok, bid = st["tok"], st["id"]
+          books = req("GET", "/api/books", tok=tok)  # 原来登录的设备不用重新登录
+          assert books["total"] == 1 and books["items"][0]["id"] == bid, books
+          pr = req("GET", f"/api/books/{bid}/progress", tok=tok)
+          assert pr["location"] == "sec:1", pr
+          bm = req("GET", f"/api/books/{bid}/bookmarks", tok=tok)
+          assert len(bm) == 1 and bm[0]["note"] == "升级测试笔记", bm
+          b = req("GET", f"/api/books/{bid}", tok=tok)
+          assert b["read_state"] == "done", b["read_state"]
+          assert req("GET", "/api/me", tok=tok)["role"] == "admin"
+          assert req("POST", "/api/auth/login", {"Password": "upgrade-test-1", "Device": "ci2"})["token"]
+          bk = req("GET", "/api/backups", tok=tok)["backups"]
+          assert any(x["kind"] == "upgrade" for x in bk), bk
+          print("从上一版升级：书、进度、笔记、读完状态、登录都在；升级前的备份：", [x["name"] for x in bk if x["kind"] == "upgrade"])
+          EOF
+          docker logs shuku-new 2>&1 | grep -E "数据库|备份|启动|全文索引" | tail -n 20
+          docker rm -f shuku-new > /dev/null
 
       - name: 推送镜像到 ghcr.io（NAS 上的更新服务从这里取新版本）
         run: |
@@ -303,10 +410,10 @@ jobs:
           sed -i 's/^          //' "$RUNNER_TEMP/notes.md"
           gh release create "v$V" * --title "书库 $V" --target "${{ github.sha }}" --notes-file "$RUNNER_TEMP/notes.md"
 
-      - name: ghcr.io 上只留最近 3 个版本（省存储）
+      - name: ghcr.io 上只留最近 10 个版本（省存储；新版本有问题时可以退回旧版本）
         continue-on-error: true
         uses: actions/delete-package-versions@v5
         with:
           package-name: shuku
           package-type: container
-          min-versions-to-keep: 3
+          min-versions-to-keep: 10

@@ -19,12 +19,23 @@
 - 运行环境（Debian + mupdf/7z/djvulibre + Calibre）是 `Dockerfile` 里的 `base` 段，单独做成基础镜像，标签是这一段文字的哈希（awk 取 `FROM … AS base` 到下一个 `FROM` 之间，**注释、空行也算**）：这一段没改就不重做，NAS 升级只下载几十 MB。改 `base` 段（或者勾“重新制作基础镜像”）会让 NAS 多下载几百 MB，没必要别动，说明性注释写到别的段里。
 - 本地字典在 `runtime` 段（base + `/app/dict/dict.db`），做成 `ghcr.io/smallyjh-boop/shuku-runtime`，标签按 base 标签、runtime 段文字、字典数据地址（固定版本，在 workflow 的 env 里）、`server/dict_build.go` 算。字典由 `shuku -build-dict` 在 Actions 里生成：国语辞典（g0v/moedict-data，CC BY-ND 3.0 TW，原文照存、显示时转简体）、CC-CEDICT（大陆拼音、繁简对照）、ECDICT（英文）。
 - Releases 不再放服务器镜像的 tar.gz（带 Calibre 太大，NAS 直接从 ghcr.io 拉）。
+- 编译前在同一个 golang 容器里跑 `go vet` 和 `go test`（-tags sqlite_fts5 -trimpath，和编译共用缓存），没通过不打包。试运行另外检查 `/api/settings` 的 tools 全为 true，并做升级测试：先 `docker pull` 上一版 `:latest`（必须在新镜像占用 latest 标签之前），用它建库、入库、记进度笔记，再用新镜像在同一个数据目录启动，检查书、进度、笔记、读完状态、旧登录都在。
+- CC-CEDICT 下载失败时运行环境用 `-nocedict` 标签推送，正式标签留给下次重做。
 - 安卓签名：`android/signing/shuku.jks`（手机和手表必须同一个签名、同一个包名 `app.shuku`）。
 - 手表 App 是原生界面（不是 WebView），自己能听书：`ListenService` 按句调 `POST /api/tts` 合成、手表自己播放（蓝牙耳机，或用户同意后用扬声器；书库语音不行时用手表自带语音），进度和阅读页一样换算成 `sec:` / `p:` 位置传回书库。首页另外还能遥控手机上的听书（Wearable 消息 `/shuku/tts/…`）。没有 Android SDK 时用 `android/tools/check.sh` 做类型检查。
 
 ## 在线升级（已做好）
 
 - 版本号 = 填的版本号（或 `android/gradle.properties`）+ `.` + run_number，比如 `1.0.0.12`；服务器 `-X main.version=`，手机 versionCode = run_number，手表 versionCode = 100000 + run_number，插件 manifest 的 version 也是它。
-- 服务器：镜像推到 `ghcr.io/smallyjh-boop/shuku:latest` 和 `:v版本号`（ghcr.io 上只留 3 个版本），compose 带 `com.centurylinklabs.watchtower.enable=true`，NAS 上泰好说的 `taihaoshuo-updater`（Watchtower，`--interval 60`）一分钟内自动换上。网页“检查更新”调它的 HTTP 接口：`SHUKU_UPDATE_URL=http://127.0.0.1:8741`、`SHUKU_UPDATE_TOKEN`（和泰好说 `deploy/docker-compose.yml` 里的 `WATCHTOWER_HTTP_API_TOKEN` 一样）。这个更新服务是泰好说装的，书库的 compose 里不要再建一个。
+- 服务器：镜像推到 `ghcr.io/smallyjh-boop/shuku:latest` 和 `:v版本号`（ghcr.io 上留最近 10 个版本，出问题时 compose 里改成 `:v旧版本号` 退回），compose 带 `com.centurylinklabs.watchtower.enable=true`，NAS 上泰好说的 `taihaoshuo-updater`（Watchtower，`--interval 60`）一分钟内自动换上。网页“检查更新”调它的 HTTP 接口：`SHUKU_UPDATE_URL=http://127.0.0.1:8741`、`SHUKU_UPDATE_TOKEN`（和泰好说 `deploy/docker-compose.yml` 里的 `WATCHTOWER_HTTP_API_TOKEN` 一样）。这个更新服务是泰好说装的，书库的 compose 里不要再建一个。
 - 手机、手表 App 和插件：安装包和 `clients.json` 打进镜像的 `/app/clients`，各端读 `/api/clients`（不用登录）、从 `/dl/{文件名}` 下载。旧版各端都依赖这两个接口，改的时候要兼容。
 - NAS 上已经登录过 ghcr.io（和泰好说、memory-trainer 同一个只读令牌），镜像是私有的也能拉。
+
+## 数据库、账号（1.0.0.7 起）
+
+- 数据库升级只写在 `server/migrate.go` 的 `migrations`（版本号存在 settings 的 `schema_version`，一个版本一个事务，只忽略 duplicate column / already exists，其他错误停止启动）。升级前自动备份到 `/data/backup/shuku-日期-upgrade-vN.db`。不要在 openDB 里零散地 ALTER。改了表结构要在 `server/testdata/` 的旧库结构上测升级（`TestMigrateFrom1006`）。
+- 全文索引在单独的 `/data/fulltext.db`（每个连接 ATTACH 成 `fts`，表名不带前缀时自动找到），能重建、不进备份。
+- 家人账号：`users` 表，`sessions.user_id`；progress、bookmarks（书签和划线笔记，kind 区分）、reading_log、user_books（读完状态、评分、想读、按书设置）都按 user_id 分开。以前的数据归 id=1 的管理员。新接口用 `me(r)` 取当前用户，查书带 `visibleSQL(u)`（同时排除回收站里的书、限定书库），管理功能的路由用 `requireAdmin`。
+- 删书是软删除（`books.deleted_at`，文件进 `_回收站`），30 天后 purgeLoop 彻底删除；扫描时找不到的文件标 `files.missing_since`，不马上删。写新查询时记得排除 `deleted_at>0` 的书。
+- 恢复备份：放到 `/data/restore.db`，进程正常退出（退出码 3），靠 compose 的 `restart: unless-stopped` 拉起来，启动时换上。
+- 网页有内容安全策略（`server/api.go` 的 pageCSP，只允许本站脚本文件）：`index.html` 不能写内联脚本（启动前要做的事在 `web/js/boot.js`），不用 eval / new Function / 内联事件属性。书的章节在 blob: iframe 里会继承这个策略，书里夹带的脚本不运行。
