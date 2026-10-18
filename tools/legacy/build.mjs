@@ -25,8 +25,18 @@ const WEB = path.join(ROOT, 'web')
 const OUT = path.join(WEB, 'legacy')
 const TARGET = ['chrome55'] // 安卓 8 自带的网页组件大约是 Chrome 58～62，再留一点余地
 const CSS_TARGETS = { chrome: 55 << 16 }
-// core-js 只打进 Chrome 55 缺的那些（全部打进来 600 多 KB，墨水屏阅读器每次打开都要解析）
-const CORE_JS = compat({ targets: 'chrome 55', modules: ['core-js/stable'] }).list
+// core-js 只打进 Chrome 55 缺的那些（全部打进来 600 多 KB，墨水屏阅读器每次打开都要解析）。
+// 不要的：这几个是把浏览器原生的（快）整个换成 JS 写的（慢很多），只为了规范里的边角情况——
+// 数组长度超过 2³²、稳定排序、JSON 里落单的代理字符、正则的命名分组和 dotAll（书库的代码不用，build 时检查）、
+// URL 的新方法（canParse 等，不用）。换掉以后 push、URL、正则这些每次调用都慢，打开大书时差出好几秒
+const SLOW_REPLACEMENTS = new Set([
+  'es.array.push', 'es.array.unshift', 'es.array.sort', 'es.typed-array.sort', 'es.typed-array.set',
+  'es.json.stringify', 'es.json.parse', 'es.json.raw-json', 'es.json.is-raw-json',
+  'es.regexp.constructor', 'es.regexp.dot-all', 'es.regexp.exec', 'es.regexp.flags', 'es.string.replace',
+  'web.url', 'web.url.to-json', 'web.url.parse', 'web.url.can-parse',
+  'web.url-search-params', 'web.url-search-params.delete', 'web.url-search-params.has', 'web.url-search-params.size',
+])
+const CORE_JS = compat({ targets: 'chrome 55', modules: ['core-js/stable'] }).list.filter(m => !SLOW_REPLACEMENTS.has(m))
 
 const rel = p => path.relative(ROOT, p).split(path.sep).join('/')
 
@@ -179,8 +189,10 @@ for (const b of builds) {
     failed = true
     console.error(`✗ ${b.out}：有旧浏览器不认识的语法：${e.message}\n  ${code.slice(Math.max(0, e.pos - 120), e.pos + 80)}`)
   }
-  // 检查：降级时改写成 new RegExp(...) 的正则里，不能有旧浏览器不认识的写法（后行断言、命名分组、\p{…}）
-  const bad = [...code.matchAll(/new RegExp\("((?:[^"\\]|\\.)*)"/g)].map(m => m[1]).filter(s => /\(\?<[=!a-zA-Z]|\\\\[pP]\{/.test(s))
+  // 检查：降级时改写成 new RegExp(...) 的正则里，不能有旧浏览器不认识的写法（后行断言、命名分组、\p{…}、dotAll 的 s 标志；
+  // core-js 里补这些的模块上面去掉了）
+  const bad = [...code.matchAll(/new RegExp\("((?:[^"\\]|\\.)*)"(?:\s*,\s*"([a-z]*)")?/g)]
+    .filter(m => /\(\?<[=!a-zA-Z]|\\\\[pP]\{/.test(m[1]) || /s/.test(m[2] || '')).map(m => m[1] + (m[2] ? ' /' + m[2] : ''))
   const allowed = b.out === 'pdf.worker.js' ? 2 : 0 // pdf.js：XFA 表单里一个（用不到），SpecialCharRegExp 外面包了 try
   if (bad.length > allowed) {
     failed = true

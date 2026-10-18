@@ -88,10 +88,11 @@ async function ensureSW() {
 
 // 断网时还要打得开网页和阅读器：网页本身、阅读器、这种书要用的内核，经 Service Worker 再取一次（它会顺手存进网页缓存）。
 // 第一次打开书库就存书、或者在这个浏览器里还没读过 PDF 时，这些文件还不在缓存里
-// 兼容旧系统的那一套网页（window.SHUKU_LEGACY，见 boot.js）：整个网页是一个脚本，PDF 另外两个
+// 兼容旧系统的那一套网页（window.SHUKU_LEGACY，见 boot.js）：整个网页是一个脚本，PDF 另外两个。
+// web/js/reader 里加了新文件（阅读器 import 的）要加到这里，不然断网时阅读器打不开
 const LEGACY = !!window.SHUKU_LEGACY
 const READER_FILES = LEGACY ? ['/legacy/polyfills.js', '/legacy/app.js', '/legacy/app.css']
-  : ['reader', 'pdfjs', 'flow', 'pdf', 'comic', 'dict', 'notes', 'sync', 'tts', 'translate'].map(f => `/js/reader/${f}.js`)
+  : ['reader', 'pdfjs', 'flow', 'split', 'pdf', 'comic', 'dict', 'notes', 'sync', 'tts', 'translate'].map(f => `/js/reader/${f}.js`)
 const ENGINE_FILES = {
   foliate: LEGACY ? [] : ['view', 'epubcfi', 'progress', 'overlayer', 'text-walker', 'paginator', 'fixed-layout', 'epub', 'search', 'vendor/zip', 'vendor/fflate', 'mobi', 'fb2', 'comic-book']
     .map(f => `/vendor/foliate-js/${f}.js`),

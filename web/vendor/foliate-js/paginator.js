@@ -98,6 +98,8 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         // ignore all scripts, styles, and their children
         if (name === 'script' || name === 'style') return FILTER_REJECT
         if (node.nodeType === 1) {
+            // 书库：拆开的大章节里占位的空元素（隐藏的，见 web/js/reader/split.js）不算看得见
+            if (node.hasAttribute('data-shuku-ph')) return FILTER_REJECT
             const { left, right } = mapRect(node.getBoundingClientRect())
             // no need to check child nodes if it's completely out of view
             if (right < start || left > end) return FILTER_REJECT
@@ -427,7 +429,14 @@ export class Paginator extends HTMLElement {
         'max-inline-size', 'max-block-size', 'max-column-count',
     ]
     #root = this.attachShadow({ mode: 'closed' })
-    #observer = new ResizeObserver(() => this.render())
+    // 书库：大小和上次排版时一样就不重排（墨水屏上排一节要一两秒）。比如旧浏览器里竖屏单栏的标记（build.mjs 加的
+    // data-portrait）让 #container 变窄：第一次排版已经按变窄以后的大小排了，这里之后还会再通知一次
+    #observer = new ResizeObserver(entries => {
+        const r = entries[entries.length - 1]?.contentRect
+        if (r && this.#renderedSize === `${Math.round(r.width)}x${Math.round(r.height)}`) return
+        this.render()
+    })
+    #renderedSize = null
     #top
     #background
     #container
@@ -686,6 +695,7 @@ export class Paginator extends HTMLElement {
 
         const { width, height } = this.#container.getBoundingClientRect()
         const size = vertical ? height : width
+        this.#renderedSize = `${Math.round(width)}x${Math.round(height)}`
 
         const style = getComputedStyle(this.#top)
         const maxInlineSize = parseFloat(style.getPropertyValue('--_max-inline-size'))
@@ -1007,7 +1017,7 @@ export class Paginator extends HTMLElement {
             const oldIndex = this.#index
             const onLoad = detail => {
                 this.sections[oldIndex]?.unload?.()
-                this.setStyles(this.#styles)
+                this.setStyles(this.#styles, true)
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
             await this.#display(Promise.resolve(this.sections[index].load())
@@ -1097,7 +1107,7 @@ export class Paginator extends HTMLElement {
         }]
         return []
     }
-    setStyles(styles) {
+    setStyles(styles, justLoaded) {
         this.#styles = styles
         const $$styles = this.#styleMap.get(this.#view?.document)
         if (!$$styles) return
@@ -1109,11 +1119,16 @@ export class Paginator extends HTMLElement {
         } else $style.textContent = styles
 
         // NOTE: needs `requestAnimationFrame` in Chromium
-        requestAnimationFrame(() =>
-            this.#background.style.background = getBackground(this.#view.document))
+        // 书库：到下一帧时翻页器可能已经关掉了（换了样式马上去开别的书），#view 是 null
+        requestAnimationFrame(() => {
+            const doc = this.#view?.document
+            if (doc) this.#background.style.background = getBackground(doc)
+        })
 
         // needed because the resize observer doesn't work in Firefox
-        this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
+        // 书库：章节刚载入（justLoaded）时不在这里等字体。这时还没分栏排版，取 document.fonts.ready
+        // 会让 Chrome 先把整章按默认大小排一遍（大章节在墨水屏上要十几秒）；View.load 排好版以后自己会等字体
+        if (!justLoaded) this.#view?.document?.fonts?.ready?.then(() => this.#view?.expand())
     }
     focusView() {
         this.#view.document.defaultView.focus()

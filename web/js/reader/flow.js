@@ -1,16 +1,65 @@
 // 流式电子书：基于 foliate-js（EPUB、MOBI、AZW3、FB2，以及服务器转换成 EPUB 的 TXT 等）
 // 划线（foliate 的 overlayer）、脚注弹窗、繁体转简体也在这里
 
-import '/vendor/foliate-js/view.js'
+import { makeBook } from '/vendor/foliate-js/view.js'
+import { EPUB } from '/vendor/foliate-js/epub.js'
 import { Overlayer } from '/vendor/foliate-js/overlayer.js'
 import * as CFI from '/vendor/foliate-js/epubcfi.js'
 import { h, clear, debounce, toast, isEInk } from '../ui.js'
-import { api, download } from '../api.js'
+import { api, download, net } from '../api.js'
 import { isNative, callJSON } from '../native.js'
 import { splitSentences } from './tts.js'
 import { around } from './dict.js'
 import { colorOf } from './notes.js'
 import { targetLang, loadDefaultLang, translateTexts, needsTranslation } from './translate.js'
+import { splitBigSections, NO_SPLIT } from './split.js'
+
+// 超过多大的章节拆开排版（split.js）：墨水屏、旧浏览器排一节大的要几十秒，拆得细一些
+// （翻到下一段时要排一段的版，一段二十几 KB 在墨水屏上一两秒；TXT 转出来的章节一般不到这么大）
+const splitSizes = () => isEInk() || window.SHUKU_LEGACY ? { limit: 48e3, partSize: 24e3 } : { limit: 400e3, partSize: 200e3 }
+
+// 书在书库上的 zip 地址（按需取单个文件用）：EPUB 原文件，或者服务器转换出来的 EPUB（TXT 等）
+function zipOf(info) {
+  const [path, q] = String(info.url || '').split('?')
+  if (/\/epub$/.test(path)) return { base: path + '/zip', q: q ? '?' + q : '' }
+  if (/\/raw$/.test(path) && info.format === 'epub') return { base: path.slice(0, -4) + '/zip', q: '' }
+  return null
+}
+
+// 屏幕多大（设备像素，竖着拿的宽 x 高）：书里的大图缩到这么大
+function imageMax() {
+  const dpr = window.devicePixelRatio || 1
+  const w = Math.round(Math.min(screen.width, screen.height) * dpr), h = Math.round(Math.max(screen.width, screen.height) * dpr)
+  return w >= 200 && h >= 200 ? `max=${Math.min(w, 8000)}x${Math.min(h, 8000)}` : ''
+}
+
+// 按需从书库取书里的文件（书库在 NAS 上解压）：先拿文件列表，章节、图片用到时再取。
+// 大章节由书库拆好（server/zipsplit.go），列表里带着拆法，只取要看的那一段
+async function openRemote({ base, q }) {
+  const { limit, partSize } = splitSizes()
+  const split = `split=${limit},${partSize}`
+  const withQ = extra => (q ? q + '&' : '?') + extra
+  // inline=1：打开书一定要读的 container.xml、OPF、目录跟着列表一起来，少等几个来回
+  const list = await api(base + withQ(split + '&inline=1'))
+  const inline = list.inline || {}
+  const sizes = new Map((list.entries || []).map(([n, s]) => [n, s]))
+  if (!sizes.has('META-INF/container.xml')) throw new Error('不是 EPUB')
+  const url = name => base + '/' + name.split('/').map(encodeURIComponent).join('/')
+  // 墨水屏、旧浏览器：比屏幕大的图让书库缩到屏幕大小再传（server/zipimage.go）。
+  // 几千像素的插图在设备上解码一张就要几十 MB 内存，内存小的阅读器翻到几张就卡死
+  const max = isEInk() || window.SHUKU_LEGACY ? imageMax() : ''
+  const get = async (name, text) => {
+    if (!sizes.has(name)) return null // 书里没有的（加密说明之类）不用去问
+    if (text && typeof inline[name] === 'string') { const t = inline[name]; delete inline[name]; return t }
+    const shrink = max && !text && /\.(jpe?g|png|webp)$/i.test(name)
+    const res = await api(url(name) + (shrink ? withQ(max) : q), { raw: true })
+    return text ? res.text() : res.blob()
+  }
+  const book = await new EPUB({ loadText: name => get(name, true), loadBlob: name => get(name, false), getSize: name => sizes.get(name) ?? 0 }).init()
+  // 书库是旧版本（没有 splits）：照旧在这边拆（要先取整节）
+  const remote = list.splits ? { plans: list.splits, loadPart: async (name, j) => (await api(url(name) + withQ(`${split}&part=${j}`), { raw: true })).text() } : null
+  return { book, remote }
+}
 
 const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dd,dt,td,th,figcaption,pre,div'
 
@@ -103,27 +152,43 @@ export class Engine {
     this.shell = shell
     this.orig = new WeakMap() // 繁转简前的原文，关掉时换回来
     this.secIndex = new Map() // 位置 → 第几节
+    this.split = NO_SPLIT // 大章节拆开以后的节序号换算（手表、服务器用的是原来的节序号）
   }
 
   async open(info, saved) {
     const loading = this.shell.loading
-    const blob = await download(info.url, p => (loading.textContent = `正在下载 ${Math.round(p * 100)}%`))
-    loading.textContent = info.url.includes('/epub') ? '正在排版…' : '正在打开…'
+    let book = null
+    // 在线时按需取书里的文件，不先下载整本（见 server/zipentry.go）：墨水屏、旧浏览器上一律这样
+    // （整本下载下来要在设备上用 JS 解压，几 MB 的书也要等很久），别的设备 40 MB 以上的（带很多图的）。
+    // 断网、书库是旧版本时照旧下载整本
+    const zip = zipOf(info)
+    const size = (info.files || []).find(f => f.id === info.file_id)?.size || 0
+    if (zip && net.route !== 'offline' && (isEInk() || window.SHUKU_LEGACY || size >= 40e6)) {
+      try {
+        const r = await openRemote(zip)
+        book = r.book; this.remoteSplit = r.remote; this.remote = true
+      } catch (e) { console.warn('按需读取没成功，改成下载整本', e) }
+    }
+    if (!book) {
+      const blob = await download(info.url, p => (loading.textContent = `正在下载 ${Math.round(p * 100)}%`))
+      loading.textContent = info.url.includes('/epub') ? '正在排版…' : '正在打开…'
+      book = await makeBook(new File([blob], info.name))
+    }
     // 1.0.0.5 以前的 App 会把每一章的内嵌页面（blob: 地址）当成外部链接拦掉，这类书一直打不开：过几秒还没打开就提示更新 App
     const oldApp = isNative && ((callJSON('appInfo') || {}).versionCode || 0) < 5
     const hint = oldApp ? setTimeout(() => this.shell.oldAppHint?.(), 6000) : 0
     try {
-      await this.load(blob, info, saved)
+      await this.load(book, info, saved)
     } finally {
       clearTimeout(hint)
     }
   }
 
-  async load(blob, info, saved) {
-    const file = new File([blob], info.name)
+  async load(book, info, saved) {
     const view = this.view = document.createElement('foliate-view')
     this.shell.stage.append(view)
-    await view.open(file)
+    try { this.split = await splitBigSections(book, splitSizes(), this.remoteSplit) } catch (e) { console.warn(e) }
+    await view.open(book)
     this.fxl = view.isFixedLayout
     if (this.fxl) this.kind = 'comic-fxl'
     // 搜索、听书、脚注直接读章节内容（不排版）：繁转简打开时也转换
@@ -139,6 +204,7 @@ export class Engine {
       this.last = e.detail
       this.emitRelocate()
       if (this.trOn) this.translateSoon()
+      if (this.remote) this.prefetch(e.detail.section?.current)
     })
     view.addEventListener('load', e => this.onDocLoad(e.detail.doc))
     // 划线：每一节排好版时把这一节的划线画上
@@ -167,9 +233,10 @@ export class Engine {
     const sec = /^sec:(\d+):?([\d.]*)/.exec(String(target || ''))
     if (target && !String(target).startsWith('epubcfi(')) target = null
     if (sec) {
-      // 手表按章节读到的位置：第几节 + 节内比例
+      // 手表按章节读到的位置：第几节 + 节内比例（原来的节序号，大章节拆开了要换算）
       await view.init({ showTextStart: true })
-      await view.renderer.goTo({ index: +sec[1], anchor: Math.min(1, +sec[2] || 0) }).catch(() => {})
+      const p = this.split.toPart(+sec[1], Math.min(1, +sec[2] || 0))
+      await view.renderer.goTo({ index: p.index, anchor: p.frac }).catch(() => {})
     }
     else if (target) {
       await view.init({ lastLocation: target }).catch(() => view.init({ showTextStart: true }))
@@ -177,6 +244,22 @@ export class Engine {
     }
     else if (saved?.percent > 0) { await view.init({ showTextStart: true }); await view.goToFraction(saved.percent) }
     else await view.init({ showTextStart: true })
+  }
+
+  // 按需取书时，先把后面两节（拆开的大章节是后两段）的文字取下来放进浏览器缓存：
+  // 翻到下一节时不用等网络；墨水屏阅读器的无线网休眠了、一时连不上，也能接着往下读一会儿
+  prefetch(index) {
+    if (index == null || index === this.prefetchedFrom) return
+    this.prefetchedFrom = index
+    const book = this.view?.book
+    this.prefetched ||= new Set()
+    for (const k of [index + 1, index + 2]) {
+      const s = book?.sections?.[k]
+      const href = s?.textHref || s?.id
+      if (!href || this.prefetched.has(href) || s.linear === 'no') continue
+      this.prefetched.add(href)
+      Promise.resolve(book.loadText(href)).catch(() => this.prefetched.delete(href))
+    }
   }
 
   // 书的结构变了（比如 TXT 按新规则重新分了章）：记下的位置会落到别的章节去，改按百分比找回大概的位置
@@ -204,7 +287,8 @@ export class Engine {
     const loc = d.location
     if (!loc?.total) return null
     const fr = this.view.getSectionFractions?.() || []
-    const end = fr[(d.section?.current ?? -2) + 1]
+    const cur = d.section?.current
+    const end = cur == null ? null : fr[this.split.lastPartOf(cur) + 1] // 拆开的大章节：算到整章的末尾
     return { pos: loc.current, total: loc.total, chapterEnd: end != null ? Math.round(end * loc.total) : null, jump: 25 }
   }
 
@@ -267,26 +351,32 @@ export class Engine {
       ${this.trCSS(t)}
       ::selection { background: ${t.dark ? 'rgba(134,182,203,.35)' : 'rgba(47,111,143,.22)'}; }
       aside[epub|type~="footnote"], aside[epub|type~="endnote"] { display: none; }
+      [data-shuku-ph] { display: none !important; }
     `
   }
 
   applyPrefs(p, t) {
     const r = this.view?.renderer
     if (!r) return
+    // 只改有变化的：翻页器每设一次属性、每换一次样式，都要把整章重新排一遍
+    // （打开书、每分钟检查夜间模式时都会走到这里；大章节在墨水屏上排一遍要好几秒）
+    if (r !== this.prefsFor) { this.prefsFor = r; this.appliedCSS = null }
+    const set = (k, v) => { if (r.getAttribute(k) !== v) r.setAttribute(k, v) }
     if (this.fxl) {
-      r.setAttribute('zoom', p.fxlZoom === 'fit-width' ? 'fit-width' : 'fit-page')
+      set('zoom', p.fxlZoom === 'fit-width' ? 'fit-width' : 'fit-page')
       return
     }
-    r.setAttribute('flow', p.flow)
+    set('flow', p.flow)
     const margins = [16, 40, 64, 96][p.margin] ?? 40
     const narrow = innerWidth < 700
-    r.setAttribute('margin', (narrow ? 28 : 44) + 'px')
-    r.setAttribute('gap', (narrow ? Math.max(6, margins / 4) : margins / 8 + 3) + '%')
-    r.setAttribute('max-inline-size', Math.max(480, 860 - margins * 2) + 'px')
-    r.setAttribute('max-column-count', p.columns === '1' ? '1' : '2')
-    if (p.animated && !isEInk()) r.setAttribute('animated', '') // 墨水屏不要翻页动画（一路残影）
-    else r.removeAttribute('animated')
-    r.setStyles?.(this.css(p, t))
+    set('margin', (narrow ? 28 : 44) + 'px')
+    set('gap', (narrow ? Math.max(6, margins / 4) : margins / 8 + 3) + '%')
+    set('max-inline-size', Math.max(480, 860 - margins * 2) + 'px')
+    set('max-column-count', p.columns === '1' ? '1' : '2')
+    const animated = !!p.animated && !isEInk() // 墨水屏不要翻页动画（一路残影）
+    if (animated !== r.hasAttribute('animated')) animated ? r.setAttribute('animated', '') : r.removeAttribute('animated')
+    const css = this.css(p, t)
+    if (css !== this.appliedCSS) { this.appliedCSS = css; r.setStyles?.(css) }
     // overlayer 的划线颜色在深色主题下淡一点
     this.view.style.setProperty('--overlayer-highlight-opacity', t.dark ? '.28' : '.34')
     if (!this.t2sFailed && !!p.t2s !== !!this.t2sOn) this.setT2S(!!p.t2s)
@@ -454,7 +544,10 @@ export class Engine {
   prev() { return this.view?.prev() }
   goTo(target) {
     const sec = /^sec:(\d+):?([\d.]*)/.exec(String(target ?? ''))
-    if (sec) return this.view?.renderer.goTo({ index: +sec[1], anchor: Math.min(1, +sec[2] || 0) }).catch(() => {})
+    if (sec) {
+      const p = this.split.toPart(+sec[1], Math.min(1, +sec[2] || 0))
+      return this.view?.renderer.goTo({ index: p.index, anchor: p.frac }).catch(() => {})
+    }
     return this.view?.goTo(target).catch(() => {})
   }
   goToFraction(f) { return this.view?.goToFraction(f) }
@@ -542,6 +635,8 @@ export class Engine {
       if (!q) return
       const status = h('p', { class: 'muted', style: { padding: '8px 18px', fontSize: '12.5px' } }, '搜索中…')
       results.append(status)
+      // 按需取书时先用书库的全文索引找在哪几章（在设备上一章一章取下来搜，几百章的书要好几分钟）
+      if (this.remote && await this.searchOnServer(q, results, status, () => my !== token)) return
       let n = 0
       for await (const r of this.view.search({ query: q })) {
         if (my !== token) return
@@ -564,13 +659,37 @@ export class Engine {
     setTimeout(() => input.focus(), 50)
   }
 
+  // 书库的全文索引里搜这本书：列出在哪几章（每章一条），点了到那一章里定位。这本书还没建好索引时返回 false，自己搜
+  async searchOnServer(q, results, status, stale) {
+    let r
+    try { r = await api(`/api/files/${this.shell.info.file_id}/search?q=${encodeURIComponent(q)}`) } catch { return false }
+    if (stale()) return true
+    if (!r?.indexed) return false
+    for (const it of r.hits || []) {
+      const go = async () => {
+        this.shell.markJump(); this.shell.closeOverlays(); this.shell.showUI(false)
+        if (!await this.find(it.match || q, it.sec)) toast(`没在这一章找到“${q}”`, { duration: 2000 })
+      }
+      const sn = it.snippet || '', m = it.match || q, k = sn.indexOf(m)
+      results.append(h('div', { class: 'hit', tabindex: 0, role: 'button', onclick: go, onkeydown: e => { if (e.key === 'Enter') go() } },
+        it.label ? h('div', { style: { fontSize: '12px', opacity: .6 } }, this.tr(it.label)) : null,
+        k < 0 ? sn : [sn.slice(0, k), h('mark', null, m), sn.slice(k + m.length)]))
+    }
+    status.textContent = r.hits?.length ? `在 ${r.sections} 章里找到` : '没有找到'
+    return true
+  }
+
   // ---------- 搜索结果跳转 ----------
   async find(q, sec) {
     if (sec >= 0) {
-      await this.view.goTo(sec).catch(() => {})
-      for await (const r of this.view.search({ query: q, index: sec })) {
-        if (r?.cfi) { await this.view.goTo(r.cfi); this.view.clearSearch?.(); return true }
-        if (r === 'done') break
+      // 服务器给的是原来的节序号：大章节拆开了就在拆出来的几段里依次找
+      const parts = this.split.partsOf(sec)
+      await this.view.goTo(parts[0]).catch(() => {})
+      for (const index of parts) {
+        for await (const r of this.view.search({ query: q, index })) {
+          if (r?.cfi) { await this.view.goTo(r.cfi); this.view.clearSearch?.(); return true }
+          if (r === 'done') break
+        }
       }
       return false
     }
@@ -654,7 +773,8 @@ export class Engine {
     const frac = before / total
     const fr = this.view.getSectionFractions?.() || []
     const a = fr[key] ?? 0, b = fr[key + 1] ?? 1
-    return { location: `sec:${key}:${frac.toFixed(4)}`, fraction: Math.min(1, a + (b - a) * frac) }
+    const o = this.split.toOrig(key, frac) // 服务器和手表按原来的节序号
+    return { location: `sec:${o.index}:${o.frac.toFixed(4)}`, fraction: Math.min(1, a + (b - a) * frac) }
   }
 
   ttsHighlight(seg) {

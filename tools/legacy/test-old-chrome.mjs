@@ -123,7 +123,7 @@ if (samples) await addSamples()
 const books = (await api('/api/books?limit=200&sort=title')).items || []
 // 放了测试书时优先用刚放进去的（书库里原有的书可能是扫描版 PDF 之类，没有文字层）
 const fmtOf = b => [].concat(b.formats || []).join(',')
-const pick = (re) => (samples && books.find(b => re.test(fmtOf(b)) && b.created_at >= t0)) || books.find(b => re.test(fmtOf(b)))
+const pick = (re, ok = () => true) => (samples && books.find(b => re.test(fmtOf(b)) && ok(b) && b.created_at >= t0)) || books.find(b => re.test(fmtOf(b)) && ok(b))
 console.log(`书库里有 ${books.length} 本书`)
 
 async function step(name, fn) {
@@ -188,7 +188,7 @@ async function openReader(name, book, after) {
   })
 }
 
-const epub = pick(/epub/i)
+const epub = pick(/epub/i, b => !/整本/.test(b.title))
 await openReader('epub', epub, async () => {
   const text = await evaluate("(() => { const v = document.querySelector('foliate-view'); const docs = v && v.renderer && v.renderer.getContents ? v.renderer.getContents() : []; return docs.map(d => d.doc.body.textContent).join('').length })()")
   if (!(text > 20)) throw new Error('EPUB 正文没有显示出来（' + text + '）')
@@ -204,6 +204,15 @@ await openReader('pdf', pick(/pdf/i), async () => {
   if (!(t > 5)) throw new Error('PDF 文字层是空的')
 })
 await openReader('comic', pick(/cbz|cbr|zip/i), async () => { await key('ArrowLeft', 37); await sleep(1500); await shot('comic-2') })
+// 整本写在一个文件里的大章节：书库拆成几段（server/zipsplit.go），只取要看的那一段；跳到后面的段也能显示
+await openReader('big', samples ? books.find(b => /整本/.test(b.title)) : null, async () => {
+  const n = await evaluate("document.querySelector('foliate-view').book.sections.length")
+  if (!(n >= 3)) throw new Error('大章节没有拆开（' + n + ' 节）')
+  await evaluate("document.querySelector('foliate-view').goToFraction(0.7)")
+  await waitFor("(() => { const v = document.querySelector('foliate-view'); const c = v.renderer.getContents()[0]; return c && c.index > 0 && c.doc.body.textContent.indexOf('第') >= 0 })()", 30000, '跳到后面的段')
+  await sleep(1500)
+  await shot('big-2')
+})
 
 await step('回到书架', async () => {
   await evaluate("location.hash = '#/'")
@@ -251,6 +260,8 @@ async function addSamples() {
     '旧浏览器测试-活着.txt': Buffer.from(['第一章', '我比现在年轻十岁的时候，获得了一个游手好闲的职业。'.repeat(30), '第二章', '那天傍晚，我走到了一棵大树下。'.repeat(30)].join('\n'), 'utf8'),
     '旧浏览器测试-深度学习.pdf': makePdf(['Shuku legacy test page one', 'Neural networks learn representations', 'from data, layer by layer.'], 3),
     '旧浏览器测试-漫画 第1卷.cbz': makeZip([1, 2, 3].map(n => [`${String(n).padStart(3, '0')}.png`, makePng(300, 450, n)])),
+    // 整本写在一个文件里（100 多 KB 的一节）：墨水屏上由书库拆开
+    '旧浏览器测试-整本一个文件.epub': makeEpub('旧浏览器测试整本一个文件', '佚名', [['全书', Array.from({ length: 360 }, (_, i) => `第${i + 1}段：` + '天下大势，分久必合，合久必分。'.repeat(8))]]),
   }
   for (const [name, data] of Object.entries(files)) {
     const r = await fetch(base + '/api/upload?path=' + encodeURIComponent(name), { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: data })
@@ -261,7 +272,7 @@ async function addSamples() {
   for (let i = 0; i < 120; i++) {
     items = (await api('/api/books?limit=200')).items || []
     const have = f => items.some(b => [].concat(b.formats || []).join(',').includes(f))
-    if (['epub', 'txt', 'pdf', 'cbz'].every(have)) break
+    if (['epub', 'txt', 'pdf', 'cbz'].every(have) && items.some(b => /整本/.test(b.title))) break
     if (i === 119) console.log('  （测试书没有全部入库，后面缺的跳过）')
     await sleep(1000)
   }
@@ -317,7 +328,8 @@ function makeEpub(title, author, chapters) {
     ['mimetype', 'application/epub+zip'],
     ['META-INF/container.xml', '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'],
     ['content.opf', `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">shuku-legacy-test</dc:identifier><dc:title>${title}</dc:title><dc:creator>${author}</dc:creator><dc:language>zh</dc:language></metadata><manifest>${items}</manifest><spine>${spine}</spine></package>`],
-    ...chapters.map(([t, text], i) => [`c${i}.xhtml`, `<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${t}</title></head><body><h2>${t}</h2><p>${text}</p><p>${text}</p></body></html>`]),
+    // 正文是字符串：两段一样的；是数组：每个一段
+    ...chapters.map(([t, text], i) => [`c${i}.xhtml`, `<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${t}</title></head><body><h2>${t}</h2>${(Array.isArray(text) ? text : [text, text]).map(x => `<p>${x}</p>`).join('\n')}</body></html>`]),
   ])
 }
 

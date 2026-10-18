@@ -47,4 +47,6 @@
 - 页面不能比屏幕宽（墨案 inkPad X 是 936x1248 网页像素，用的是电脑那种带侧栏的排版）：网格里的 `fr` 一律写成 `minmax(0, 1fr)`（光写 `1fr` 会被宽的内容撑开，旧的网页组件里整页变宽、能左右拖，固定定位的阅读器跟着排到屏幕外面一片空白）；`html` 上有 `overflow-x: hidden`，viewport 有 `minimum-scale=1`。`test-old-chrome.mjs` 默认按 936x1248 检查，再看 600x800、702x936、1248x936（`--app` 模拟 App 的原生桥，打包时用这个）。
 - foliate 的 `paginator.js` 样式里有嵌套和容器查询（竖屏单栏靠它），旧浏览器不认识，`build.mjs` 的 PATCHES 展开成普通写法、竖屏由脚本标 `data-portrait`；更新 foliate-js 时 PATCHES 对不上会报错，照着改。
 - `/api/assets` 默认不列 `/legacy/`，`?legacy=1` 才列（App 在网页组件旧时才缓存这一套）。
+- 墨水屏、旧浏览器在线时一律按需取书（`server/zipentry.go`：`/zip` 文件列表、`/zip/{name}` 单个文件；`?split=` 大章节由 `zipsplit.go` 拆段、`?part=j` 取一段；`?max=宽x高` 大图由 `zipimage.go` 缩小；`?inline=1` 列表里带上 container.xml、OPF、目录），断网时下载整本、在设备上拆（`web/js/reader/split.js`）。两边拆法一样：前面的子元素换成占位的空元素，每个元素的位置不变，CFI 和不拆的设备通用；改拆法时两边一起改，跑 `go test -run TestPlanSplit` 和 test-old-chrome（`--samples` 里有整本一个文件的书）。按需取书时书内搜索走 `/api/files/{fid}/search`（全文索引）。改了阅读器、按需取书以后用 `tools/legacy/perf-open.mjs`（Chrome 64，CPU 慢 20 倍模拟墨水屏）拿大书量打开速度，和改之前比。
+- foliate-js 有书库自己的改动（`epub.js`、`paginator.js` 里注释写着“书库”）：更新 foliate-js 时保留，build.mjs 的 PATCHES 对不上会报错。
 - 墨水屏模式是 `html.eink`（App 认出墨水屏：`EInk.kt`；设置 → 外观）。新写样式时想着墨水屏：别用灰字、阴影、半透明、动画，`html.eink` 下要清楚；墨水屏阅读一律按页翻。字号一律写成 `calc(Npx * var(--ui-scale, 1))`（界面字号设置靠它）。

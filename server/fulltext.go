@@ -453,6 +453,21 @@ func saveSections(f *File, secs []Section) {
 	os.WriteFile(p, buf.Bytes(), 0o644)
 }
 
+// 正文缓存被清理过（设置 → 存储里一键清理）时重新抽一遍正文再存上，搜索片段、章节列表不会因此变空
+func sectionsFor(f *File) []Section {
+	if secs := loadSections(f); secs != nil {
+		return secs
+	}
+	secs, err := extractSections(f)
+	if err != nil {
+		return nil
+	}
+	if f.Hash != "" {
+		saveSections(f, secs)
+	}
+	return secs
+}
+
 func loadSections(f *File) []Section {
 	fh, err := os.Open(textCachePath(f))
 	if err != nil {
@@ -813,7 +828,7 @@ func handleFulltext(w http.ResponseWriter, r *http.Request) {
 			secs, ok := secCache[x.file]
 			if !ok {
 				if f, err := getFile(x.file); err == nil && f.MissingSince == 0 {
-					secs = loadSections(f)
+					secs = sectionsFor(f)
 				}
 				secCache[x.file] = secs
 			}
@@ -839,6 +854,75 @@ func handleFulltext(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"books": out, "status": fulltextStatus()})
+}
+
+// 一本书里搜（阅读器的“搜索”）：按需取书的墨水屏、旧手机上，在设备上一章一章取下来搜要几分钟，
+// 用书库的全文索引一下就找到在哪几章；点了再到那一章里定位。这本书还没建好索引时 indexed=false，阅读器自己搜
+func handleFileSearch(w http.ResponseWriter, r *http.Request) {
+	f, ok := visibleFile(w, r)
+	if !ok {
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	fq := ftsQuery(q)
+	if !ftAvailable || fq == "" || utf8.RuneCountInString(q) < 2 {
+		writeJSON(w, 200, map[string]any{"indexed": false})
+		return
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM ft_chunks WHERE file_id=?`, f.ID).Scan(&n)
+	if n == 0 {
+		writeJSON(w, 200, map[string]any{"indexed": false})
+		return
+	}
+	rows, err := db.Query(`SELECT c.sec,c.part,c.label FROM ft JOIN ft_chunks c ON c.id=ft.rowid WHERE ft MATCH ? AND c.file_id=? ORDER BY c.sec,c.part LIMIT 2000`, fq, f.ID)
+	if err != nil {
+		errJSON(w, 400, "搜索词格式不正确")
+		return
+	}
+	type secHit struct {
+		Sec     int    `json:"sec"`
+		Label   string `json:"label"`
+		Snippet string `json:"snippet"`
+		Match   string `json:"match"`
+		Count   int    `json:"count"` // 这一章里有几块对上了
+		part    int
+	}
+	var hits []*secHit
+	for rows.Next() {
+		var sec, part int
+		var label string
+		rows.Scan(&sec, &part, &label)
+		if len(hits) > 0 && hits[len(hits)-1].Sec == sec {
+			hits[len(hits)-1].Count++
+			continue
+		}
+		hits = append(hits, &secHit{Sec: sec, Label: label, Count: 1, part: part})
+	}
+	rows.Close()
+	// 每章截一段上下文（取前 300 章）
+	secs := sectionsFor(f)
+	bySec := map[int]string{}
+	for _, s := range secs {
+		bySec[s.Sec] = s.Text
+	}
+	out := []*secHit{}
+	for _, h := range hits {
+		if len(out) >= 300 {
+			break
+		}
+		if text, ok := bySec[h.Sec]; ok {
+			chunks := chunksOf(text)
+			if h.part < len(chunks) {
+				h.Snippet, h.Match, _ = makeSnippet(chunks[h.part], q)
+			}
+		}
+		if h.Snippet == "" {
+			continue // 几个词分散在一块里，找不到连续的片段
+		}
+		out = append(out, h)
+	}
+	writeJSON(w, 200, map[string]any{"indexed": true, "hits": out, "sections": len(hits)})
 }
 
 func handleFulltextRebuild(w http.ResponseWriter, r *http.Request) {

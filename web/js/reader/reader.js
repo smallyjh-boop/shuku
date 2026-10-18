@@ -159,6 +159,9 @@ class Reader {
   async start() {
     this.buildDOM()
     setActiveBook(this.id)
+    // 进度、书签和书的信息一起问（一个一个等，墨水屏上要多等一两秒）
+    const progress = api(`/api/books/${this.id}/progress`).then(r => ({ r }), e => ({ e }))
+    const marks = api(`/api/books/${this.id}/bookmarks`).catch(() => [])
     try {
       this.info = await api(`/api/books/${this.id}/read${this.params.get('file') ? '?file=' + this.params.get('file') : ''}`)
     } catch (e) { return e.status === 404 ? this.gone(e.message) : this.fail(e.message) }
@@ -178,8 +181,9 @@ class Reader {
     this.root.dataset.kind = this.kind
     // 进度：本机记的和服务器上的，用新的那个
     const local = this.localPos()
-    let server = null
-    try { server = await api(`/api/books/${this.id}/progress`) } catch (e) { if (e.status === 404) return this.gone(e.message) }
+    const pr = await progress
+    if (pr.e?.status === 404) return this.gone(pr.e.message)
+    const server = pr.r || null
     if (this.destroyed) return
     this.base = server ? (server.updated_at || 0) : local?.base
     let saved = server && local ? ((local.at || 0) > (server.updated_at || 0) * 1000 + 2000 ? local : server) : (local || server)
@@ -191,7 +195,7 @@ class Reader {
     // 从笔记、搜索结果跳过来：直接打开到那个位置
     const at = this.params.get('at')
     if (at) { saved = { location: at }; this.sentLoc = null }
-    const all = await api(`/api/books/${this.id}/bookmarks`).catch(() => [])
+    const all = await marks
     this.bookmarks = all.filter(b => b.kind !== 'highlight')
     this.notes = new Notes(this)
     this.notes.setAll(all.filter(b => b.kind === 'highlight'))
@@ -898,6 +902,8 @@ class Reader {
   }
 
   drawPanel() {
+    // 面板打开着才画：目录可能有几千条（TXT 一章一条），墨水屏上打开书时光画目录就要一两秒；打开面板时再画
+    if (!this.panel.classList.contains('show')) return
     const tabs = this.engine?.panelTabs?.() || [['toc', '目录'], ['bm', '书签']]
     if (!this.ptab || !tabs.some(t => t[0] === this.ptab)) this.ptab = tabs[0][0]
     fill(this.ptabs, ...tabs.map(([k, l]) => h('button', { class: this.ptab === k ? 'on' : '', type: 'button', role: 'tab', 'aria-selected': this.ptab === k ? 'true' : 'false', onclick: () => { this.ptab = k; this.drawPanel() } }, l)))

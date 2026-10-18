@@ -656,6 +656,55 @@ def test_fulltext():
     check("单字提示至少两个字", r["books"] == [] and r.get("hint"), r)
 
 
+def test_remote_reading():
+    """按需取书（墨水屏、旧浏览器在线时）：书里的文件列表、大章节拆段、大图缩小、书内搜索（server/zip*.go）"""
+    section("按需取书：文件列表、大章节拆段、大图缩小、书内搜索")
+    from PIL import Image
+    b2 = book_by_title("三体Ⅱ·黑暗森林")
+    info = j("GET", f"/api/books/{b2['id']}/read")
+    fid = info["file_id"]
+    lst = j("GET", f"/api/files/{fid}/zip?split=4000,4000&inline=1")
+    names = {n for n, _ in lst["entries"]}
+    check("文件列表：书里的文件和解压后的大小", "META-INF/container.xml" in names and all(s > 0 for n, s in lst["entries"] if n.endswith(".xhtml")), sorted(names)[:8])
+    inl = lst.get("inline") or {}
+    check("文件列表带上 container.xml、OPF、目录", "META-INF/container.xml" in inl and any(n.endswith(".opf") for n in inl) and len(inl) >= 3, list(inl))
+    # 拆段：这里用很小的拆法（4 KB 一段），示例书的章节就会拆开
+    splits = lst.get("splits") or {}
+    check("大章节给出拆法（几段、每段多大、正文那一层在哪）", splits and all(len(p["ranges"]) >= 2 and len(p["sizes"]) == len(p["ranges"]) and p["steps"] for p in splits.values()), list(splits)[:3])
+    if splits:
+        name, plan = next(iter(splits.items()))
+        whole = api("GET", f"/api/files/{fid}/zip/{urllib.parse.quote(name)}").text
+        parts = [api("GET", f"/api/files/{fid}/zip/{urllib.parse.quote(name)}?split=4000,4000&part={k}").text for k in range(len(plan["ranges"]))]
+        ok = True
+        for k, t in enumerate(parts):
+            root = ET.fromstring(t.encode())
+            box = root
+            for st in plan["steps"]:
+                box = list(box)[st // 2 - 1]
+            kids = list(box)
+            a, z = plan["ranges"][k]
+            # 这一段前面的都是占位的空元素，正文的子元素个数、位置和原文一样
+            ok = ok and all(c.get("data-shuku-ph") is not None for c in kids[:a]) and all(c.get("data-shuku-ph") is None for c in kids[a:z])
+        strip = lambda t: re.sub(r"<[^>]+>|\s+", "", t)
+        check("每一段都是完整的文档，前面的子元素换成占位，元素的位置不变", ok)
+        check("各段的正文合起来就是整章", strip("".join(re.sub(r'<i data-shuku-ph=""[^>]*/>', "", p) for p in parts)).count("晴朗") == strip(whole).count("晴朗") > 0)
+        check("拆开的段：浏览器能缓存、压缩传输", api("GET", f"/api/files/{fid}/zip/{urllib.parse.quote(name)}?split=4000,4000&part=1", headers={"Accept-Encoding": "gzip"}).headers.get("Content-Encoding") == "gzip")
+    check("没拆开的不给段", api("GET", f"/api/files/{fid}/zip/META-INF/container.xml?split=4000,4000&part=1", 404).status_code == 404)
+    # 大图缩小：拿书里最大的一张图，按很小的屏幕要
+    imgs = sorted([(s, n) for n, s in lst["entries"] if re.search(r"\.(jpe?g|png)$", n, re.I)], reverse=True)
+    if imgs:
+        n = imgs[0][1]
+        orig = Image.open(io.BytesIO(api("GET", f"/api/files/{fid}/zip/{urllib.parse.quote(n)}").content))
+        r = api("GET", f"/api/files/{fid}/zip/{urllib.parse.quote(n)}?max=200x300")
+        small = Image.open(io.BytesIO(r.content))
+        check("比屏幕大的图缩到屏幕大小", small.width <= 200 and small.height <= 300 and (orig.width > 200 or orig.height > 300), (orig.size, small.size))
+    # 书内搜索（全文索引）
+    r = j("GET", f"/api/files/{fid}/search?q=" + urllib.parse.quote("晴朗的早晨"))
+    check("书内搜索：用全文索引找出在哪几章", r.get("indexed") and r["hits"] and all("sec" in h and "晴朗" in h["snippet"] for h in r["hits"]), r)
+    r = j("GET", f"/api/files/{fid}/search?q=" + urllib.parse.quote("的"))
+    check("书内搜索：一个字的让阅读器自己搜", r.get("indexed") is False)
+
+
 def test_reading():
     section("阅读：格式、进度、书签、统计")
     b2 = book_by_title("三体Ⅱ·黑暗森林")
@@ -2865,7 +2914,7 @@ def main():
             time.sleep(3600)
     try:
         setup()
-        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_dict, test_fetch_discover, test_v7_family_api]:
+        for t in [test_auth, test_ingest, test_search, test_fulltext, test_remote_reading, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_dict, test_fetch_discover, test_v7_family_api]:
             try:
                 t()
             except Exception as e:

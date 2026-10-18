@@ -76,6 +76,12 @@ func routes() http.Handler {
 
 	mux.HandleFunc("GET /api/files/{fid}/raw", a(handleRaw))
 	mux.HandleFunc("GET /api/files/{fid}/epub", a(handleConvertedEPUB))
+	// 阅读器按需取书里的单个文件（zipentry.go）
+	mux.HandleFunc("GET /api/files/{fid}/zip", a(handleZipList(false)))
+	mux.HandleFunc("GET /api/files/{fid}/zip/{name...}", a(handleZipEntry(false)))
+	mux.HandleFunc("GET /api/files/{fid}/epub/zip", a(handleZipList(true)))
+	mux.HandleFunc("GET /api/files/{fid}/epub/zip/{name...}", a(handleZipEntry(true)))
+	mux.HandleFunc("GET /api/files/{fid}/search", a(handleFileSearch)) // 一本书里搜（用全文索引）
 	mux.HandleFunc("GET /api/files/{fid}/pdf", a(handleConvertedPDF))
 	mux.HandleFunc("GET /api/files/{fid}/pages", a(handlePages))
 	mux.HandleFunc("GET /api/files/{fid}/pages/{n}", a(handlePage))
@@ -716,17 +722,22 @@ func handleConvertedEPUB(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	b, _ := getBook(f.BookID)
-	title, author := filepath.Base(f.Path), ""
-	if b != nil {
-		title, author = b.Title, b.Author
-	}
-	out, err := ensureEPUB(f.Path, f.Format, title, author)
+	out, err := convertedEPUBOf(f)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
 	}
 	serveFile(w, r, out, "epub", "")
+}
+
+// 这个文件转换成的 EPUB（缓存里有就直接用）
+func convertedEPUBOf(f *File) (string, error) {
+	b, _ := getBook(f.BookID)
+	title, author := filepath.Base(f.Path), ""
+	if b != nil {
+		title, author = b.Title, b.Author
+	}
+	return ensureEPUB(f.Path, f.Format, title, author)
 }
 
 func handleConvertedPDF(w http.ResponseWriter, r *http.Request) {

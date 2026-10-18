@@ -72,8 +72,16 @@ const filterAttribute = (attr, value, isList) => isList
         ? el => value(el.getAttribute(attr))
         : el => el.getAttribute(attr) === value
 
-const getAttributes = (...xs) => el =>
-    el ? Object.fromEntries(xs.map(x => [camel(x), el.getAttribute(x)])) : null
+// 书库：属性名的驼峰写法只算一次（几千章的 TXT，清单里每一项都要调一次；墨水屏上差出一两秒）
+const getAttributes = (...xs) => {
+    const keys = xs.map(camel)
+    return el => {
+        if (!el) return null
+        const obj = {}
+        for (let i = 0; i < xs.length; i++) obj[keys[i]] = el.getAttribute(xs[i])
+        return obj
+    }
+}
 
 const getElementText = el => normalizeWhitespace(el?.textContent)
 
@@ -83,16 +91,36 @@ const childGetter = (doc, ns) => {
     const f = useNS
         ? (el, name) => el => el.namespaceURI === ns && el.localName === name
         : (el, name) => el => el.localName === name
+    // 书库：直接按兄弟节点往下找，不每次复制一份子元素列表（目录有几千条时省不少）
+    const is = useNS
+        ? (el, name) => el.namespaceURI === ns && el.localName === name
+        : (el, name) => el.localName === name
     return {
-        $: (el, name) => [...el.children].find(f(el, name)),
-        $$: (el, name) => [...el.children].filter(f(el, name)),
+        $: (el, name) => {
+            for (let c = el.firstElementChild; c; c = c.nextElementSibling) if (is(c, name)) return c
+        },
+        $$: (el, name) => {
+            const out = []
+            for (let c = el.firstElementChild; c; c = c.nextElementSibling) if (is(c, name)) out.push(c)
+            return out
+        },
         $$$: useNS
             ? (el, name) => [...el.getElementsByTagNameNS(ns, name)]
             : (el, name) => [...el.getElementsByTagName(name)],
     }
 }
 
+// 书库：最常见的简单相对地址（c00001.xhtml、Text/ch1.xhtml#id）直接拼，不用 URL 解析（几千章的书要调几千次）。
+// 结果和下面用 URL 解析出来的一样：没有 .、..、查询串、要转义的字符
+const SIMPLE_PATH = /^[\w\-.]+(?:\/[\w\-.]+)*$/
+const SIMPLE_URL = /^[\w\-.]+(?:\/[\w\-.]+)*(?:#[\w\-.]*)?$/
+const DOT_SEGMENT = /(?:^|\/)\.{1,2}(?:\/|#|$)/
 const resolveURL = (url, relativeTo) => {
+    if (typeof url === 'string' && typeof relativeTo === 'string' && !relativeTo.includes(':')
+        && SIMPLE_URL.test(url) && !DOT_SEGMENT.test(url)) {
+        const dir = relativeTo.slice(0, relativeTo.lastIndexOf('/') + 1)
+        if (!dir || (SIMPLE_PATH.test(dir.slice(0, -1)) && !DOT_SEGMENT.test(dir))) return dir + url
+    }
     try {
         if (relativeTo.includes(':')) return new URL(url, relativeTo)
         // the base needs to be a valid URL, so set a base URL and then remove it
@@ -970,7 +998,8 @@ ${doc.querySelector('parsererror').innerText}`)
             resolveHref: url => resolveURL(url, opfPath),
         })
         this.#loader = new Loader({
-            loadText: this.loadText,
+            // 书库：每次都取 this.loadText（不在这里固定下来），打开以后还能换成别的（拆开的大章节，见 web/js/reader/split.js）
+            loadText: uri => this.loadText(uri),
             loadBlob: uri => Promise.resolve(this.loadBlob(uri))
                 .then(this.#encryption.getDecoder(uri)),
             resources: this.resources,
@@ -1038,6 +1067,13 @@ ${doc.querySelector('parsererror').innerText}`)
     async loadDocument(item) {
         const str = await this.loadText(item.href)
         return this.parser.parseFromString(str, item.mediaType)
+    }
+    // 书库：按清单项载入、释放（拆开的大章节用，见 web/js/reader/split.js）
+    loadItem(item) {
+        return this.#loader.loadItem(item)
+    }
+    unloadItem(item) {
+        return this.#loader.unloadItem(item)
     }
     getMediaOverlay() {
         return new MediaOverlay(this, this.#loadXML.bind(this))
