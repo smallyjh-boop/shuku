@@ -51,7 +51,7 @@ import java.util.concurrent.Future
  */
 class NarrationService : Service() {
     /** 一句话；新版网页还带着它在书里的位置（loc 和进度里的 location 一样，pct 是 0～1 的百分比） */
-    data class Seg(val id: String, val text: String, val loc: String = "", val pct: Double = -1.0)
+    data class Seg(val id: String, val text: String, val loc: String = "", val pct: Double = -1.0, val voice: String = "")
 
     private val handler = Handler(Looper.getMainLooper())
     private val pool = Executors.newFixedThreadPool(2)
@@ -74,6 +74,7 @@ class NarrationService : Service() {
     private var cover: Bitmap? = null
     private var voice = ""
     private var lang = ""            // 书的语言（zh、en、th…）：手机自带语音读拉丁字母时按它选
+    private val voices = HashMap<String, String>() // 每种语言用哪个声音（网页给的）：从书库取的句子按文字挑
     private var speed = 1.0
     private var timerMin = 0
     private var useDevice = false
@@ -179,6 +180,8 @@ class NarrationService : Service() {
                 lastSave = SystemClock.elapsedRealtime()
                 voice = j.optString("voice")
                 lang = j.optString("lang")
+                voices.clear()
+                j.optJSONObject("voices")?.let { o -> o.keys().forEach { k -> o.optString(k).takeIf { it.isNotEmpty() }?.let { voices[k] = it } } }
                 speed = j.optDouble("speed", 1.0)
                 feed = false
                 feedBusy = false
@@ -225,7 +228,11 @@ class NarrationService : Service() {
                 restartCurrent()
             }
             "voice" -> {
-                voice = arg
+                // 换的是哪种语言的声音：这种语言的句子都换成它
+                val code = voiceCode(arg)
+                if (voices.isEmpty() || voiceCode(voice) == code) voice = arg
+                if (code.isNotEmpty() && voices.isNotEmpty()) voices[code] = arg
+                for (k in queue.indices) if (queue[k].voice.isNotEmpty() && voiceCode(queue[k].voice) == code) queue[k] = queue[k].copy(voice = arg)
                 restartCurrent()
             }
             "timer" -> setTimer(arg.toIntOrNull() ?: 0)
@@ -241,7 +248,7 @@ class NarrationService : Service() {
             val text = o.optString("text")
             if (id.isEmpty() || text.isBlank()) continue
             // 旧版网页没有 loc、pct
-            queue += Seg(id, text, o.optString("loc"), if (o.has("pct")) o.optDouble("pct", -1.0) else -1.0)
+            queue += Seg(id, text, o.optString("loc"), if (o.has("pct")) o.optDouble("pct", -1.0) else -1.0, o.optString("voice"))
         }
     }
 
@@ -301,7 +308,7 @@ class NarrationService : Service() {
 
     private fun audioFor(seg: Seg): Future<File> = synchronized(audioJobs) {
         audioJobs.getOrPut(seg.id) {
-            val v = voice
+            val v = seg.voice.ifEmpty { voice }
             val s = speed
             pool.submit<File> {
                 val key = sha1("$v|$s|${seg.text}")
@@ -453,7 +460,7 @@ class NarrationService : Service() {
         }
         return all.filter { it.start >= from - 1 || (from == 0) }.mapIndexed { n, s ->
             val f = s.start.toDouble() / len
-            Seg("srv:$i:$n", s.text, BookPos.location(chs, i, f), BookPos.percent(ch, f, false))
+            Seg("srv:$i:$n", s.text, BookPos.location(chs, i, f), BookPos.percent(ch, f, false), voiceForText(s.text))
         }
     }
 
@@ -641,6 +648,39 @@ class NarrationService : Service() {
         t.speak(seg.text, TextToSpeech.QUEUE_FLUSH, Bundle(), seg.id)
         status = ""
         publish()
+    }
+
+    /** 声音的语言：zh-CN-XiaoxiaoNeural → zh（自定义接口的声音名没有语言，返回空） */
+    private fun voiceCode(v: String): String = if (Regex("^[a-z]{2,3}-[A-Z]{2}").containsMatchIn(v)) v.substringBefore('-') else ""
+
+    /**
+     * 一句用哪个声音（从书库取的句子；网页给的句子自己带着）：看这句主要是什么文字（汉字、假名算 4 个字母，和书库、网页一样），
+     * 拉丁字母为主时按书的语言（不是拉丁字母的语言就用英语）
+     */
+    private fun voiceForText(text: String): String {
+        if (voices.isEmpty()) return ""
+        var latin = 0; var thai = 0; var hangul = 0; var kana = 0; var han = 0; var cyr = 0; var arabic = 0
+        for (c in text) {
+            when (Character.UnicodeScript.of(c.code)) {
+                Character.UnicodeScript.LATIN -> latin++
+                Character.UnicodeScript.THAI -> thai++
+                Character.UnicodeScript.HANGUL -> hangul += 2
+                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana += 4
+                Character.UnicodeScript.HAN -> han += 4
+                Character.UnicodeScript.CYRILLIC -> cyr++
+                Character.UnicodeScript.ARABIC -> arabic++
+                else -> {}
+            }
+        }
+        val total = latin + thai + hangul + kana + han + cyr + arabic
+        if (total == 0) return ""
+        val nonLatin = setOf("zh", "ja", "ko", "th", "ru", "uk", "bg", "ar", "fa", "he", "hi", "el")
+        val code = when {
+            kana > 0 && kana + han >= total / 2 -> "ja"
+            else -> listOf("latin" to latin, "th" to thai, "ko" to hangul, "ja" to kana, "zh" to han, "ru" to cyr, "ar" to arabic).maxByOrNull { it.second }!!.first
+        }
+        val c = if (code == "latin") (if (lang.isNotEmpty() && lang !in nonLatin) lang else "en") else code
+        return voices[c] ?: ""
     }
 
     /** 手机自带语音用哪种语言读：看文字种类（泰、韩、日、中、俄、阿拉伯）；拉丁字母按书的语言，中文书里的就用英语 */

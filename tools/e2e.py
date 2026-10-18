@@ -1945,6 +1945,17 @@ def ui_tests():
         pg.wait_for_function("() => document.querySelector('foliate-view').renderer.getContents()[0].doc.defaultView.CSS.highlights.has('tts')")
         check("原生读到哪句就高亮哪句", True)
         check("播放状态同步到界面", pg.get_attribute(".r-player .play", "title") == "暂停")
+        # 1.0.0.14：每句带上按文字挑的声音，另外给每种语言的声音（熄屏后 App 自己从书库取的句子用）
+        if j("GET", "/api/tts/voices").get("defaults"):
+            check("交给原生的句子带声音、书的语言、每种语言的声音", start.get("lang") == "zh" and (start.get("voices") or {}).get("th") == "th-TH-PremwadeeNeural"
+                  and (start.get("voices") or {}).get("en") and all((x.get("voice") or "").startswith("zh-") for x in start["segments"]), {k: start.get(k) for k in ("lang", "voices", "voice")})
+        else:  # 前面的测试换成了自定义接口：声音不分语言，不带每句的声音
+            check("自定义语音接口：交给原生的是设置里的声音、不分语言", start.get("lang") == "zh" and start.get("voice") == "nova" and not start.get("voices") and not any(x.get("voice") for x in start["segments"]), {k: start.get(k) for k in ("lang", "voices", "voice")})
+        # App 熄屏后自己从书库取的句子（网页不认识 id）：带着位置，网页记下进度、翻过去
+        n_sp = len(calls("saveProgress"))
+        pg.evaluate("() => shukuNativeEvent('tts', JSON.stringify({ type: 'seg', id: 'srv:2:0', loc: 'sec:2:0.5000', pct: 0.83 }))")
+        pg.wait_for_function("() => { const r = document.querySelector('foliate-view').renderer.getContents()[0]; return r && r.index === 2 }", timeout=15000)
+        check("App 自己取的句子：网页翻到那里", True)
         pg.evaluate("() => shukuNativeEvent('tts', JSON.stringify({ type: 'need' }))")
         pg.wait_for_function("() => __calls.some(c => c[0] === 'tts' && (c[1] === 'append' || c[1] === 'end'))")
         app = [c for c in calls("tts") if c[1] in ("append", "end")][-1]

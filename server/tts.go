@@ -138,7 +138,7 @@ func edgeDefaults() map[string]string {
 
 // ---------- 按文字挑音色：中文书里夹着的泰文、韩文这些，中文音色读不了，合成时换成能读的 ----------
 
-// 一段文字主要是哪种文字：返回语言代码；拉丁字母（英、法、德……）、数字、符号返回空（音色一般都读得了）
+// 一段文字主要是哪种文字：返回语言代码；拉丁字母（英、法、德……）为主返回 latin；只有数字、符号返回空
 func scriptLang(text string) string {
 	counts := map[string]int{}
 	letters := 0
@@ -197,25 +197,37 @@ func scriptLang(text string) string {
 			best, n = k, c
 		}
 	}
-	switch best {
-	case "latin":
-		return ""
-	case "han":
+	if best == "han" {
 		return "zh"
 	}
 	return best
 }
 
+// 不用拉丁字母的语言：这些语言的音色读英文句子带口音，整句英文时换成英文音色
+var nonLatinLangs = map[string]bool{"zh": true, "ja": true, "ko": true, "th": true, "ru": true, "uk": true, "bg": true, "ar": true,
+	"fa": true, "ur": true, "he": true, "hi": true, "el": true, "km": true, "lo": true, "my": true}
+
 // 同一种文字的几种语言：俄文字母也用于乌克兰语、保加利亚语，阿拉伯字母也用于波斯语、乌尔都语
 var scriptFamily = map[string][]string{"ru": {"ru", "uk", "bg", "sr", "kk"}, "ar": {"ar", "fa", "ur"}, "zh": {"zh", "ja"}, "ja": {"ja"}}
 
-// 微软语音合成前：音色读不了这段文字（比如中文音色读泰文）时换成这种语言的默认音色
-func adaptVoice(text, voice string) string {
+// 微软语音合成前：音色读不了这段文字（比如中文音色读泰文）时换成这种语言的默认音色；
+// 中文、泰文这些音色遇到整句英文（中英对照的书）换成英文音色。lang 是书的语言（法文书里的句子用法语音色）
+func adaptVoice(text, voice, lang string) string {
 	want := scriptLang(text)
 	if want == "" || voice == "" {
 		return voice
 	}
 	have := voiceCode(voice)
+	if want == "latin" {
+		if !nonLatinLangs[have] || strings.Contains(voice, "Multilingual") {
+			return voice
+		}
+		l := strings.ToLower(strings.SplitN(lang, "-", 2)[0])
+		if l == "" || nonLatinLangs[l] {
+			l = "en"
+		}
+		return dictVoice(l)
+	}
 	ok := []string{want}
 	if f, found := scriptFamily[want]; found {
 		ok = f
@@ -608,7 +620,7 @@ func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([
 		}
 	}
 	if c.Engine == "edge" {
-		voice = adaptVoice(text, voice)
+		voice = adaptVoice(text, voice, lang)
 	}
 	return synthesizeWith(ctx, c.Engine, text, voice, speed)
 }

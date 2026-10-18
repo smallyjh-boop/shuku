@@ -69,16 +69,29 @@ export function langCode(l) {
   return LANG3[l] || (l.length === 2 ? l : '')
 }
 
-// 一段文字是什么语言（只看文字种类；拉丁字母返回空）
+// 一段文字主要是什么文字（和书库的 scriptLang 一样：一个汉字、假名算 4 个字母，中文里夹个英文词不算英文）：
+// th、ja、ko、zh、ru、ar，拉丁字母为主返回 latin，只有数字符号返回空
+const SCRIPTS = [['th', /[\u0E00-\u0E7F]/g, 1], ['kana', /[\u3040-\u30FF]/g, 4], ['ko', /[\uAC00-\uD7AF]/g, 2], ['zh', /[\u4E00-\u9FFF\u3400-\u4DBF]/g, 4],
+  ['ru', /[\u0400-\u04FF]/g, 1], ['ar', /[\u0600-\u06FF]/g, 1], ['latin', /[A-Za-z\u00C0-\u024F]/g, 1]]
 export function textLang(t) {
   t = String(t || '')
-  if (/[\u0E00-\u0E7F]/.test(t)) return 'th'
-  if (/[\u3040-\u30FF]/.test(t)) return 'ja'
-  if (/[\uAC00-\uD7AF]/.test(t)) return 'ko'
-  if (/[\u4E00-\u9FFF]/.test(t)) return 'zh'
-  if (/[\u0400-\u04FF]/.test(t)) return 'ru'
-  if (/[\u0600-\u06FF]/.test(t)) return 'ar'
-  return ''
+  const n = {}
+  let total = 0
+  for (const [k, re, w] of SCRIPTS) { n[k] = ((t.match(re) || []).length) * w; total += n[k] }
+  if (!total) return ''
+  if (n.kana && n.kana + n.zh >= total / 2) return 'ja'
+  let best = '', m = 0
+  for (const k in n) if (n[k] > m) { best = k; m = n[k] }
+  return best === 'kana' ? 'ja' : best
+}
+const NON_LATIN = { zh: 1, ja: 1, ko: 1, th: 1, ru: 1, uk: 1, bg: 1, ar: 1, fa: 1, he: 1, hi: 1, el: 1 }
+
+// 一句用哪种语言的声音：看这句的文字；拉丁字母按书的语言（法文书用法语），书不是拉丁字母的语言时用英语
+export function segLang(text, book) {
+  const t = textLang(text)
+  if (!t) return book || 'zh'
+  if (t === 'latin') return book && !NON_LATIN[book] ? book : 'en'
+  return t
 }
 
 let voicesReq = null
@@ -119,12 +132,16 @@ function rememberVoice(prefs, code, v) {
   if (!code || code === 'zh') prefs.voice = v
 }
 
-// 这本书的语言：元数据里有就用，没有看正文
+// 这本书的语言：看正文是什么文字为主（元数据常常不对，比如中文网站做的英文书写着 zh）；
+// 拉丁字母的书再看元数据是英、法、德还是别的
 function bookCode(shell, segs) {
-  const c = langCode(shell.info?.language)
-  if (c) return c
-  const sample = (segs || []).slice(0, 8).map(s => s.text).join(' ')
-  return textLang(sample) || (/[A-Za-z]/.test(sample) ? 'en' : 'zh')
+  const meta = langCode(shell.info?.language)
+  const sample = (segs || []).slice(0, 40).map(s => s.text).join(' ').slice(0, 4000)
+  const t = textLang(sample)
+  if (!t) return meta || 'zh'
+  if (t === 'latin') return meta && !NON_LATIN[meta] ? meta : 'en'
+  if (t === 'ru' && meta && ['uk', 'bg', 'sr', 'kk'].includes(meta)) return meta
+  return t
 }
 
 export class Narrator {
@@ -310,7 +327,9 @@ export class Narrator {
 
   fetchAudio(text) {
     if (!this.cache.has(text)) {
-      const p = api('/api/tts', { method: 'POST', raw: true, body: { text, voice: this.voice, lang: this.code || '', speed: this.speed } })
+      // 每一句按它的文字挑声音：中英对照的书里英文句子用英文声音、中文句子用中文声音（各用这种语言选过的）
+      const voice = voiceFor(this.prefs, this.info, segLang(text, this.code))
+      const p = api('/api/tts', { method: 'POST', raw: true, body: { text, voice, lang: this.code || '', speed: this.speed } })
         .then(r => r.blob()).then(b => URL.createObjectURL(b))
       p.catch(() => this.cache.delete(text))
       this.cache.set(text, p)
@@ -339,8 +358,7 @@ export class Narrator {
     const u = new SpeechSynthesisUtterance(seg.text)
     const BCP = { zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR', th: 'th-TH', ru: 'ru-RU', ar: 'ar-SA', en: 'en-US', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', vi: 'vi-VN', it: 'it-IT', pt: 'pt-BR' }
     // 文字是哪种就用哪种语言读；拉丁字母按书的语言（英、法、德……），中文书里的英文句子用英语
-    const t = textLang(seg.text)
-    const code = t || (this.code && this.code !== 'zh' && this.code !== 'ja' && this.code !== 'ko' && this.code !== 'th' ? this.code : 'en')
+    const code = segLang(seg.text, this.code)
     const lang = BCP[code] || code
     u.lang = lang
     const voices = speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-').startsWith(lang.slice(0, 2)))
@@ -498,7 +516,10 @@ export class NativeNarrator {
       this.segs.set(id, { key: unit.key, i: s.i, text: s.text })
       this.order.push(id)
       const loc = eng?.ttsLocation?.(unit.key, s.i)
-      return loc ? { id, text: s.text, loc: loc.location, pct: Math.round((loc.fraction || 0) * 10000) / 10000 } : { id, text: s.text }
+      const o = loc ? { id, text: s.text, loc: loc.location, pct: Math.round((loc.fraction || 0) * 10000) / 10000 } : { id, text: s.text }
+      // 每句按文字挑声音（中英对照的书里英文句子用英文声音）；旧版 App 不认这个字段，照样用整本的声音
+      if (this.voiceInfo) o.voice = voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code))
+      return o
     })
   }
 
@@ -520,9 +541,13 @@ export class NativeNarrator {
     this.code = bookCode(this.shell, unit.segs)
     let voices = null
     try { voices = await voiceInfo() } catch (e) {}
+    this.voiceInfo = voices && voices.defaults ? voices : null // 自定义接口的声音不分语言
+    // 每种语言用哪个声音：App 熄屏后自己从书库取的句子也按文字挑
+    const byLang = {}
+    if (this.voiceInfo) for (const c of new Set(['zh', 'en', 'th', 'ja', 'ko', 'ru', 'fr', 'de', 'es', 'vi', this.code])) byLang[c] = voiceFor(this.prefs, voices, c)
     call('tts', 'start', {
       book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
-      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), lang: this.code, speed: this.speed, segments: this.pack(unit),
+      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), voices: byLang, lang: this.code, speed: this.speed, segments: this.pack(unit),
     })
   }
 
