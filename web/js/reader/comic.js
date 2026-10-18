@@ -115,6 +115,7 @@ export class Engine {
     this.shell.onRelocate({
       location: `i:${this.index}`, fraction: this.count > 1 ? last / (this.count - 1) : 1,
       chapter: '', label: `${(this.cur && this.paged() ? this.cur.map(n => n + 1).join('-') : this.index + 1)} / ${this.count}`,
+      units: { pos: last, total: this.count - 1, chapterEnd: null, jump: 30 },
     })
   }
 
@@ -148,6 +149,7 @@ export class Engine {
     else this.stripImgs?.[this.index]?.scrollIntoView()
   }
   goToFraction(f) { this.goTo(Math.round(f * (this.count - 1))) }
+  restart() { this.goTo(0) }
   sameLocation(a, b) { return a === b }
 
   bindSwipe(el) {

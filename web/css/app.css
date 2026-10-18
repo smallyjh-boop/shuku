@@ -1015,3 +1015,122 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
   .quick-links svg { width: 15px; height: 15px; color: var(--ink-3); }
   .quick-links small { color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 }
+
+/* ==== 1.0.0.7 阅读器 ==== */
+
+/* iPhone 刘海、底部横条：书页、工具栏、侧栏都让开 */
+.reader { --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px); }
+.r-stage { top: var(--safe-t); bottom: var(--safe-b); left: var(--safe-l); right: var(--safe-r); }
+.r-top { padding-left: calc(8px + var(--safe-l)); padding-right: calc(8px + var(--safe-r)); }
+.r-bottom { padding-left: calc(16px + var(--safe-l)); padding-right: calc(16px + var(--safe-r)); }
+.r-status { padding-left: calc(20px + var(--safe-l)); padding-right: calc(20px + var(--safe-r)); }
+.r-panel { padding-left: var(--safe-l); width: min(calc(380px + var(--safe-l)), 88vw); }
+.r-sheet { margin-right: var(--safe-r); }
+
+/* 键盘操作时看得见焦点 */
+.reader :focus { outline: none; }
+.reader :focus-visible { outline: 2px solid var(--r-acc); outline-offset: 2px; border-radius: 6px; }
+.reader .toc a:focus-visible, .reader .bm:focus-visible, .reader .hit:focus-visible, .reader .r-note-item:focus-visible { outline-offset: -2px; }
+
+/* 剩余时间 */
+.r-time { font-size: 12px; color: var(--r-dim); text-align: center; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.r-time:empty { display: none; }
+
+/* 跳转后“返回原处” */
+.r-backchip {
+  position: absolute; left: calc(16px + var(--safe-l)); bottom: calc(30px + var(--safe-b)); z-index: 34;
+  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 10px; border-radius: 17px;
+  border: 1px solid var(--r-rule); background: var(--r-ui); color: var(--r-ui-fg); font-size: 13px; cursor: pointer;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 8px 22px -12px rgba(0,0,0,.45); transition: bottom .22s;
+}
+.r-backchip svg { width: 16px; height: 16px; }
+.r-backchip[hidden] { display: none; }
+.reader.ui .r-backchip { bottom: calc(126px + var(--safe-b)); }
+
+/* 读完：下一卷 */
+.r-end {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(30px + var(--safe-b)); z-index: 36; width: min(420px, calc(100vw - 32px));
+  display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 16px; border-radius: 14px;
+  background: var(--r-ui); color: var(--r-ui-fg); border: 1px solid var(--r-rule);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 16px 40px -18px rgba(0,0,0,.55); transition: bottom .22s;
+}
+.r-end[hidden] { display: none; }
+.r-end small { display: block; font-size: 12px; color: var(--r-dim); }
+.r-end b { display: block; font-family: var(--serif); font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-end .btn.primary { background: var(--r-acc); border-color: var(--r-acc); color: var(--r-bg); }
+.r-end .icon-btn { color: inherit; }
+.reader.ui .r-end { bottom: calc(126px + var(--safe-b)); }
+
+/* 小弹窗：脚注、笔记（电脑上浮在旁边，手机上从底部弹出） */
+.r-pop, .r-note {
+  position: absolute; z-index: 46; width: 380px; max-height: 60vh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--r-ui); color: var(--r-ui-fg); border: 1px solid var(--r-rule); border-radius: 12px;
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); box-shadow: 0 20px 50px -18px rgba(0,0,0,.45);
+  padding: 12px 14px; display: none; font-size: 14px; line-height: 1.7; user-select: text; -webkit-user-select: text;
+}
+.r-pop.show, .r-note.show { display: block; }
+.r-pop.sheet, .r-note.sheet { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 56vh; border-radius: 14px 14px 0 0; border-width: 1px 0 0; padding-bottom: calc(14px + var(--safe-b)); }
+.r-pop.sheet::before, .r-note.sheet::before { content: ""; display: block; width: 40px; height: 4px; margin: -4px auto 10px; border-radius: 2px; background: var(--r-rule); }
+.r-pop .fn-text p { margin: 0 0 6px; }
+.r-pop .row, .r-note .row { margin-top: 8px; gap: 6px; }
+.r-pop .btn, .r-note .btn { background: transparent; border-color: var(--r-rule); color: inherit; }
+.r-pop .btn.quiet, .r-note .btn.quiet { border-color: transparent; }
+.r-note .btn.primary { background: var(--r-acc); border-color: var(--r-acc); color: var(--r-bg); }
+.r-note .icon-btn { color: inherit; }
+.r-note textarea.input { width: 100%; min-height: 76px; resize: vertical; background: transparent; border-color: var(--r-rule); color: inherit; font: inherit; margin-top: 8px; }
+.r-note .q, .r-note-item .q {
+  margin: 8px 0 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--c, #F2C94C); color: inherit; font-family: var(--serif);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* 划线工具：几种颜色、笔记、复制 */
+.seltools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.seltools .dot { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--r-ui); background: var(--c); cursor: pointer; padding: 0; box-shadow: 0 0 0 1px var(--r-rule); flex: none; }
+.seltools .dot.on { box-shadow: 0 0 0 2px var(--r-acc); }
+.seltools .btn { background: transparent; border-color: transparent; color: inherit; }
+.seltools .btn:hover { background: var(--r-rule); }
+.r-dict .seltools { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--r-rule); }
+.r-dict.tools-only { width: auto; padding: 8px 10px; }
+.r-dict.tools-only .seltools { padding: 0; margin: 0; border: 0; }
+.r-dict.tools-only.sheet { padding-bottom: calc(10px + var(--safe-b)); }
+
+/* 目录面板里的笔记 */
+.notes-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px 6px 18px; font-size: 12.5px; color: var(--r-dim); }
+.notes-hd .btn { background: transparent; border-color: var(--r-rule); color: inherit; }
+.r-note-item { padding: 10px 12px 8px 18px; border-bottom: 1px solid var(--r-rule); cursor: pointer; }
+.r-note-item:hover { background: var(--r-rule); }
+.r-note-item .q { margin: 0; font-size: 14px; line-height: 1.65; }
+.r-note-item .n { margin-top: 6px; font-size: 13.5px; white-space: pre-wrap; }
+.r-note-item .m { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 12px; color: var(--r-dim); }
+.r-note-item .m .icon-btn { width: 30px; height: 30px; color: var(--r-dim); }
+.r-note-item .m .icon-btn svg { width: 16px; height: 16px; }
+
+/* PDF 文字层（pdf.js 的 TextLayer）：透明文字叠在画布上，能选能搜 */
+.pdfv .pg .textLayer {
+  position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial;
+  -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; z-index: 1;
+  user-select: text; -webkit-user-select: text; caret-color: transparent;
+}
+.pdfv .pg .textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.pdfv .pg .textLayer span.markedContent { top: 0; height: 0; }
+.pdfv .pg .textLayer ::selection { background: rgba(47, 111, 143, .30); }
+.pdfv .pg .textLayer br::selection { background: transparent; }
+.pdfv .pg .textLayer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; user-select: none; }
+.hiddenCanvasElement { position: absolute; top: 0; left: 0; width: 0; height: 0; display: none; }
+::highlight(pdf-hl-yellow) { background-color: rgba(242, 201, 76, .42); }
+::highlight(pdf-hl-green) { background-color: rgba(111, 207, 151, .40); }
+::highlight(pdf-hl-blue) { background-color: rgba(86, 204, 242, .38); }
+::highlight(pdf-hl-pink) { background-color: rgba(242, 141, 178, .40); }
+::highlight(pdf-search) { background-color: rgba(47, 111, 143, .28); }
+
+/* ---------- 离线书架 ---------- */
+.offline-btn.on { color: var(--accent); border-color: var(--accent); }
+.offline-page { max-width: 820px; }
+.off-note { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 14px; border-radius: 8px; background: var(--sunken); color: var(--ink-2); font-size: 13.5px; }
+.off-note svg { width: 18px; height: 18px; flex: none; }
+.off-list { display: grid; gap: 4px; margin: 10px 0 20px; }
+.off-book { display: flex; gap: 14px; align-items: center; padding: 10px 6px; border-bottom: 1px solid var(--rule); }
+.off-cover { width: 56px; flex: none; padding: 0; border: 0; background: none; cursor: pointer; }
+.off-cover .cv { width: 56px; }
+.off-book .t { font-family: var(--serif); font-weight: 600; font-size: 15px; }
+.off-book .m { font-size: 12.5px; color: var(--ink-3); margin: 2px 0 6px; }

@@ -1285,9 +1285,10 @@ def ui_tests():
     errors = []
 
     def attach(pg, label):
-        pg.on("console", lambda m: "Content Security Policy" in m.text and CSP_ERRORS.append(f"[{label}] {m.text[:240]}"))
+        # 书里夹带的脚本被内容安全策略拦下是预期的（book_csp，书的章节在 blob: 框架里），网页自己的违规、报错才算
+        pg.on("console", lambda m: "Content Security Policy" in m.text and not book_csp(m) and CSP_ERRORS.append(f"[{label}] {m.text[:240]}"))
         pg.on("pageerror", lambda e: errors.append(f"[{label}] PAGEERROR {e}"))
-        pg.on("console", lambda m: m.type == "error" and "favicon" not in m.text and "Failed to load resource" not in m.text and errors.append(f"[{label}] console.error {m.text}"))
+        pg.on("console", lambda m: m.type == "error" and "favicon" not in m.text and "Failed to load resource" not in m.text and not book_csp(m) and errors.append(f"[{label}] console.error {m.text}"))
 
     def reader_ready(pg):
         # 页面刚跳转时阅读器还没建好，不能只等“加载中”消失
@@ -1846,11 +1847,390 @@ def ui_tests():
         pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('夜航船'))", timeout=40000)
         check("入库后有提示", True)
         ctx.close()
+        ui_reader_v7(browser, context, attach, reader_ready, shot)
         browser.close()
 
     section("网页：脚本错误")
     check("没有脚本错误", not errors, "\n      ".join(errors[:20]))
     check("没有违反内容安全策略（CSP）", not CSP_ERRORS, "\n      ".join(CSP_ERRORS[:10]))
+
+
+# ---- 1.0.0.7 阅读器 ----
+
+def book_csp(m):
+    """书里夹带的脚本被内容安全策略拦下（想要的效果）：这种报错来自书的章节（blob: 地址），不算网页自己的错"""
+    return ("Content Security Policy" in m.text or "Refused to" in m.text) and str((m.location or {}).get("url", "")).startswith("blob:")
+
+
+def make_fn_epub(path):
+    """繁体、带脚注 / 尾注 / 章节链接、还夹带一段脚本的 EPUB"""
+    trad = "這是一個測試。我們應該學習歷史，認識過去的國家與語言。" * 6
+    head = '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>%s</title></head><body>'
+    c0 = (head % "第一章") + "<h2>第一章 注釋</h2>" + \
+        '<script>try{window.top.__pwned=1;window.top.document.title="PWNED"}catch(e){}</script>' + \
+        f'<p>{trad}這裡有個腳註<a epub:type="noteref" href="#n1">1</a>，還有一個尾註<sup><a href="c1.xhtml#e1">[2]</a></sup>。</p>' + \
+        f'<p>{trad}</p><p><a href="c2.xhtml">跳到第三章</a></p>' + \
+        '<aside epub:type="footnote" id="n1"><p>這是腳註的內容，應該彈出來看。</p></aside>' + "".join(f"<p>{trad}</p>" for _ in range(8)) + "</body></html>"
+    c1 = (head % "第二章") + "<h2>第二章 尾註</h2>" + "".join(f"<p>{trad}</p>" for _ in range(3)) + '<p id="e1">尾註二的內容在這裡。</p>' + "".join(f"<p>{trad}</p>" for _ in range(6)) + "</body></html>"
+    c2 = (head % "第三章") + "<h2>第三章 終章</h2>" + "".join(f"<p>{trad}</p>" for _ in range(10)) + "</body></html>"
+    z = zipfile.ZipFile(path, "w")
+    z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip")
+    z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="c.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+    man = spine = ""
+    for i, c in enumerate([c0, c1, c2]):
+        z.writestr(f"c{i}.xhtml", c)
+        man += f'<item id="c{i}" href="c{i}.xhtml" media-type="application/xhtml+xml"/>'
+        spine += f'<itemref idref="c{i}"/>'
+    z.writestr("nav.xhtml", '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="c0.xhtml">第一章 注釋</a></li><li><a href="c1.xhtml">第二章 尾註</a></li><li><a href="c2.xhtml">第三章 終章</a></li></ol></nav></body></html>')
+    z.writestr("c.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">fn-test</dc:identifier><dc:title>註釋測試</dc:title><dc:creator>測試者</dc:creator><dc:language>zh-TW</dc:language></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>' + man + "</manifest><spine>" + spine + "</spine></package>")
+    z.close()
+
+
+# 在书页（iframe）里选中一段文字，然后像手指抬起一样通知阅读器
+SELECT_JS = """(word) => {
+  const doc = document.querySelector('foliate-view').renderer.getContents()[0].doc
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = walker.nextNode())) {
+    const i = n.nodeValue.indexOf(word)
+    if (i < 0 || n.parentElement.closest('script')) continue
+    const r = doc.createRange(); r.setStart(n, i); r.setEnd(n, i + word.length)
+    const sel = doc.getSelection(); sel.removeAllRanges(); sel.addRange(r)
+    doc.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
+    return true
+  }
+  return false
+}"""
+# 书页里一段文字在屏幕上的中心点
+TEXT_POINT_JS = """(word) => {
+  const doc = document.querySelector('foliate-view').renderer.getContents()[0].doc
+  const w = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = w.nextNode())) {
+    const i = n.nodeValue.indexOf(word)
+    if (i < 0 || n.parentElement.closest('script')) continue
+    const r = doc.createRange(); r.setStart(n, i); r.setEnd(n, i + word.length)
+    const b = r.getBoundingClientRect(), f = doc.defaultView.frameElement.getBoundingClientRect()
+    return [b.left + f.left + b.width / 2, b.top + f.top + b.height / 2]
+  }
+  return null
+}"""
+DOC_JS = "document.querySelector('foliate-view').renderer.getContents()[0].doc"
+has_toast = lambda pg, text: pg.evaluate("(t) => [...document.querySelectorAll('#toasts .toast')].some(e => e.textContent.includes(t))", text)
+
+
+def ui_reader_v7(browser, context, attach, reader_ready, shot):
+    section("网页：阅读器 1.0.0.7（脚注、繁转简、划线笔记、进度冲突、下一卷、PDF 文字层）")
+    own_csp = []
+
+    def watch_csp(pg):
+        pg.on("console", lambda m: ("Content Security Policy" in m.text or "Refused to" in m.text) and not book_csp(m) and own_csp.append(m.text[:200]))
+
+    make_fn_epub(os.path.join(T, "inbox", "註釋測試.epub"))
+    fnb = wait(lambda: next((b for b in all_books() if b["title"] in ("註釋測試", "注释测试")), None), 60, 0.5, "注释测试书入库")
+
+    # ---- 脚注、链接返回、书里的脚本、繁转简 ----
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-fn"); watch_csp(pg)
+    pg.goto(BASE + f"/#/read/{fnb['id']}")
+    reader_ready(pg)
+    pg.wait_for_timeout(700)
+    check("书里夹带的脚本不运行（内容安全策略）", pg.evaluate("() => window.__pwned") is None and pg.title() != "PWNED", pg.title())
+    pg.evaluate(f"() => {DOC_JS}.querySelector('a[href=\"#n1\"]').click()")
+    pg.wait_for_selector(".r-pop.show", timeout=5000)
+    check("点脚注弹出内容，不跳走", re.search("[腳脚][註注]的[內内]容", pg.inner_text(".r-pop")) and "第一章" in pg.inner_text(".r-status"), pg.inner_text(".r-pop"))
+    shot(pg, "41-footnote")
+    pg.keyboard.press("Escape")
+    pg.evaluate(f"() => {DOC_JS}.querySelector('sup a').click()")
+    pg.wait_for_selector(".r-pop.show", timeout=5000)
+    check("上标的尾注也弹出来看", re.search("尾[註注]二", pg.inner_text(".r-pop")), pg.inner_text(".r-pop"))
+    pg.keyboard.press("Escape")
+    pg.evaluate(f"() => [...{DOC_JS}.querySelectorAll('a')].find(a => a.textContent.includes('第三章')).click()")
+    pg.wait_for_function("() => document.querySelector('.r-status').textContent.includes('第三章')", timeout=8000)
+    check("正文里的链接跳走后显示“返回原处”", pg.is_visible(".r-backchip"))
+    pg.click(".r-backchip")
+    pg.wait_for_function("() => document.querySelector('.r-status').textContent.includes('第一章')", timeout=8000)
+    check("点“返回原处”回到原来读的地方", not pg.is_visible(".r-backchip"))
+    v0 = pg.eval_on_selector(".r-prog input[type=range]", "e => e.value")
+    pg.keyboard.press("Control+ArrowRight"); pg.wait_for_timeout(500)
+    check("按着 Ctrl 的组合键不当翻页", pg.eval_on_selector(".r-prog input[type=range]", "e => e.value") == v0)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-top button[title='阅读设置']")
+    pg.wait_for_selector(".r-sheet.show")
+    pg.locator(".r-sheet .set-row", has_text="繁体转简体").locator("input").check()
+    pg.wait_for_function(f"() => {DOC_JS}.body.textContent.includes('这是一个测试')", timeout=8000)
+    check("繁体转简体阅读", "注释" in pg.inner_text(".r-status") or "注释" in pg.inner_text(".r-prog"), pg.inner_text(".r-status"))
+    shot(pg, "42-t2s")
+    pg.keyboard.press("Escape")
+    prefs = wait(lambda: json.loads(j("GET", f"/api/books/{fnb['id']}/read")["prefs"] or "{}").get("t2s") and json.loads(j("GET", f"/api/books/{fnb['id']}/read")["prefs"]), 10, 0.3, "按书设置上传")
+    check("繁转简按书记住（存在服务器上，换设备也一样）", prefs.get("t2s") is True, prefs)
+    ctx.close()
+
+    # ---- 划线、笔记、导出 ----
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-notes"); watch_csp(pg)
+    pg.goto(BASE + f"/#/read/{fnb['id']}")
+    reader_ready(pg)
+    pg.wait_for_function(f"() => {DOC_JS}.body.textContent.includes('这是一个测试')", timeout=8000)
+    check("重新打开时还是简体（按书记住）", True)
+    pg.wait_for_timeout(2300)  # 等工具栏自动收起
+    check("选中文字", pg.evaluate(SELECT_JS, "学习历史"))
+    pg.wait_for_selector(".r-dict.show .seltools .dot", timeout=8000)
+    check("选中文字后弹出划线工具和字典", pg.locator(".r-dict.show .seltools .dot").count() == 4)
+    RECTS = "() => { const c = document.querySelector('foliate-view').renderer.getContents()[0]; return c.overlayer ? c.overlayer.element.querySelectorAll('rect').length : 0 }"
+    pg.locator(".r-dict .seltools .dot").first.click()
+    hl = wait(lambda: [b for b in j("GET", f"/api/books/{fnb['id']}/bookmarks") if b["kind"] == "highlight" and b["text"] == "学习历史"], 10, 0.3, "划线保存")
+    check("划线存到服务器（位置、原文、颜色）", hl[0]["color"] == "yellow" and hl[0]["location"].startswith("epubcfi"), hl)
+    pg.wait_for_function(f"() => ({RECTS})() >= 1", timeout=5000)
+    check("划线画在书页上", True)
+    pt = pg.evaluate(TEXT_POINT_JS, "学习历史")
+    v0 = pg.eval_on_selector(".r-prog input[type=range]", "e => e.value")
+    pg.mouse.click(pt[0], pt[1])
+    pg.wait_for_selector(".r-note.show textarea", timeout=5000)
+    check("点书里的划线弹出笔记（不翻页）", pg.eval_on_selector(".r-prog input[type=range]", "e => e.value") == v0)
+    pg.fill(".r-note textarea", "历史是最好的老师")
+    pg.click(".r-note button:has-text('完成')")
+    wait(lambda: any(b["note"] == "历史是最好的老师" for b in j("GET", f"/api/books/{fnb['id']}/bookmarks")), 10, 0.3, "笔记保存")
+    check("写笔记", True)
+    pg.keyboard.press("t")
+    pg.wait_for_selector(".r-panel.show")
+    pg.click(".r-panel .ptabs button:has-text('笔记')")
+    pg.wait_for_selector(".r-panel .r-note-item")
+    check("目录面板里的“笔记”", "历史是最好的老师" in pg.inner_text(".r-panel .pbody"))
+    shot(pg, "43-notes")
+    href = pg.get_attribute(".r-panel .notes-hd a", "href")
+    r = S.get(BASE + href if href.startswith("/") else href, timeout=10)
+    check("导出笔记（Markdown）", r.status_code == 200 and "> 学习历史" in r.text and "历史是最好的老师" in r.text, r.text[:200])
+    for _ in range(pg.locator(".r-panel .r-note-item").count()):
+        pg.locator(".r-panel .r-note-item .icon-btn[title='删除划线']").first.click()
+        pg.wait_for_timeout(400)
+    wait(lambda: not [b for b in j("GET", f"/api/books/{fnb['id']}/bookmarks") if b["kind"] == "highlight"], 10, 0.3, "删除划线")
+    pg.wait_for_function(f"() => ({RECTS})() === 0", timeout=5000)
+    check("删除划线（书页上也去掉）", True)
+    ctx.close()
+
+    # ---- 进度：别的设备读过、冲突、剩余时间、从头读、下一卷、at 参数、删掉的书 ----
+    b2 = book_by_title("三体Ⅱ·黑暗森林")
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-sync"); watch_csp(pg)
+    pg.goto(BASE + f"/#/read/{b2['id']}")
+    reader_ready(pg)
+    pg.wait_for_timeout(2500)
+    time.sleep(1.1)
+    j("PUT", f"/api/books/{b2['id']}/progress", json={"location": "epubcfi(/6/4!/4/2/1:0)", "percent": 0.12, "device": "测试平板"})
+    pg.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('测试平板'))", timeout=8000)
+    check("回到前台时发现别的设备读过：提示跳过去", True)
+    pg.click("#toasts .toast:has-text('测试平板') button:has-text('跳过去')")
+    pg.wait_for_function("() => document.querySelector('.r-status').textContent.includes('中部')", timeout=8000)
+    check("点“跳过去”到别的设备读到的地方", True)
+    time.sleep(1.1)
+    j("PUT", f"/api/books/{b2['id']}/progress", json={"location": "epubcfi(/6/6!/4/2/1:0)", "percent": 0.9, "device": "测试手机"})
+    pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(2600)
+    check("保存时服务器上有别的设备更新的进度：不覆盖，提示", has_toast(pg, "测试手机") and j("GET", f"/api/books/{b2['id']}/progress")["device"] == "测试手机")
+    pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(2600)
+    check("接着在这台读：以这台为准", j("GET", f"/api/books/{b2['id']}/progress")["device"] != "测试手机")
+    pg.evaluate("() => { for (let u = 0; u < 5; u++) localStorage.setItem('shuku.speed.' + u, JSON.stringify({ flow: 3, pdf: 1, comic: 4 })) }")
+    pg.reload()
+    reader_ready(pg)
+    pg.wait_for_timeout(800)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    t = pg.inner_text(".r-time")
+    check("底栏显示本章、全书还剩多久", "本章还剩约" in t and "全书还剩约" in t, t)
+    pg.goto(BASE + f"/#/read/{b2['id']}?at=" + urllib.parse.quote("epubcfi(/6/6!/4/2/1:0)"))
+    reader_ready(pg)
+    pg.wait_for_function("() => document.querySelector('.r-status').textContent.includes('下部')", timeout=8000)
+    check("链接带 at 参数时直接打开到那个位置", True)
+    santi = book_by_title("三体")
+    pg.goto(BASE + f"/#/read/{santi['id']}")
+    reader_ready(pg)
+    pg.evaluate("() => document.querySelector('foliate-view').goToFraction(1)")
+    pg.wait_for_selector(".r-end:not([hidden])", timeout=10000)
+    check("读到最后提示同一系列的下一卷", "三体Ⅱ" in pg.inner_text(".r-end"), pg.inner_text(".r-end"))
+    shot(pg, "44-next-volume")
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-top button[title='阅读设置']")
+    pg.click(".r-sheet button:has-text('从头读')")
+    pg.click(".dialog button:has-text('从头读')")
+    pg.wait_for_timeout(2800)
+    p0 = j("GET", f"/api/books/{santi['id']}/progress")
+    check("从头读：回到开头，进度从头算", "第一章" in pg.inner_text(".r-status") and p0["percent"] < 0.3, (pg.inner_text(".r-status"), p0))
+    pg.goto(BASE + "/#/read/987654")
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('已经删除'))", timeout=10000)
+    pg.wait_for_selector(".reader", state="detached", timeout=5000)
+    check("打开已经删除的书：提示一下就退出阅读器", True)
+    ctx.close()
+
+    # ---- 漫画：按书记住方向，最后一页提示下一卷 ----
+    comics = sorted([b for b in all_books() if b["kind"] == "comic"], key=lambda b: b["title"])
+    v1, v2 = comics[0], comics[1]
+    j("PATCH", f"/api/books/{v1['id']}/me", json={"prefs": {"comicMode": "single"}})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-comic"); watch_csp(pg)
+    img_ok = "() => { const i = document.querySelector('.comic img.pg'); return i && i.naturalWidth > 0 }"
+    pg.goto(BASE + f"/#/read/{v1['id']}")
+    pg.wait_for_function(img_ok, timeout=20000)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-top button[title='阅读设置']")
+    pg.click(".r-sheet button:has-text('从右到左')")
+    pg.keyboard.press("Escape")
+    prefs = wait(lambda: json.loads(j("GET", f"/api/books/{v1['id']}/read")["prefs"] or "{}").get("comicDir") == "rtl" and True, 10, 0.3, "漫画方向上传")
+    check("漫画的翻页方向按书记住", prefs)
+    pg.evaluate("() => document.querySelector('.reader').classList.remove('ui')")
+    for _ in range(12):
+        pg.keyboard.press("ArrowLeft")  # 从右到左：← 是下一页
+        pg.wait_for_timeout(120)
+    pg.wait_for_selector(".r-end:not([hidden])", timeout=10000)
+    check("漫画最后一页提示下一卷", "第2卷" in pg.inner_text(".r-end") or v2["title"] in pg.inner_text(".r-end"), pg.inner_text(".r-end"))
+    pg.click(".r-end button:has-text('继续读')")
+    pg.wait_for_function("(t) => document.querySelector('.reader .ttl')?.textContent === t", arg=v2["title"], timeout=10000)
+    pg.wait_for_function(img_ok, timeout=20000)
+    check("点“继续读”打开下一卷；方向只记在上一卷", pg.locator(".comic .spread.rtl").count() == 0)
+    ctx.close()
+
+    # ---- PDF：文字层、选字查字典、划线、书内搜索 ----
+    pdf = [b for b in all_books() if "深度学习" in b["title"]][0]
+    j("PATCH", f"/api/books/{pdf['id']}/me", json={"prefs": {"pdfMode": "scroll"}, "restart": True})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-pdf"); watch_csp(pg)
+    pg.goto(BASE + f"/#/read/{pdf['id']}")
+    pg.wait_for_selector(".pdfv .pg .textLayer[data-ready]", timeout=30000)
+    check("PDF 有文字层（能选字、复制）", pg.locator(".pdfv .pg .textLayer span").count() > 5)
+    pg.wait_for_timeout(2000)
+    ok = pg.evaluate("""() => { const tl = [...document.querySelectorAll('.pdfv .pg .textLayer[data-ready]')].find(e => { const r = e.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 }); const w = document.createTreeWalker(tl, NodeFilter.SHOW_TEXT); let n
+      while ((n = w.nextNode())) { const i = n.nodeValue.indexOf('Neural'); if (i >= 0) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + 15); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.querySelector('.pdfv').dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return true } }
+      return false }""")
+    pg.wait_for_selector(".r-dict.show .seltools .dot", timeout=8000)
+    check("PDF 选字弹出字典和划线工具", ok and "Neural networks" in pg.inner_text(".r-dict"))
+    pg.locator(".r-dict .seltools .dot").nth(2).click()
+    hl = wait(lambda: [b for b in j("GET", f"/api/books/{pdf['id']}/bookmarks") if b["kind"] == "highlight" and b["color"] == "blue"], 10, 0.3, "PDF 划线")
+    check("PDF 划线（存页码和字的位置）", re.match(r"^p:\d+:[\d.]+:\d+-\d+$", hl[0]["location"]) is not None and hl[0]["text"] == "Neural networks", hl)
+    pg.wait_for_function("() => (CSS.highlights.get('pdf-hl-blue')?.size || 0) >= 1", timeout=5000)
+    check("PDF 划线画在文字上", True)
+    pg.keyboard.press("t")
+    pg.wait_for_selector(".r-panel.show")
+    pg.click(".r-panel .ptabs button:has-text('搜索')")
+    pg.fill(".r-search input", "representations")
+    pg.press(".r-search input", "Enter")
+    pg.wait_for_selector(".r-panel .hit", timeout=15000)
+    pg.locator(".r-panel .hit").nth(20).click()
+    pg.wait_for_timeout(1200)
+    check("PDF 书内搜索，结果在页面上标出来", (pg.evaluate("() => CSS.highlights.get('pdf-search')?.size") or 0) >= 1 and "2 / 6" in pg.inner_text(".r-status"), pg.inner_text(".r-status"))
+    shot(pg, "45-pdf-text")
+    ctx.close()
+
+    # ---- App 里：原生上传进度后回报冲突；听书带位置 ----
+    fake = """window.__calls = []; window.__store = { 'shuku.token': %s }
+      window.ShukuNative = {
+        storageGet: k => (k in __store ? __store[k] : null), storageSet: (k, v) => { __store[k] = v }, storageRemove: k => { delete __store[k] },
+        storageKeys: () => JSON.stringify(Object.keys(__store)), version: () => '1.0-test', deviceName: () => '测试手机',
+        setRoute: j => {}, setNetwork: j => {}, setToken: t => {}, setThemeColor: () => {}, setReaderMode: () => {},
+        saveProgress: (id, body) => __calls.push(['saveProgress', id, body]), tts: (cmd, arg) => __calls.push(['tts', cmd, arg]),
+        prefs: () => JSON.stringify({ tts_engine: 'server' }), setPref: () => {}, downloads: () => '[]',
+        appInfo: () => JSON.stringify({ versionName: '1.0.0.7', versionCode: 7 }), openExternal: u => {}, ttsVoices: () => '[]',
+      }""" % json.dumps(TOKEN)
+    ctx = browser.new_context(viewport={"width": 412, "height": 900}, device_scale_factor=2, has_touch=True, is_mobile=True, locale="zh-CN")
+    ctx.add_init_script(fake)
+    pg = ctx.new_page(); attach(pg, "v7-native"); watch_csp(pg)
+    pg.goto(BASE + f"/#/read/{b2['id']}")
+    reader_ready(pg)
+    pg.evaluate("() => shukuNativeEvent('key', JSON.stringify({ dir: 'next' }))")
+    pg.wait_for_function("() => __calls.some(c => c[0] === 'saveProgress')", timeout=8000)
+    body = json.loads(pg.evaluate("() => __calls.filter(c => c[0] === 'saveProgress').pop()[2]"))
+    check("App 里进度交给原生：带 base 和 at", "base" in body and body["at"] > 0, body)
+    pg.evaluate("(id) => shukuNativeEvent('progress', JSON.stringify({ id, conflict: true, current: { file_id: 0, location: 'epubcfi(/6/2!/4/2/1:0)', percent: 0.05, device: '测试手表', updated_at: 9999999999 } }))", b2["id"])
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('测试手表'))", timeout=5000)
+    check("原生传进度时发现冲突：网页提示跳过去", True)
+    pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
+    pg.click(".r-top button[title='听书']")
+    pg.wait_for_function("() => __calls.some(c => c[0] === 'tts' && c[1] === 'start')", timeout=8000)
+    start = json.loads(pg.evaluate("() => __calls.filter(c => c[0] === 'tts' && c[1] === 'start').pop()[2]"))
+    seg = start["segments"][0]
+    check("听书交给原生：带文件编号，每句带位置和百分比", start["book"].get("file_id") and str(seg.get("loc", "")).startswith("sec:") and 0 <= seg.get("pct", -1) <= 1, {"book": start["book"], "seg": seg})
+    ctx.close()
+
+    check("网页自己的脚本、样式没有违反内容安全策略", not own_csp, own_csp[:5])
+
+
+def offline_v7():
+    """离线读书：存书、断网后从浏览器里打开（EPUB、PDF、漫画），进度排队、联网后同步；别人的令牌拿不到"""
+    section("网页：离线读书（浏览器 / iPhone 主屏幕）")
+    # 让 Playwright 也能拦下 Service Worker 发出的请求（模拟连不上书库）
+    os.environ["PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS"] = "1"
+    from playwright.sync_api import sync_playwright
+    chrome = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"))
+    errs = []
+    epub = book_by_title("三体Ⅱ·黑暗森林")
+    pdf = [b for b in all_books() if "深度学习" in b["title"]][0]
+    comic = sorted([b for b in all_books() if b["kind"] == "comic"], key=lambda b: b["title"])[0]
+    me = j("GET", "/api/me")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=chrome[-1] if chrome else None)
+        ctx = browser.new_context(viewport={"width": 1200, "height": 820}, locale="zh-CN")
+        ctx.add_init_script(f"localStorage.setItem('shuku.token', {json.dumps(TOKEN)})")
+        pg = ctx.new_page()
+        pg.on("pageerror", lambda e: errs.append(f"PAGEERROR {e}"))
+        pg.goto(BASE + "/")
+        pg.wait_for_selector(".book")
+        user = {"user": {"id": me["id"], "name": me.get("name", "")}}
+        for b in (epub, pdf, comic):
+            pg.evaluate("""async ([b, ctx]) => { const m = await import('/js/offline.js'); const btn = m.offlineButton(b, ctx); btn.id = 'ob' + b.id; document.body.append(btn); btn.click() }""", [{"id": b["id"], "title": b["title"]}, user])
+            pg.wait_for_function("(id) => /[KM]B/.test(document.querySelector('#ob' + id)?.textContent || '')", arg=b["id"], timeout=60000)
+        check("书的详情里点“离线可读”，存到浏览器里（EPUB、PDF、漫画）", pg.evaluate("(ids) => import('/js/offline.js').then(m => ids.every(id => m.isOfflineBook(id)))", [epub["id"], pdf["id"], comic["id"]]))
+        # 书库整个连不上：接口、网页本身都拿不到（Service Worker 去取也一样）
+        ctx.route(re.compile(r".*"), lambda route: route.abort())
+        res = pg.evaluate("""async (id) => { const t = localStorage.getItem('shuku.token'); const get = h => fetch('/api/books/' + id + '/read', { headers: { Authorization: 'Bearer ' + h } }).then(r => r.status + ':' + (r.headers.get('X-Shuku-Offline') || ''), () => 'neterr'); return [await get(t), await get('someone-else')] }""", epub["id"])
+        check("断网时用存好的内容回答；别人的令牌拿不到", res == ["200:1", "neterr"], res)
+        # 重新打开网页：用浏览器里存的网页启动，直接进离线书架（存书时已经把网页、阅读器、PDF 内核和字体预先存好）
+        pg.evaluate("() => { location.hash = '#/offline' }")
+        try:
+            pg.reload(timeout=30000)
+            pg.wait_for_selector(".offline-page .off-book", timeout=30000)
+        except Exception as ex:
+            errs.append(f"断网后重新打开网页：{ex}")
+        check("连不上书库时用存在浏览器里的网页打开，直接进离线书架", pg.locator(".offline-bar").count() == 1 and pg.locator(".offline-page .off-book").count() == 3,
+              pg.inner_text("body")[:300])
+        opened = []
+        for b, ready in ((epub, "() => !!document.querySelector('foliate-view')?.lastLocation?.cfi"),
+                         (pdf, "() => !!document.querySelector('.pdfv .pg canvas') && !!document.querySelector('.pdfv .pg .textLayer span')"),
+                         (comic, "() => { const i = document.querySelector('.comic img.pg'); return !!(i && i.naturalWidth > 0) }")):
+            try:
+                pg.locator(".off-book", has_text=b["title"]).locator("button:has-text('阅读')").click(timeout=10000)
+                pg.wait_for_function(ready, timeout=30000)
+                opened.append(b["kind"] if b is not pdf else "pdf")
+            except Exception:
+                opened.append("FAIL " + b["title"] + " " + (pg.inner_text(".reader .r-loading") if pg.locator(".reader .r-loading").count() else ""))
+            if b is epub:
+                pg.keyboard.press("ArrowRight")
+                pg.wait_for_timeout(2600)
+            pg.evaluate("() => { location.hash = '#/offline' }")  # 退出阅读器，回离线书架
+            try:
+                pg.wait_for_selector(".offline-page .off-book", timeout=10000)
+            except Exception as ex:
+                errs.append(f"回离线书架：{ex}")
+        check("断网时打开存好的书（EPUB、PDF 带文字层、漫画）", opened == ["book", "pdf", "comic"], opened)
+        q = pg.evaluate(f"() => JSON.parse(localStorage.getItem('shuku.pq.{me['id']}') || '{{}}')")
+        check("断网时的进度先记在这台设备上", str(epub["id"]) in q, q)
+        try:
+            wait(lambda: "进度还没同步" in pg.inner_text(".offline-page"), 10, 0.3, "离线书架显示没同步的进度")
+        except Exception:
+            pass
+        shelf = pg.inner_text(".offline-page")
+        check("离线书架：列出存好的书和占用空间", epub["title"] in shelf and "连不上书库" in shelf and "进度还没同步" in shelf, shelf[:300])
+        pg.screenshot(path=os.path.join(SHOTS, "46-offline.png"), full_page=True)
+        ctx.unroute_all(behavior="ignoreErrors")
+        pg.wait_for_timeout(300)
+        pg.evaluate("() => window.dispatchEvent(new Event('online'))")
+        wait(lambda: pg.evaluate(f"() => !localStorage.getItem('shuku.pq.{me['id']}')"), 20, 0.5, "联网后同步进度")
+        prog = j("GET", f"/api/books/{epub['id']}/progress")
+        check("联网后自动把离线时的进度传上去", prog["location"] == q[str(epub["id"])]["body"]["location"], prog)
+        pg.locator(".off-book", has_text=comic["title"]).locator("button:has-text('删掉')").click()
+        pg.click(".dialog button:has-text('删掉')")
+        wait(lambda: pg.evaluate("(id) => import('/js/offline.js').then(m => !m.isOfflineBook(id))", comic["id"]), 10, 0.3, "取消离线")
+        check("取消离线：从浏览器里删掉", pg.evaluate("() => caches.open('shuku-offline-v1').then(c => c.keys()).then(ks => !ks.some(k => /pages\\/0$/.test(k.url)))"))
+        ctx.close()
+        browser.close()
+    check("离线读书没有脚本错误", not errs, errs[:5])
 
 
 def ext_tests():
@@ -2143,6 +2523,10 @@ def main():
                 ui_tests()
             except Exception as e:
                 check("网页检查执行出错", False, f"{e}\n{traceback.format_exc(limit=4)}")
+            try:
+                offline_v7()
+            except Exception as e:
+                check("离线读书检查执行出错", False, f"{e}\n{traceback.format_exc(limit=4)}")
         if not ONLY_API or "--ext" in sys.argv:
             try:
                 ext_tests()

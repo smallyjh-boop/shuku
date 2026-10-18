@@ -408,12 +408,15 @@ export class NativeNarrator {
     return { key, segs: segs.map((s, n) => ({ text: s.text, i: n + offset })) }
   }
 
+  // 交给原生的句子：带上位置（和进度同一种格式）和百分比，熄屏读到哪里原生自己记进度
   pack(unit) {
+    const eng = this.shell.engine
     return unit.segs.map(s => {
       const id = `${unit.key}:${s.i}`
       this.segs.set(id, { key: unit.key, i: s.i, text: s.text })
       this.order.push(id)
-      return { id, text: s.text }
+      const loc = eng?.ttsLocation?.(unit.key, s.i)
+      return loc ? { id, text: s.text, loc: loc.location, pct: Math.round((loc.fraction || 0) * 10000) / 10000 } : { id, text: s.text }
     })
   }
 
@@ -433,7 +436,7 @@ export class NativeNarrator {
     this.lastKey = unit.key
     const info = this.shell.info || {}
     call('tts', 'start', {
-      book: { id: this.shell.id, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
+      book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
       voice: this.prefs.voice || '', speed: this.speed, segments: this.pack(unit),
     })
   }

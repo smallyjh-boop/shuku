@@ -1,9 +1,11 @@
 // 选词查字典：阅读时选中字词，弹出读音和释义（本地字典：中文、英文），可以让 AI 结合上下文解释（什么语言都行），
 // 点喇叭听发音。电脑上浮在选中的文字旁边，手机上从底部弹出，不挡住系统的“复制”菜单。
+// 弹窗最上面一行是划线工具：几种颜色、写笔记、复制（阅读设置里关了查字典时只显示这一行）。
 
 import { h, fill, icon, toast } from '../ui.js'
 import { api } from '../api.js'
 import { swipeDown } from './reader.js'
+import { COLORS } from './notes.js'
 
 const LANG_TAGS = { zh: 'zh-CN', 'zh-TW': 'zh-TW', en: 'en-US', ja: 'ja-JP', ko: 'ko-KR', th: 'th-TH', vi: 'vi-VN', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', it: 'it-IT', pt: 'pt-BR', ru: 'ru-RU' }
 
@@ -21,25 +23,35 @@ export class DictPopup {
   get open() { return this.el.classList.contains('show') }
 
   hide() {
+    // 关掉以后，同一次选择晚到的“选中了文字”不再弹出来（选区没动过，只是事件慢了一步）
+    if (this.open && this.sel?.gen != null) this.dismissedGen = this.sel.gen
     this.el.classList.remove('show')
     this.seq++
     this.text = ''
     try { this.audio?.pause() } catch {}
   }
 
-  async show({ text, context, rect }) {
-    text = (text || '').trim()
+  // sel：{ text, context, rect, ... }；tools：显示划线工具；lookup：查字典
+  async show(sel, { tools = false, lookup = true } = {}) {
+    const { context, rect } = sel
+    const text = (sel.text || '').trim()
     if (!text || (text === this.text && this.open)) return
+    if (sel.gen != null && sel.gen === this.dismissedGen) return
     const my = ++this.seq
+    this.sel = sel
     this.text = text
     this.context = context || ''
     this.lang = this.shell.engine?.lang?.() || ''
     this.result = null
+    this.lookup = lookup
+    this.tools = tools ? this.toolRow(sel) : null
     this.aiBox = h('div', { class: 'ai' })
-    this.body = h('div', { class: 'body' }, h('p', { class: 'muted' }, '查询中…'))
+    this.body = h('div', { class: 'body' }, lookup ? h('p', { class: 'muted' }, '查询中…') : null)
+    this.el.classList.toggle('tools-only', !lookup)
     this.render(text, '')
     this.el.classList.add('show')
     this.place(rect)
+    if (!lookup) return
     let r
     try {
       r = await api(`/api/dict?q=${encodeURIComponent(text)}&lang=${encodeURIComponent(this.lang)}`)
@@ -54,13 +66,25 @@ export class DictPopup {
     if (!r.words.length && !(r.chars || []).length && r.ai) this.explain()
   }
 
+  // 划线工具：颜色（点了就划线）、写笔记、复制
+  toolRow(sel) {
+    const notes = this.shell.notes
+    const done = () => { this.hide(); this.shell.engine?.clearSelection?.() }
+    return h('div', { class: 'seltools', role: 'toolbar', 'aria-label': '划线' },
+      COLORS.map(([c, css, name]) => h('button', { class: 'dot', style: { '--c': css }, title: '划线（' + name + '）', 'aria-label': '划线（' + name + '）', onclick: async () => { done(); await notes.add(sel, c) } })),
+      h('button', { class: 'btn small quiet', onclick: async () => { done(); await notes.add(sel, COLORS[0][0], true) } }, icon('edit'), '笔记'),
+      h('button', { class: 'btn small quiet', onclick: () => { copyText(sel); done() } }, '复制'),
+      !this.lookup ? h('button', { class: 'icon-btn', title: '关闭', 'aria-label': '关闭', onclick: () => this.hide() }, icon('close')) : null)
+  }
+
   // 标题行：选中的词、读音、发音 / AI / 关闭
   render(word, pron) {
+    if (!this.lookup) { fill(this.el, this.tools); return }
     const speak = h('button', { class: 'icon-btn', title: '发音', 'aria-label': '发音', onclick: () => this.speak(this.speakText()) }, icon('volume'))
     const ai = h('button', { class: 'btn small quiet ai-btn', title: '让 AI 结合上下文解释', onclick: () => this.explain() }, icon('sparkle'), 'AI 解释')
     const close = h('button', { class: 'icon-btn', title: '关闭', 'aria-label': '关闭', onclick: () => this.hide() }, icon('close'))
     this.hd = h('div', { class: 'hd' }, h('div', { class: 'hw' }, h('b', null, word), pron ? h('span', { class: 'py' }, pron) : null), speak, ai, close)
-    fill(this.el, this.hd, this.body, this.aiBox)
+    fill(this.el, this.tools, this.hd, this.body, this.aiBox)
   }
 
   speakText() {
@@ -163,27 +187,48 @@ export class DictPopup {
     }
   }
 
-  // 电脑上放在选中文字的下面（放不下就放上面），手机上从底部弹出
-  place(rect) {
-    const el = this.el
-    const sheet = innerWidth < 700 || !rect
-    el.classList.toggle('sheet', sheet)
-    if (sheet) { el.style.left = el.style.top = el.style.bottom = el.style.width = el.style.maxHeight = ''; return }
-    const w = Math.min(380, innerWidth - 24)
-    el.style.width = w + 'px'
-    el.style.left = Math.max(12, Math.min(innerWidth - w - 12, (rect.left + rect.right) / 2 - w / 2)) + 'px'
-    const below = innerHeight - rect.bottom - 16, above = rect.top - 16
-    if (below >= 240 || below >= above) {
-      el.style.top = rect.bottom + 8 + 'px'; el.style.bottom = ''; el.style.maxHeight = Math.max(160, below) + 'px'
-    } else {
-      el.style.top = ''; el.style.bottom = innerHeight - rect.top + 8 + 'px'; el.style.maxHeight = Math.max(160, above) + 'px'
-    }
-  }
+  place(rect) { placePopup(this.el, rect) }
 
   destroy() {
     this.hide()
     this.el.remove()
   }
+}
+
+// 电脑上放在选中文字的下面（放不下就放上面），手机上从底部弹出
+export function placePopup(el, rect, width = 380) {
+  const sheet = innerWidth < 700 || !rect
+  el.classList.toggle('sheet', sheet)
+  if (sheet) { el.style.left = el.style.top = el.style.bottom = el.style.width = el.style.maxHeight = ''; return }
+  const w = Math.min(width, innerWidth - 24)
+  el.style.width = w + 'px'
+  el.style.left = Math.max(12, Math.min(innerWidth - w - 12, (rect.left + rect.right) / 2 - w / 2)) + 'px'
+  // 选中的文字已经不在屏幕上（比如滚走了）：也放在屏幕里
+  const top = Math.min(Math.max(rect.top, 8), innerHeight - 8), bottom = Math.min(Math.max(rect.bottom, top), innerHeight - 8)
+  const below = innerHeight - bottom - 16, above = top - 16
+  if (below >= 240 || below >= above) {
+    el.style.top = Math.min(bottom + 8, innerHeight - 168) + 'px'; el.style.bottom = ''; el.style.maxHeight = Math.max(160, below) + 'px'
+  } else {
+    el.style.top = ''; el.style.bottom = Math.min(innerHeight - top + 8, innerHeight - 168) + 'px'; el.style.maxHeight = Math.max(160, above) + 'px'
+  }
+}
+
+// 复制文字：http 地址没有剪贴板接口，就放进一个临时的输入框里复制
+export async function copyText(sel) {
+  const text = sel?.text || ''
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); toast('已复制', { duration: 1200 }); return }
+  } catch {}
+  try {
+    const ta = h('textarea', { readonly: true, style: { position: 'fixed', left: '-9999px', top: '0', opacity: '0' } })
+    ta.value = text
+    document.body.append(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    ta.remove()
+    if (ok) { toast('已复制', { duration: 1200 }); return }
+  } catch {}
+  toast('复制失败，请用系统的复制', { error: true })
 }
 
 // 选中文字所在的那段话，截取前后各 n 个字给 AI 当上下文

@@ -1,13 +1,17 @@
 // 流式电子书：基于 foliate-js（EPUB、MOBI、AZW3、FB2，以及服务器转换成 EPUB 的 TXT 等）
+// 划线（foliate 的 overlayer）、脚注弹窗、繁体转简体也在这里
 
 import '/vendor/foliate-js/view.js'
-import { h, clear, fill, debounce } from '../ui.js'
+import { Overlayer } from '/vendor/foliate-js/overlayer.js'
+import * as CFI from '/vendor/foliate-js/epubcfi.js'
+import { h, clear, debounce, toast } from '../ui.js'
+import { api, download } from '../api.js'
+import { isNative, callJSON } from '../native.js'
 import { splitSentences } from './tts.js'
 import { around } from './dict.js'
+import { colorOf } from './notes.js'
 
 const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dd,dt,td,th,figcaption,pre,div'
-import { download } from '../api.js'
-import { isNative, callJSON } from '../native.js'
 
 const FONT_STACKS = {
   serif: '"Songti SC", "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", Georgia, serif',
@@ -15,11 +19,84 @@ const FONT_STACKS = {
   kai: '"Kaiti SC", "STKaiti", "KaiTi", "BiauKai", "AR PL UKai CN", serif',
 }
 
+// ---------- 繁体转简体：逐字替换文字节点，长度不变（CFI 位置、划线都还对得上） ----------
+let T2S = null
+async function t2sMap() {
+  if (T2S) return T2S
+  const r = await api('/api/dict/t2s')
+  const t = [...(r.t || '')], s = [...(r.s || '')]
+  const m = new Map()
+  for (let i = 0; i < t.length && i < s.length; i++) if (t[i] !== s[i] && t[i].length === s[i].length) m.set(t[i], s[i])
+  return (T2S = m)
+}
+const HAN = /[㐀-鿿豈-﫿]/
+export function t2sText(s, map) {
+  if (!s || !map?.size || !HAN.test(s)) return s
+  let out = ''
+  for (const ch of s) out += map.get(ch) || ch
+  return out
+}
+function convertDoc(doc, map, orig) {
+  if (!doc?.body || !map?.size) return
+  const w = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = w.nextNode())) {
+    const v = n.nodeValue
+    if (!HAN.test(v)) continue
+    const out = t2sText(v, map)
+    if (out !== v) { if (orig && !orig.has(n)) orig.set(n, v); n.nodeValue = out }
+  }
+}
+function revertDoc(doc, orig) {
+  if (!doc?.body || !orig) return
+  const w = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = w.nextNode())) if (orig.has(n)) { n.nodeValue = orig.get(n); orig.delete(n) }
+}
+
+// ---------- 脚注：注释链接（epub:type="noteref"、上标数字、[1] 这种）点了弹出内容，不跳走 ----------
+const OPS = 'http://www.idpf.org/2007/ops'
+const typesOf = el => new Set(((el?.getAttributeNS?.(OPS, 'type') || el?.getAttribute?.('epub:type') || '') + ' ' + (el?.getAttribute?.('role') || '')).split(/\s+/).filter(Boolean))
+function isSuper(el) {
+  if (!el?.matches) return false
+  if (el.matches('sup')) return true
+  try {
+    const va = el.ownerDocument.defaultView.getComputedStyle(el).verticalAlign
+    return va === 'super' || va === 'top' || va === 'text-top' || /^\d/.test(va)
+  } catch { return false }
+}
+function footnoteRef(a) {
+  const t = typesOf(a)
+  if (['noteref', 'biblioref', 'glossref', 'doc-noteref', 'doc-biblioref', 'doc-glossref'].some(x => t.has(x))) return 'yes'
+  if (t.has('backlink') || t.has('doc-backlink')) return null
+  if (isSuper(a) || (a.children.length === 1 && isSuper(a.children[0])) || isSuper(a.parentElement)) return 'maybe'
+  // 不是上标但写成 [1]、（1）、①、注1、* 这样的（光是数字的可能是章节目录，不算）
+  if (/^\s*([\[［(（〔]\s*\d{1,3}\s*[\]］)）〕]|[①-⑳]|[*†‡]|注\s*\d{1,3})\s*$/.test(a.textContent || '')) return 'maybe'
+  return null
+}
+const INLINE = 'a, span, sup, sub, em, strong, i, b, small, big'
+function noteBlock(el) {
+  const target = el
+  while (el?.matches?.(INLINE) && el.parentElement) el = el.parentElement
+  if (!el || el === el.ownerDocument.body) return target.nextElementSibling && !target.nextElementSibling.matches(INLINE) ? target.nextElementSibling : target
+  return el
+}
+function noteText(el) {
+  const sel = 'p, li, dd, blockquote, div'
+  const blocks = [...el.querySelectorAll(sel)].filter(b => !b.querySelector(sel))
+  const list = blocks.length > 1 ? blocks : [el]
+  return list.map(b => b.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n').slice(0, 4000)
+}
+
 export class Engine {
   kind = 'flow'
   toc = []
 
-  constructor(shell) { this.shell = shell }
+  constructor(shell) {
+    this.shell = shell
+    this.orig = new WeakMap() // 繁转简前的原文，关掉时换回来
+    this.secIndex = new Map() // 位置 → 第几节
+  }
 
   async open(info, saved) {
     const loading = this.shell.loading
@@ -42,18 +119,41 @@ export class Engine {
     await view.open(file)
     this.fxl = view.isFixedLayout
     if (this.fxl) this.kind = 'comic-fxl'
-    this.toc = view.book.toc || []
+    // 搜索、听书、脚注直接读章节内容（不排版）：繁转简打开时也转换
+    for (const s of view.book.sections || []) {
+      if (typeof s.createDocument !== 'function') continue
+      const make = s.createDocument.bind(s)
+      s.createDocument = async () => { const d = await make(); if (this.t2sOn && this.t2s) convertDoc(d, this.t2s); return d }
+    }
+    if (this.shell.prefs.t2s && !this.fxl) { try { this.t2s = await t2sMap(); this.t2sOn = true } catch {} }
+    this.toc = this.tocLabels(view.book.toc || [])
 
     view.addEventListener('relocate', e => {
-      const d = e.detail
-      this.last = d
-      const loc = d.location
-      this.shell.onRelocate({
-        location: d.cfi, fraction: d.fraction, chapter: d.tocItem?.label?.trim(),
-        label: loc ? `${Math.round(d.fraction * 100)}%` : undefined,
-      })
+      this.last = e.detail
+      this.emitRelocate()
     })
     view.addEventListener('load', e => this.onDocLoad(e.detail.doc))
+    // 划线：每一节排好版时把这一节的划线画上
+    view.addEventListener('create-overlay', e => this.drawAnnotationsIn(e.detail.index))
+    view.addEventListener('draw-annotation', e => {
+      const { draw, annotation } = e.detail
+      draw(Overlayer.highlight, { color: colorOf(annotation.color) })
+    })
+    view.addEventListener('show-annotation', e => {
+      const { value, range } = e.detail
+      this.shell.onAnnotationTap(value, this.rectOf(range))
+    })
+    // 链接：注释弹出来看；真的跳走（目录、正文里的链接）时记下原来的位置，好“返回原处”
+    view.addEventListener('link', e => {
+      const { a, href } = e.detail
+      const kind = footnoteRef(a)
+      if (kind) {
+        e.preventDefault()
+        this.showFootnote(a, href).catch(() => { this.shell.markJump(); view.goTo(href) })
+        return
+      }
+      this.shell.markJump()
+    })
     this.applyPrefs(this.shell.prefs, this.shell.theme)
     let target = saved?.location
     const sec = /^sec:(\d+):?([\d.]*)/.exec(String(target || ''))
@@ -81,25 +181,50 @@ export class Engine {
     if (want >= 0 && Math.abs(want - got) > 1) await this.view.goToFraction(p).catch(() => {})
   }
 
+  emitRelocate() {
+    const d = this.last
+    if (!d) return
+    this.shell.onRelocate({
+      location: d.cfi, fraction: d.fraction, chapter: this.tr(d.tocItem?.label?.trim()),
+      label: d.location ? `${Math.round(d.fraction * 100)}%` : undefined,
+      units: this.units(d),
+    })
+  }
+
+  // 剩余时间的计量单位：foliate 的“位置”（约 1500 字节一个）
+  units(d) {
+    const loc = d.location
+    if (!loc?.total) return null
+    const fr = this.view.getSectionFractions?.() || []
+    const end = fr[(d.section?.current ?? -2) + 1]
+    return { pos: loc.current, total: loc.total, chapterEnd: end != null ? Math.round(end * loc.total) : null, jump: 25 }
+  }
+
   onDocLoad(doc) {
-    // 点击：换算成屏幕坐标后交给外壳判断左右翻页
+    if (this.t2sOn && this.t2s) convertDoc(doc, this.t2s, this.orig)
+    // 书页里的点按、滑动、按键都算在读（阅读时长）
+    for (const ev of ['pointerdown', 'keydown', 'touchstart', 'wheel']) doc.addEventListener(ev, () => this.shell.markActivity(), { passive: true })
+    // 点击：换算成屏幕坐标后交给外壳判断左右翻页；点在划线上的交给划线
     doc.addEventListener('click', e => {
       if (e.target.closest('a[href]')) return
       const sel = doc.getSelection?.()
       if (sel && !sel.isCollapsed) return
+      const c = this.view.renderer.getContents?.().find(x => x.doc === doc)
+      const hit = c?.overlayer?.hitTest?.(e)
+      if (hit?.[0] && !String(hit[0]).startsWith('foliate-search:')) return
       const frame = doc.defaultView?.frameElement
       const r = frame?.getBoundingClientRect() || { left: 0, top: 0 }
       this.shell.tap(r.left + e.clientX, r.top + e.clientY)
     })
     doc.addEventListener('keydown', e => this.shell.onKey(e))
-    // 选中文字查字典：鼠标松开、手指抬起，或者手机上拖动选区的把手停下来以后
+    // 选中文字：划线、查字典。鼠标松开、手指抬起，或者手机上拖动选区的把手停下来以后
     let pressing = false
     const report = () => { if (!pressing) this.shell.onSelectText?.(this.selected(doc)) }
     const later = debounce(report, 450)
     doc.addEventListener('pointerdown', () => { pressing = true })
     doc.addEventListener('pointerup', () => { pressing = false; setTimeout(report, 30) })
     doc.addEventListener('pointercancel', () => { pressing = false; later() })
-    doc.addEventListener('selectionchange', later)
+    doc.addEventListener('selectionchange', () => { this.selGen = (this.selGen || 0) + 1; later() })
     // 在书里滚轮翻页
     let at = 0
     doc.addEventListener('wheel', e => {
@@ -139,42 +264,91 @@ export class Engine {
   applyPrefs(p, t) {
     const r = this.view?.renderer
     if (!r) return
-    if (!this.fxl) {
-      r.setAttribute('flow', p.flow)
-      const margins = [16, 40, 64, 96][p.margin] ?? 40
-      const narrow = innerWidth < 700
-      r.setAttribute('margin', (narrow ? 28 : 44) + 'px')
-      r.setAttribute('gap', (narrow ? Math.max(6, margins / 4) : margins / 8 + 3) + '%')
-      r.setAttribute('max-inline-size', Math.max(480, 860 - margins * 2) + 'px')
-      r.setAttribute('max-column-count', p.columns === '1' ? '1' : '2')
-      if (p.animated) r.setAttribute('animated', '')
-      else r.removeAttribute('animated')
-      r.setStyles?.(this.css(p, t))
+    if (this.fxl) {
+      r.setAttribute('zoom', p.fxlZoom === 'fit-width' ? 'fit-width' : 'fit-page')
+      return
+    }
+    r.setAttribute('flow', p.flow)
+    const margins = [16, 40, 64, 96][p.margin] ?? 40
+    const narrow = innerWidth < 700
+    r.setAttribute('margin', (narrow ? 28 : 44) + 'px')
+    r.setAttribute('gap', (narrow ? Math.max(6, margins / 4) : margins / 8 + 3) + '%')
+    r.setAttribute('max-inline-size', Math.max(480, 860 - margins * 2) + 'px')
+    r.setAttribute('max-column-count', p.columns === '1' ? '1' : '2')
+    if (p.animated) r.setAttribute('animated', '')
+    else r.removeAttribute('animated')
+    r.setStyles?.(this.css(p, t))
+    // overlayer 的划线颜色在深色主题下淡一点
+    this.view.style.setProperty('--overlayer-highlight-opacity', t.dark ? '.28' : '.34')
+    if (!this.t2sFailed && !!p.t2s !== !!this.t2sOn) this.setT2S(!!p.t2s)
+  }
+
+  // ---------- 繁体转简体 ----------
+  tr(s) { return this.t2sOn && this.t2s ? t2sText(s, this.t2s) : s }
+  tocLabels(items) {
+    return (items || []).map(it => ({ ...it, label: this.tr(it.label), subitems: it.subitems?.length ? this.tocLabels(it.subitems) : it.subitems }))
+  }
+  async setT2S(on) {
+    if (this.t2sBusy) return
+    this.t2sBusy = true
+    try {
+      if (on && !this.t2s) {
+        try { this.t2s = await t2sMap() } catch (e) { this.t2sFailed = true; toast('繁转简字表加载失败：' + (e.message || e), { error: true }); return }
+      }
+      this.t2sOn = on
+      for (const c of this.view.renderer.getContents?.() || []) {
+        if (on) convertDoc(c.doc, this.t2s, this.orig)
+        else revertDoc(c.doc, this.orig)
+        this.drawAnnotationsIn(c.index) // 文字换过以后重新画划线
+      }
+      this.toc = this.tocLabels(this.view.book.toc || [])
+      if (this.shell.ptab === 'toc') this.shell.drawPanel()
+      this.emitRelocate() // 章节名也跟着换
+    } finally {
+      this.t2sBusy = false
+      if (!this.t2sFailed && !!this.shell.prefs.t2s !== !!this.t2sOn) this.setT2S(!!this.shell.prefs.t2s)
     }
   }
 
   paged() { return this.fxl || this.shell.prefs.flow === 'paginated' }
   lang() { const l = this.view?.book?.metadata?.language; return (Array.isArray(l) ? l[0] : l) || '' }
 
-  // 选中的文字、所在的那段话、在屏幕上的位置
+  // 选中的文字、所在的那段话、在屏幕上的位置（划线要用 Range 和第几节）
   selected(doc) {
     const sel = doc.getSelection?.()
     if (!sel || sel.isCollapsed || !sel.rangeCount) return null
     const text = sel.toString().replace(/\s+/g, ' ').trim()
     if (!text || text.length > 300) return null
     const range = sel.getRangeAt(0)
-    const r = range.getBoundingClientRect()
-    const f = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 }
     let node = range.commonAncestorContainer
     if (node.nodeType !== 1) node = node.parentElement
     const block = node?.closest?.(BLOCKS) || node
-    return { text, context: around(block?.textContent, text), rect: { left: r.left + f.left, right: r.right + f.left, top: r.top + f.top, bottom: r.bottom + f.top } }
+    const index = this.view.renderer.getContents?.().find(c => c.doc === doc)?.index
+    return { text, context: around(block?.textContent, text), rect: this.rectOf(range), range: range.cloneRange(), index, doc, gen: this.selGen || 0 }
   }
+
+  rectOf(range) {
+    try {
+      const r = range.getBoundingClientRect()
+      const f = range.startContainer.ownerDocument.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 }
+      return { left: r.left + f.left, right: r.right + f.left, top: r.top + f.top, bottom: r.bottom + f.top }
+    } catch { return null }
+  }
+
+  clearSelection() {
+    for (const c of this.view?.renderer.getContents?.() || []) { try { c.doc.getSelection().removeAllRanges() } catch {} }
+  }
+
   rtl() { return this.view?.book?.dir === 'rtl' }
   next() { return this.view?.next() }
   prev() { return this.view?.prev() }
-  goTo(target) { return this.view?.goTo(target).catch(() => {}) }
+  goTo(target) {
+    const sec = /^sec:(\d+):?([\d.]*)/.exec(String(target ?? ''))
+    if (sec) return this.view?.renderer.goTo({ index: +sec[1], anchor: Math.min(1, +sec[2] || 0) }).catch(() => {})
+    return this.view?.goTo(target).catch(() => {})
+  }
   goToFraction(f) { return this.view?.goToFraction(f) }
+  restart() { return this.view?.goToTextStart().catch(() => this.view.goToFraction(0)) }
 
   excerpt() {
     try { return this.last?.range?.toString().trim().slice(0, 120) } catch { return '' }
@@ -186,7 +360,63 @@ export class Engine {
     return a === b || base(a) === base(b)
   }
 
-  panelTabs() { return [['toc', '目录'], ['bm', '书签'], ['search', '搜索']] }
+  compareLocations(a, b) { try { return CFI.compare(a, b) } catch { return 0 } }
+
+  // ---------- 划线 ----------
+  canAnnotate() { return !this.fxl } // 固定版式（漫画式的 EPUB）不能划线
+
+  annotationLocation(sel) {
+    if (this.fxl || !sel?.range || sel.index == null) return null
+    try { return this.view.getCFI(sel.index, sel.range) } catch { return null }
+  }
+
+  sectionOf(cfi) {
+    if (!this.secIndex.has(cfi)) {
+      let i = -1
+      try { i = this.view.resolveNavigation(cfi)?.index ?? -1 } catch {}
+      this.secIndex.set(cfi, i)
+    }
+    return this.secIndex.get(cfi)
+  }
+
+  drawAnnotationsIn(index) {
+    if (this.fxl) return
+    for (const b of this.shell.notes?.list || []) {
+      if (this.sectionOf(b.location) === index) this.view.addAnnotation({ value: b.location, color: b.color }).catch?.(() => {})
+    }
+  }
+
+  drawAnnotation(b) { if (!this.fxl) this.view.addAnnotation({ value: b.location, color: b.color })?.catch?.(() => {}) }
+  removeAnnotation(b) { this.view.deleteAnnotation({ value: b.location })?.catch?.(() => {}) }
+
+  // ---------- 脚注 ----------
+  async showFootnote(a, href) {
+    const book = this.view.book
+    const target = await book.resolveHref(href)
+    if (!target || target.index == null || !target.anchor) throw new Error('找不到注释')
+    const loaded = this.view.renderer.getContents?.().find(c => c.index === target.index)
+    const doc = loaded?.doc || await book.sections[target.index].createDocument()
+    let el = target.anchor(doc)
+    if (el?.startContainer) el = el.startContainer.nodeType === 1 ? el.startContainer : el.startContainer.parentElement
+    if (!el) throw new Error('找不到注释')
+    const block = noteBlock(el)
+    // 指向的是标题、或者一大段正文：不像注释，照常跳过去
+    if (block.matches?.('h1, h2, h3, h4, h5, h6, body, section, nav')) throw new Error('不是注释')
+    const text = this.tr(noteText(block))
+    if (!text || text.length > 2000) throw new Error('不是注释')
+    const ar = a.getBoundingClientRect()
+    const f = a.ownerDocument.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 }
+    const rect = { left: ar.left + f.left, right: ar.right + f.left, top: ar.top + f.top, bottom: ar.bottom + f.top }
+    this.shell.showPopover([
+      h('div', { class: 'fn-text' }, text.split('\n').map(p => h('p', null, p))),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small quiet', type: 'button', onclick: () => { this.shell.hidePopover(); this.shell.markJump(); this.view.goTo(href) } }, '跳到注释所在处'),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'btn small', type: 'button', onclick: () => this.shell.hidePopover() }, '关闭')),
+    ], rect)
+  }
+
+  panelTabs() { return this.fxl ? [['toc', '目录'], ['bm', '书签'], ['search', '搜索']] : [['toc', '目录'], ['bm', '书签'], ['notes', '笔记'], ['search', '搜索']] }
 
   drawPanelTab(tab, box) {
     if (tab !== 'search') return
@@ -210,8 +440,9 @@ export class Engine {
         for (const it of r.subitems || []) {
           if (n++ > 300) break
           const ex = it.excerpt || {}
-          results.append(h('div', { class: 'hit', onclick: () => { this.view.goTo(it.cfi); this.shell.closeOverlays(); this.shell.showUI(false) } },
-            r.label ? h('div', { style: { fontSize: '12px', opacity: .6 } }, r.label) : null,
+          const go = () => { this.shell.markJump(); this.view.goTo(it.cfi); this.shell.closeOverlays(); this.shell.showUI(false) }
+          results.append(h('div', { class: 'hit', tabindex: 0, role: 'button', onclick: go, onkeydown: e => { if (e.key === 'Enter') go() } },
+            r.label ? h('div', { style: { fontSize: '12px', opacity: .6 } }, this.tr(r.label)) : null,
             ex.pre || '', h('mark', null, ex.match || q), ex.post || ''))
         }
       }

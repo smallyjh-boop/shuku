@@ -1,9 +1,12 @@
-// 阅读器外壳：工具栏、目录/书签/搜索侧栏、阅读设置、夜间模式、进度同步
+// 阅读器外壳：工具栏、目录/书签/笔记/搜索侧栏、阅读设置、夜间模式、进度同步、剩余时间
 // 具体渲染交给 engines：flow（EPUB/MOBI/AZW3/FB2/TXT）、pdf、comic
 
-import { h, clear, fill, add, icon, iconBtn, toast, toastError, store, save, debounce, pct } from '../ui.js'
-import { api, apiUrl, deviceName, net } from '../api.js'
+import { h, clear, fill, icon, iconBtn, toast, toastError, store, save, debounce, pct, confirmDialog } from '../ui.js'
+import { api, deviceName, net } from '../api.js'
 import { isNative, call, callJSON, onNative } from '../native.js'
+import { putProgress, queueProgress, takeQueued, rememberUser, setActiveBook } from './sync.js'
+import { Notes } from './notes.js'
+import { placePopup } from './dict.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -26,7 +29,14 @@ const DEFAULTS = {
   brightness: 1, warm: false,
   comicMode: 'single', comicFit: 'contain', comicDir: 'auto', comicQuality: 'auto',
   pdfMode: 'scroll', pdfInvert: true, pdfZoom: 1,
+  t2s: false, fxlZoom: 'fit-page',
 }
+
+// 按书记住的设置。BOOK_ONLY 只记在这本书上（换一本书不跟着变）；
+// BOOK_DEFAULT 记在这本书上，同时当作以后打开别的书时的默认值
+const BOOK_ONLY = ['comicDir', 'pdfZoom', 't2s', 'fxlZoom']
+const BOOK_DEFAULT = ['comicMode', 'comicFit', 'pdfMode', 'flow', 'columns']
+const BOOK_KEYS = new Set([...BOOK_ONLY, ...BOOK_DEFAULT])
 
 let current = null
 
@@ -93,60 +103,102 @@ export function isNight(p) {
   return false
 }
 
+// 剩余时间：不到 1 分钟 / 12 分钟 / 3 小时 5 分
+function fmtMinutes(m) {
+  if (m < 1) return '不到 1 分钟'
+  if (m < 60) return Math.round(m) + ' 分钟'
+  const hh = Math.floor(m / 60), mm = Math.round(m % 60)
+  return hh + ' 小时' + (mm ? ' ' + mm + ' 分' : '')
+}
+
 class Reader {
   constructor(id, ctx, params, back) {
     this.id = id
     this.ctx = ctx
     this.params = params
     this.back = back
-    this.prefs = store('shuku.reader', DEFAULTS)
+    // 本机记的东西（位置、按书设置、阅读速度）按人分开：一台平板几个人轮流登录不会串
+    this.uid = rememberUser(ctx)
+    this.g = store('shuku.reader', DEFAULTS) // 全局设置
+    this.b = {}                                // 这本书自己的设置
+    this.prefs = { ...this.g }
     this.loc = null
     this.bookmarks = []
     this.cleanups = []
+    this.readSecs = 0
+    this.activeSecs = 0
   }
 
   get theme() { return themeById(isNight(this.prefs) ? this.prefs.nightTheme : this.prefs.theme) }
 
+  // ---------- 本机记的位置 ----------
+  get posKey() { return `shuku.pos.${this.uid}.${this.id}` }
+  localPos() {
+    let p = store(this.posKey, {})
+    // 1.0.0.7 以前不分人（那时只有管理员一个人）
+    if (!p.at && this.uid <= 1) p = store('shuku.pos.' + this.id, {})
+    return p.at ? p : null
+  }
+  savePos() {
+    if (!this.loc || !this.info) return
+    save(this.posKey, { file_id: this.info.file_id, location: this.loc.location, percent: this.loc.fraction, at: Date.now(), base: this.base })
+  }
+
   async start() {
     this.buildDOM()
+    setActiveBook(this.id)
     try {
       this.info = await api(`/api/books/${this.id}/read${this.params.get('file') ? '?file=' + this.params.get('file') : ''}`)
-    } catch (e) { return this.fail(e.message) }
+    } catch (e) { return e.status === 404 ? this.gone(e.message) : this.fail(e.message) }
+    if (this.destroyed) return
     this.titleEl.textContent = this.info.title
     this.panelTitle.textContent = this.info.title
     this.panelAuthor.textContent = this.info.author || ''
     document.title = this.info.title
+    this.loadBookPrefs()
     const mod = this.info.reader === 'pdf' ? await import('./pdf.js') : this.info.reader === 'comic' ? await import('./comic.js') : this.info.reader === 'foliate' ? await import('./flow.js') : null
     if (!mod) return this.fail(`这个格式（${this.info.format.toUpperCase()}）暂时不能在线阅读，可以在详情里下载。`)
     this.engine = new mod.Engine(this)
     this.kind = this.engine.kind
     this.root.dataset.kind = this.kind
-    // 进度：先用本机缓存，再用服务器上更新的
-    let saved = null
-    try {
-      const p = await api(`/api/books/${this.id}/progress`)
-      const local = store('shuku.pos.' + this.id, {})
-      saved = (local.at || 0) > (p.updated_at || 0) * 1000 + 2000 ? local : p
-      if (saved.file_id && saved.file_id !== this.info.file_id) saved = { percent: saved.percent } // 换了格式，只能按百分比
-    } catch {}
-    this.bookmarks = await api(`/api/books/${this.id}/bookmarks`).catch(() => [])
+    // 进度：本机记的和服务器上的，用新的那个
+    const local = this.localPos()
+    let server = null
+    try { server = await api(`/api/books/${this.id}/progress`) } catch (e) { if (e.status === 404) return this.gone(e.message) }
+    if (this.destroyed) return
+    this.base = server ? (server.updated_at || 0) : local?.base
+    let saved = server && local ? ((local.at || 0) > (server.updated_at || 0) * 1000 + 2000 ? local : server) : (local || server)
+    if (saved && saved === server && server.location) this.sentLoc = String(server.location) // 停在服务器记的位置上不用再传一次
+    if (saved?.file_id && saved.file_id !== this.info.file_id) saved = { percent: saved.percent } // 换了格式，只能按百分比
+    // 上次断网时没传上去的进度：这次接着传（阅读秒数也算上）
+    const q = !isNative && takeQueued(this.uid, this.id)
+    if (q) { this.readSecs += q.body.seconds || 0; if (this.base == null) this.base = q.body.base }
+    // 从笔记、搜索结果跳过来：直接打开到那个位置
+    const at = this.params.get('at')
+    if (at) { saved = { location: at }; this.sentLoc = null }
+    const all = await api(`/api/books/${this.id}/bookmarks`).catch(() => [])
+    this.bookmarks = all.filter(b => b.kind !== 'highlight')
+    this.notes = new Notes(this)
+    this.notes.setAll(all.filter(b => b.kind === 'highlight'))
     try {
       await this.engine.open(this.info, saved)
     } catch (e) {
       console.error(e)
       return this.fail('打开失败：' + (e.message || e))
     }
+    if (this.destroyed) return
     this.loading.remove()
     this.applyPrefs()
     this.drawPanel()
     this.ttsBtn.hidden = this.ttsTool.hidden = !this.engine.ttsSegments // 漫画没有文字，不显示听书
     // 从书内搜索结果跳过来：定位到那一章并找到那句话
-    const q = this.params.get('q')
-    if (q && this.engine.find) {
+    const sq = this.params.get('q')
+    if (sq && this.engine.find) {
       const sec = parseInt(this.params.get('sec') ?? '-1')
-      this.engine.find(q, isNaN(sec) ? -1 : sec).then(ok => toast(ok ? `已定位到“${q}”` : `没在这一章找到“${q}”`, { duration: 2000 })).catch(() => {})
+      this.engine.find(sq, isNaN(sec) ? -1 : sec).then(ok => toast(ok ? `已定位到“${sq}”` : `没在这一章找到“${sq}”`, { duration: 2000 })).catch(() => {})
     }
     this.startTimeTracking()
+    if (q) this.saveSoon()
     // 第一次打开时短暂显示工具栏，让人知道在哪
     this.showUI(true)
     this.uiTimer = setTimeout(() => { if (!this.panel.classList.contains('show') && !this.sheet.classList.contains('show')) this.showUI(false) }, 1800)
@@ -170,6 +222,15 @@ class Reader {
     this.showUI(true)
   }
 
+  // 书删掉了（或者没权限看了）：提示一下就退出，不再存进度
+  gone(msg) {
+    if (this.isGone) return
+    this.isGone = true
+    takeQueued(this.uid, this.id)
+    toast(msg && !/^请求失败/.test(msg) && msg !== '找不到这本书' ? msg : '这本书已经删除了', { error: true, duration: 4000 })
+    if (!this.destroyed) this.back()
+  }
+
   // ---------- DOM ----------
   buildDOM() {
     this.stage = h('div', { class: 'r-stage' })
@@ -189,12 +250,14 @@ class Reader {
       iconBtn('type', '阅读设置', () => this.toggleSheet()))
     this.slider = h('input', { type: 'range', min: 0, max: 1000, value: 0, 'aria-label': '阅读进度' })
     this.slider.addEventListener('input', () => { this.sliderPreview.textContent = pct(this.slider.value / 1000) })
-    this.slider.addEventListener('change', () => this.engine?.goToFraction(this.slider.value / 1000))
+    this.slider.addEventListener('change', () => { this.markJump(); this.engine?.goToFraction(this.slider.value / 1000) })
     this.chapEl = h('span', { class: 'chap' })
     this.sliderPreview = h('span', { style: { width: '42px', textAlign: 'right' } })
-    const tool = (ic, label, fn) => h('button', { class: 'icon-btn', onclick: fn, title: label }, icon(ic), h('span', null, label))
+    this.timeEl = h('div', { class: 'r-time' })
+    const tool = (ic, label, fn) => h('button', { class: 'icon-btn', type: 'button', onclick: fn, title: label, 'aria-label': label }, icon(ic), h('span', null, label))
     const bottom = h('div', { class: 'r-bar r-bottom' },
       h('div', { class: 'r-prog' }, this.chapEl, this.slider, this.sliderPreview),
+      this.timeEl,
       h('div', { class: 'r-tools' },
         tool('list', '目录', () => this.togglePanel()),
         tool('back', '上一页', () => this.engine?.prev()),
@@ -204,7 +267,7 @@ class Reader {
         tool('type', '设置', () => this.toggleSheet())))
     this.panelTitle = h('div', { class: 't' })
     this.panelAuthor = h('div', { class: 'a' })
-    this.ptabs = h('div', { class: 'ptabs' })
+    this.ptabs = h('div', { class: 'ptabs', role: 'tablist' })
     this.pbody = h('div', { class: 'pbody' })
     this.panel = h('aside', { class: 'r-panel', 'aria-label': '目录' },
       h('header', null, h('div', { class: 'grow' }, this.panelTitle, this.panelAuthor), iconBtn('close', '关闭', () => this.closeOverlays())), this.ptabs, this.pbody)
@@ -212,8 +275,14 @@ class Reader {
     // 打开设置、目录时，点书页（包括书还没打开、只有“正在打开”的时候）就关掉
     this.scrim = h('div', { class: 'r-scrim', onclick: () => this.closeOverlays() })
     swipeDown(this.sheet, () => this.closeOverlays())
+    // 跳转（目录、链接、搜索结果、拖进度条）以后，一键回到原来读的地方
+    this.backChip = h('button', { class: 'r-backchip', type: 'button', hidden: true, onclick: e => { e.stopPropagation(); this.jumpBack() } }, icon('undo'), h('span', null, '返回原处'))
+    // 读完时提示下一卷
+    this.endCard = h('div', { class: 'r-end', hidden: true, role: 'status' })
+    this.endCard.addEventListener('click', e => e.stopPropagation())
     this.root = h('div', { class: 'reader ui', dataset: { t: this.theme.id } },
       this.stage, this.warm, this.dim, h('div', { class: 'r-status' }, this.statusL, this.statusR),
+      this.backChip, this.endCard,
       top, bottom, this.scrim, this.panel, this.sheet, this.loading)
     document.body.append(this.root)
     document.body.style.overflow = 'hidden'
@@ -221,19 +290,24 @@ class Reader {
     const onKey = e => this.onKey(e)
     document.addEventListener('keydown', onKey)
     this.cleanups.push(() => document.removeEventListener('keydown', onKey))
-    // 离开页面前保存进度
+    // 离开页面前保存进度；回到前台时看看别的设备有没有读得更靠后
     const flush = () => this.saveProgress(true)
     addEventListener('pagehide', flush)
-    const vis = () => { if (document.hidden) flush(); else this.applyTheme() }
+    const vis = () => {
+      if (document.hidden) { this.hiddenAt = Date.now(); flush() }
+      else { this.applyTheme(); this.checkRemote() }
+    }
     document.addEventListener('visibilitychange', vis)
-    this.cleanups.push(() => { removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', vis) })
+    const online = () => this.retryQueued()
+    addEventListener('online', online)
+    this.cleanups.push(() => { removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', vis); removeEventListener('online', online); clearTimeout(this.retryT) })
     // 定时夜间：每分钟检查一次
     const t = setInterval(() => this.applyTheme(), 60000)
     const mq = matchMedia('(prefers-color-scheme: dark)')
     const onMq = () => this.applyTheme()
     mq.addEventListener('change', onMq)
     this.cleanups.push(() => { clearInterval(t); mq.removeEventListener('change', onMq) })
-    // App 里：音量键翻页、阅读时屏幕常亮（App 的设置里可以关）
+    // App 里：音量键翻页、阅读时屏幕常亮（App 的设置里可以关）；进度由原生上传，传完告诉这里结果
     if (isNative) {
       call('setReaderMode', true)
       this.cleanups.push(() => call('setReaderMode', false))
@@ -242,6 +316,11 @@ class Reader {
         this.showUI(false)
         d.dir === 'prev' ? this.engine.prev() : this.engine.next()
         this.markActivity(); this.afterUserNav()
+      }))
+      this.cleanups.push(onNative('progress', d => {
+        if (+d.id !== +this.id) return
+        if (d.conflict) this.onConflict(d.current)
+        else if (d.updated_at) { this.base = Math.max(this.base || 0, d.updated_at); this.savePos() }
       }))
     }
     // 鼠标滚轮翻页（翻页模式）
@@ -256,17 +335,17 @@ class Reader {
     }, { passive: false })
   }
 
-  // ---------- 阅读时长：页面在前台、最近 5 分钟有操作（或正在听书）才计时 ----------
+  // ---------- 阅读时长：页面在前台、最近 5 分钟有操作（翻页、点按、滑动、按键，包括书页里面的）或正在听书才计时 ----------
   markActivity() { this.lastAct = Date.now() }
 
   startTimeTracking() {
-    this.readSecs = 0
     this.markActivity()
     const tick = setInterval(() => {
       if (document.hidden && !this.narrator?.playing) return
-      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) this.readSecs++
+      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) { this.readSecs++; this.activeSecs++ }
     }, 1000)
-    const flushT = setInterval(() => { if (this.readSecs >= 30) this.saveProgress() }, 60000)
+    // 一直停在同一页（比如在看一大页 PDF）：攒够 5 分钟也传一次阅读时长
+    const flushT = setInterval(() => { if (this.readSecs >= 300) this.saveProgress() }, 60000)
     const act = () => this.markActivity()
     for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(ev, act, { passive: true })
     this.cleanups.push(() => {
@@ -291,18 +370,47 @@ class Reader {
 
   afterUserNav = debounce(() => this.narrator?.active && this.narrator.jumpToView(), 600)
 
-  // 选中了文字：查字典（阅读设置里可以关）
+  // 选中了文字：划线工具 + 查字典（阅读设置里可以关掉查字典）
   async onSelectText(sel) {
-    if (!sel || this.prefs.dict === false) return
+    if (!sel) return
+    const tools = !!(this.notes && this.engine?.annotationLocation && this.engine.canAnnotate?.() !== false)
+    const lookup = this.prefs.dict !== false
+    if (!tools && !lookup) return
     if (!this.dict) {
       const { DictPopup } = await import('./dict.js')
       this.dict ||= new DictPopup(this)
     }
-    this.dict.show(sel)
+    this.notes?.hide()
+    this.dict.show(sel, { tools, lookup })
   }
 
+  // 点了书里的划线
+  onAnnotationTap(location, rect) {
+    const b = this.notes?.byLocation(location)
+    if (b) this.notes.edit(b, rect)
+  }
+
+  // 小弹窗（脚注）：点书页、按 Esc 关掉
+  showPopover(nodes, rect) {
+    if (!this.pop) {
+      this.pop = h('div', { class: 'r-pop', role: 'dialog', 'aria-label': '注释' })
+      for (const ev of ['click', 'pointerdown', 'wheel']) this.pop.addEventListener(ev, e => e.stopPropagation())
+      this.root.append(this.pop)
+      swipeDown(this.pop, () => this.hidePopover())
+    }
+    this.dict?.hide(); this.notes?.hide()
+    fill(this.pop, ...nodes)
+    this.pop.classList.add('show')
+    placePopup(this.pop, rect, 420)
+  }
+  hidePopover() { this.pop?.classList.remove('show') }
+  get popOpen() { return !!this.pop?.classList.contains('show') }
+
   destroy() {
+    this.destroyed = true
+    setActiveBook(0)
     this.dict?.destroy()
+    this.notes?.destroy()
     this.saveProgress(true)
     this.narrator?.destroy()
     this.engine?.destroy()
@@ -316,6 +424,8 @@ class Reader {
   // ---------- 点击区域 ----------
   // 引擎把点击位置（屏幕坐标 x）交给这里：左 30% 上一页，右 30% 下一页，中间显示 / 隐藏工具栏
   tap(x, y) {
+    if (this.popOpen) { this.hidePopover(); return }
+    if (this.notes?.open) { this.notes.hide(); return }
     if (this.dict?.open) { this.dict.hide(); return }
     if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) { this.closeOverlays(); return }
     const w = innerWidth
@@ -343,14 +453,19 @@ class Reader {
 
   onKey(e) {
     if (e.target.closest?.('input, textarea, select')) { if (e.key === 'Escape') e.target.blur(); return }
+    // 按着 Ctrl、Alt、⌘ 的组合键（复制、查找、切换标签页……）交给浏览器
+    if (e.ctrlKey || e.metaKey || e.altKey) return
     const rtl = this.engine?.rtl?.()
     const k = e.key
     if (k === 'ArrowRight' || k === 'PageDown' || (k === ' ' && !e.shiftKey)) { e.preventDefault(); (k === 'ArrowRight' && rtl) ? this.engine?.prev() : this.engine?.next() }
     else if (k === 'ArrowLeft' || k === 'PageUp' || (k === ' ' && e.shiftKey)) { e.preventDefault(); (k === 'ArrowLeft' && rtl) ? this.engine?.next() : this.engine?.prev() }
     else if (k === 'ArrowDown' && this.engine?.paged?.()) { e.preventDefault(); this.engine.next() }
     else if (k === 'ArrowUp' && this.engine?.paged?.()) { e.preventDefault(); this.engine.prev() }
+    else if (k === 'Escape' && this.popOpen) this.hidePopover()
+    else if (k === 'Escape' && this.notes?.open) this.notes.hide()
     else if (k === 'Escape' && this.dict?.open) this.dict.hide()
     else if (k === 'Escape') { if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) this.closeOverlays(); else if (document.fullscreenElement) document.exitFullscreen(); else this.back() }
+    else if (e.shiftKey) return
     else if (k === 't') this.togglePanel()
     else if (k === 'n') this.toggleNight()
     else if (k === 'b') this.toggleBookmark()
@@ -366,8 +481,13 @@ class Reader {
   }
 
   // ---------- 位置、进度 ----------
-  onRelocate({ location, fraction, chapter, label }) {
+  onRelocate({ location, fraction, chapter, label, units }) {
     this.dict?.hide()
+    this.hidePopover()
+    // 是不是自己翻的页（刚有过操作）：是的话，以后存进度时以这台为准
+    const moved = !!this.loc && String(location) !== String(this.loc.location)
+    if (moved && Date.now() - (this.lastAct || 0) < 15000) this.userMoved = true
+    this.markActivity()
     this.loc = { location, fraction }
     this.slider.value = Math.round((fraction || 0) * 1000)
     this.sliderPreview.textContent = pct(fraction)
@@ -377,8 +497,12 @@ class Reader {
     this.chapter = chapter
     this.markBookmark()
     this.markToc()
-    save('shuku.pos.' + this.id, { file_id: this.info.file_id, location, percent: fraction, at: Date.now() })
+    this.savePos()
     this.saveSoon()
+    this.measureSpeed(units)
+    this.showTimeLeft(units)
+    if (moved) this.chipTick()
+    if (fraction >= 0.995) this.onEnd()
   }
 
   saveSoon = debounce(() => this.saveProgress(), 1500)
@@ -386,22 +510,165 @@ class Reader {
   // 熄屏听书时没有排版，只记下读到的位置
   saveLocation(location, fraction) {
     this.loc = { location, fraction }
-    save('shuku.pos.' + this.id, { file_id: this.info?.file_id, location, percent: fraction, at: Date.now() })
+    this.userMoved = true
+    this.savePos()
     this.saveSoon()
   }
 
+  // 上传进度：位置没变、也没攒下阅读时长就不传；带上 base，别的设备读过时服务器不覆盖、回冲突
   saveProgress(keepalive) {
-    if (!this.loc || !this.info) return
+    if (!this.loc || !this.info || this.isGone) return
+    const location = String(this.loc.location ?? '')
     const seconds = this.readSecs || 0
+    if (location === this.sentLoc && seconds < (keepalive ? 1 : 30)) return
     this.readSecs = 0
-    const body = JSON.stringify({ file_id: this.info.file_id, location: String(this.loc.location ?? ''), percent: this.loc.fraction || 0, device: deviceName, seconds })
-    // App 里交给原生保存：离线时先存在手机上，联网后再同步
-    if (isNative) { call('saveProgress', this.id, body); return }
-    const url = (net.base || '') + `/api/books/${this.id}/progress`
-    const headers = { 'Content-Type': 'application/json' }
-    const tok = localStorage.getItem('shuku.token')
-    if (tok) headers.Authorization = 'Bearer ' + tok
-    fetch(url, { method: 'PUT', body, headers, keepalive: !!keepalive, credentials: net.base ? 'omit' : 'same-origin' }).catch(() => {})
+    // 知道别的设备读过（提示过），这台又自己翻了页：以这台为准
+    if (this.serverAhead && this.userMoved) { this.base = Math.max(this.base || 0, this.serverAhead.updated_at || 0); this.serverAhead = null }
+    this.userMoved = false
+    const body = { file_id: this.info.file_id, location, percent: this.loc.fraction || 0, device: deviceName, seconds, at: Date.now() }
+    if (this.base != null) body.base = this.base
+    this.sentLoc = location
+    // App 里交给原生保存：离线时先存在手机上，联网后再同步；结果用 progress 事件回来
+    if (isNative) { call('saveProgress', this.id, JSON.stringify(body)); return }
+    putProgress(this.id, body, { keepalive }).then(r => this.onSaved(r, body))
+  }
+
+  onSaved(r, body) {
+    if (r.ok) { this.base = Math.max(this.base || 0, r.updated_at || 0); if (!this.destroyed) this.savePos() }
+    else if (r.conflict) { if (!this.destroyed) this.onConflict(r.current) }
+    else if (r.gone) { if (!this.destroyed) this.gone() }
+    else {
+      // 断网、服务器出错：存在本机，过一会儿再传
+      queueProgress(this.uid, this.id, body, this.info?.title)
+      if (this.sentLoc === body.location) this.sentLoc = null
+      clearTimeout(this.retryT)
+      if (!this.destroyed && r.status !== 401) this.retryT = setTimeout(() => this.retryQueued(), 30000)
+    }
+  }
+
+  async retryQueued() {
+    if (isNative || this.isGone || this.destroyed) return
+    const it = takeQueued(this.uid, this.id)
+    if (!it) return
+    const body = { ...it.body }
+    if (this.base != null) body.base = this.base
+    this.onSaved(await putProgress(this.id, body), body)
+  }
+
+  // 别的设备读过这本书：提示跳过去（不跳就以这台为准，接着读的时候覆盖）
+  describe(cur) {
+    const l = String(cur.location || '')
+    if (/^p:\d+/.test(l)) return '第 ' + l.split(':')[1] + ' 页'
+    if (/^i:\d+/.test(l)) return '第 ' + (+l.split(':')[1] + 1) + ' 页'
+    return pct(cur.percent)
+  }
+
+  onConflict(cur) {
+    if (!cur?.updated_at) return
+    if (this.loc && String(cur.location) === String(this.loc.location)) { this.base = Math.max(this.base || 0, cur.updated_at); return }
+    this.serverAhead = cur
+    if (this.promptedAt === cur.updated_at) return
+    this.promptedAt = cur.updated_at
+    const who = cur.device ? `另一台设备（${cur.device}）` : '另一台设备'
+    toast(`${who}读到了 ${this.describe(cur)}，跳过去？`, { action: { label: '跳过去', run: () => this.jumpTo(cur) }, duration: 15000 })
+  }
+
+  jumpTo(cur) {
+    if (this.destroyed || !this.engine) return
+    this.base = Math.max(this.base || 0, cur.updated_at || 0)
+    this.serverAhead = null
+    this.markJump()
+    if (cur.file_id && this.info && cur.file_id !== this.info.file_id) this.engine.goToFraction(cur.percent || 0)
+    else if (cur.location) this.engine.goTo(cur.location)
+    else this.engine.goToFraction(cur.percent || 0)
+  }
+
+  // 回到前台：别的设备在这期间读过的话提示一下
+  async checkRemote() {
+    if (!this.info || !this.loc || this.narrator?.active || this.isGone) return
+    if (Date.now() - (this.hiddenAt || 0) < 3000) return
+    let p
+    try { p = await api(`/api/books/${this.id}/progress`) } catch (e) { if (e.status === 404) this.gone(e.message); return }
+    if (this.destroyed || !p?.updated_at || p.updated_at <= (this.base || 0)) return
+    this.onConflict(p)
+  }
+
+  // ---------- 跳转后“返回原处” ----------
+  markJump() {
+    if (!this.loc) return
+    this.jumpFrom = { ...this.loc }
+    this.chipCount = 0
+    this.chipShowAt = Date.now()
+    this.backChip.hidden = false
+  }
+
+  chipTick() {
+    if (this.backChip.hidden) return
+    // 跳过去以后又自己翻了好多页，或者过了几分钟：不再显示
+    if (++this.chipCount > 12 || Date.now() - this.chipShowAt > 180000) this.backChip.hidden = true
+  }
+
+  jumpBack() {
+    const f = this.jumpFrom
+    this.backChip.hidden = true
+    this.jumpFrom = null
+    if (f) this.engine?.goTo(f.location)
+  }
+
+  // ---------- 读完：提示同一系列的下一本 ----------
+  async onEnd() {
+    if (this.endChecked) return
+    this.endChecked = true
+    let r
+    try { r = await api(`/api/books/${this.id}/next`) } catch { return }
+    const nb = r?.next
+    if (!nb || this.destroyed) return
+    fill(this.endCard,
+      h('div', { class: 'grow' }, h('small', null, '读完了 · 下一卷'), h('b', null, nb.title)),
+      h('button', { class: 'btn small primary', type: 'button', onclick: () => { location.hash = `#/read/${nb.id}` } }, '继续读'),
+      iconBtn('close', '关闭', () => { this.endCard.hidden = true }))
+    this.endCard.hidden = false
+  }
+
+  // ---------- 剩余时间：按这个人最近的阅读速度估算（没有数据时不显示） ----------
+  get speedKey() { return 'shuku.speed.' + this.uid }
+
+  measureSpeed(u) {
+    if (!u) return
+    const s = this.sp
+    // 往回翻、一下跳很远（目录、进度条）：重新开始量
+    if (!s || u.pos < s.pos || u.pos - s.pos > (u.jump || 20)) { this.sp = { pos: u.pos, secs: this.activeSecs }; return }
+    const ds = this.activeSecs - s.secs, du = u.pos - s.pos
+    if (ds < 60 || du <= 0) return
+    const rate = du / (ds / 60)
+    const all = store(this.speedKey, {})
+    all[this.kind] = all[this.kind] ? all[this.kind] * 0.7 + rate * 0.3 : rate
+    save(this.speedKey, all)
+    this.sp = { pos: u.pos, secs: this.activeSecs }
+  }
+
+  showTimeLeft(u) {
+    const sp = store(this.speedKey, {})[this.kind]
+    if (!u || !(sp > 0)) { this.timeEl.textContent = ''; return }
+    const parts = []
+    if (u.chapterEnd != null && u.chapterEnd > u.pos) parts.push('本章还剩约 ' + fmtMinutes((u.chapterEnd - u.pos) / sp))
+    if (u.total > u.pos) parts.push('全书还剩约 ' + fmtMinutes((u.total - u.pos) / sp))
+    this.timeEl.textContent = parts.join(' · ')
+  }
+
+  // ---------- 从头读 ----------
+  async restart() {
+    if (!await confirmDialog({ title: '从头读？', message: '这本书的阅读进度会清零（书签和笔记保留），在别的设备上打开也从头开始。', ok: '从头读' })) return
+    try { await api(`/api/books/${this.id}/me`, { method: 'PATCH', body: { restart: true } }) } catch (e) { toastError(e); return }
+    this.base = 0
+    this.serverAhead = null
+    this.sentLoc = null
+    try { localStorage.removeItem(this.posKey) } catch {}
+    this.closeOverlays()
+    this.markJump()
+    if (this.engine?.restart) await this.engine.restart()
+    else await this.engine?.goToFraction(0)
+    toast('已回到开头', { duration: 1500 })
   }
 
   // ---------- 主题、排版 ----------
@@ -411,6 +678,7 @@ class Reader {
     this.root.classList.toggle('invert', t.dark && this.prefs.pdfInvert)
     this.nightBtn.replaceChildren(icon(t.dark ? 'sun' : 'moon'))
     this.nightBtn.title = t.dark ? '切换到日间' : '切换到夜间'
+    this.nightBtn.setAttribute('aria-label', this.nightBtn.title)
     document.querySelector('#theme-color')?.setAttribute('content', t.bg)
     call('setThemeColor', t.bg, t.dark)
     this.dim.style.opacity = String(1 - this.prefs.brightness)
@@ -419,12 +687,43 @@ class Reader {
   }
 
   applyPrefs() {
-    save('shuku.reader', this.prefs)
+    save('shuku.reader', this.g)
     this.applyTheme()
   }
 
-  setPref(k, v) {
+  // ---------- 按书记住的设置 ----------
+  get bpKey() { return `shuku.bp.${this.uid}.${this.id}` }
+
+  loadBookPrefs() {
+    let b = {}
+    try { const v = JSON.parse(this.info.prefs || '{}'); b = typeof v === 'string' ? JSON.parse(v) : v } catch {}
+    // 上次改了没传上去（断网）：用本机的，再传一次
+    const local = store(this.bpKey, {})
+    if (local.dirty && local.prefs) { b = local.prefs; this.saveBookPrefsSoon() }
+    this.b = {}
+    for (const [k, v] of Object.entries(b || {})) if (BOOK_KEYS.has(k)) this.b[k] = v
+    this.prefs = { ...this.g, ...this.b }
+  }
+
+  saveBookPrefsSoon = debounce(() => this.saveBookPrefs(), 1200)
+
+  async saveBookPrefs() {
+    const prefs = { ...this.b }
+    save(this.bpKey, { prefs, dirty: true })
+    try {
+      await api(`/api/books/${this.id}/me`, { method: 'PATCH', body: { prefs } })
+      save(this.bpKey, { prefs })
+    } catch {}
+  }
+
+  setPrefQuiet(k, v) {
     this.prefs[k] = v
+    if (!BOOK_ONLY.includes(k)) this.g[k] = v
+    if (BOOK_KEYS.has(k)) { this.b[k] = v; this.saveBookPrefsSoon() }
+  }
+
+  setPref(k, v) {
+    this.setPrefQuiet(k, v)
     this.applyPrefs()
     this.drawSheet()
   }
@@ -438,7 +737,7 @@ class Reader {
     toast(night ? '已切换到夜间模式' : '已切换到日间模式', { duration: 1400 })
   }
 
-  // ---------- 侧栏：目录、书签、搜索 ----------
+  // ---------- 侧栏：目录、书签、笔记、搜索 ----------
   togglePanel(tab) {
     clearTimeout(this.uiTimer) // 刚打开书时工具栏会自动隐藏，用户已经在操作就不要再收起面板
     const show = !this.panel.classList.contains('show') || tab
@@ -451,10 +750,11 @@ class Reader {
   drawPanel() {
     const tabs = this.engine?.panelTabs?.() || [['toc', '目录'], ['bm', '书签']]
     if (!this.ptab || !tabs.some(t => t[0] === this.ptab)) this.ptab = tabs[0][0]
-    fill(this.ptabs, ...tabs.map(([k, l]) => h('button', { class: this.ptab === k ? 'on' : '', onclick: () => { this.ptab = k; this.drawPanel() } }, l)))
+    fill(this.ptabs, ...tabs.map(([k, l]) => h('button', { class: this.ptab === k ? 'on' : '', type: 'button', role: 'tab', 'aria-selected': this.ptab === k ? 'true' : 'false', onclick: () => { this.ptab = k; this.drawPanel() } }, l)))
     clear(this.pbody)
     if (this.ptab === 'toc') this.drawToc()
     else if (this.ptab === 'bm') this.drawBookmarks()
+    else if (this.ptab === 'notes') this.notes?.drawTab(this.pbody)
     else this.engine?.drawPanelTab?.(this.ptab, this.pbody)
   }
 
@@ -464,13 +764,20 @@ class Reader {
     const box = h('div', { class: 'toc' })
     const walk = (items, lvl) => {
       for (const it of items) {
-        box.append(h('a', { class: 'l' + lvl, dataset: { href: it.href ?? '' }, onclick: () => { this.engine.goTo(it.href); this.closeOverlays(); this.showUI(false) } }, it.label))
+        box.append(h('a', { class: 'l' + lvl, tabindex: 0, role: 'button', dataset: { href: it.href ?? '' }, onclick: () => this.goToc(it), onkeydown: e => { if (e.key === 'Enter') this.goToc(it) } }, it.label))
         if (it.subitems?.length && lvl < 3) walk(it.subitems, lvl + 1)
       }
     }
     walk(toc, 1)
     this.pbody.append(box)
     this.markToc()
+  }
+
+  goToc(it) {
+    if (it.href == null) return
+    this.markJump()
+    this.engine.goTo(it.href)
+    this.closeOverlays(); this.showUI(false)
   }
 
   markToc() {
@@ -484,7 +791,8 @@ class Reader {
   drawBookmarks() {
     if (!this.bookmarks.length) { this.pbody.append(h('p', { class: 'muted', style: { padding: '16px 18px' } }, '还没有书签。点右上角的书签图标，或按 B 键添加。')); return }
     for (const b of this.bookmarks) {
-      this.pbody.append(h('div', { class: 'bm', onclick: () => { this.engine.goTo(b.location); this.closeOverlays(); this.showUI(false) } },
+      const go = () => { this.markJump(); this.engine.goTo(b.location); this.closeOverlays(); this.showUI(false) }
+      this.pbody.append(h('div', { class: 'bm', tabindex: 0, role: 'button', onclick: go, onkeydown: e => { if (e.key === 'Enter') go() } },
         h('div', { class: 'grow' }, h('div', null, b.label || '书签'), h('small', null, new Date(b.created_at * 1000).toLocaleDateString('zh-CN'))),
         iconBtn('trash', '删除书签', async e => { e.stopPropagation(); await api('/api/bookmarks/' + b.id, { method: 'DELETE' }).catch(toastError); this.bookmarks = this.bookmarks.filter(x => x.id !== b.id); this.drawPanel(); this.markBookmark() })))
     }
@@ -507,7 +815,7 @@ class Reader {
         toast('已删除书签', { duration: 1400 })
       } else {
         const label = `${this.chapter || ''} · ${pct(this.loc.fraction)}`.replace(/^ · /, '')
-        const b = await api(`/api/books/${this.id}/bookmarks`, { method: 'POST', body: { location: String(this.loc.location), label, text: this.engine?.excerpt?.() || '' } })
+        const b = await api(`/api/books/${this.id}/bookmarks`, { method: 'POST', body: { kind: 'bookmark', location: String(this.loc.location), label, text: this.engine?.excerpt?.() || '' } })
         this.bookmarks.push(b)
         toast('已添加书签', { duration: 1400 })
       }
@@ -530,14 +838,17 @@ class Reader {
     if (!this.sheet) return
     const p = this.prefs
     const night = isNight(p)
-    const seg = (key, opts, onPick) => h('div', { class: 'seg' }, opts.map(([v, l]) => h('button', { class: p[key] === v ? 'on' : '', onclick: () => onPick ? onPick(v) : this.setPref(key, v) }, l)))
+    const seg = (key, opts, onPick) => h('div', { class: 'seg', role: 'group' }, opts.map(([v, l]) => h('button', { class: p[key] === v ? 'on' : '', type: 'button', 'aria-pressed': p[key] === v ? 'true' : 'false', onclick: () => onPick ? onPick(v) : this.setPref(key, v) }, l)))
     const stepper = (label, key, min, max, step, fmt) => {
       const val = h('span', { class: 'val' }, fmt(p[key]))
       const r = h('input', { type: 'range', min, max, step, value: p[key], 'aria-label': label })
-      r.oninput = () => { val.textContent = fmt(+r.value); this.prefs[key] = +r.value; this.applyPrefsSoon() }
+      r.oninput = () => { val.textContent = fmt(+r.value); this.setPrefQuiet(key, +r.value); this.applyPrefsSoon() }
       return h('div', { class: 'stepper' }, h('span', { class: 'lbl' }, label), r, val)
     }
-    const swatch = (t, key) => h('button', { class: p[key] === t.id ? 'on' : '', style: { background: t.bg, color: t.fg }, title: t.name, onclick: () => { this.prefs[key] = t.id; localStorage.removeItem('shuku.nightOverride'); this.applyPrefs(); this.drawSheet() } }, t.name)
+    const sw = (key, label, hint) => h('div', { class: 'set-row' },
+      h('div', null, h('div', { class: 'l' }, label), hint ? h('div', { class: 'h', style: { fontSize: '12px', opacity: .7 } }, hint) : null),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: key === 'dict' ? p.dict !== false : !!p[key], 'aria-label': label, onchange: e => this.setPref(key, e.target.checked) }), h('i')))
+    const swatch = (t, key) => h('button', { class: p[key] === t.id ? 'on' : '', type: 'button', style: { background: t.bg, color: t.fg }, title: t.name, 'aria-label': t.name + '色主题', onclick: () => { this.setPrefQuiet(key, t.id); localStorage.removeItem('shuku.nightOverride'); this.applyPrefs(); this.drawSheet() } }, t.name)
     const kind = this.kind
     const parts = []
     parts.push(h('h4', null, night ? '夜间主题' : '主题'),
@@ -546,12 +857,12 @@ class Reader {
     parts.push(h('h4', null, '自动夜间模式'),
       seg('nightMode', [['system', '跟随系统'], ['time', '定时'], ['off', '关闭']], v => { localStorage.removeItem('shuku.nightOverride'); this.setPref('nightMode', v) }))
     if (p.nightMode === 'time') {
-      const s = h('input', { class: 'input', type: 'time', value: p.nightStart }), e = h('input', { class: 'input', type: 'time', value: p.nightEnd })
+      const s = h('input', { class: 'input', type: 'time', value: p.nightStart, 'aria-label': '开始时间' }), e = h('input', { class: 'input', type: 'time', value: p.nightEnd, 'aria-label': '结束时间' })
       s.onchange = () => this.setPref('nightStart', s.value); e.onchange = () => this.setPref('nightEnd', e.value)
       parts.push(h('div', { class: 'time-row' }, s, '到', e))
     }
     parts.push(h('h4', null, '亮度'), stepper('亮度', 'brightness', 0.3, 1, 0.05, v => Math.round(v * 100) + '%'),
-      h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '暖色滤镜'), h('div', { class: 'h', style: { fontSize: '12px', opacity: .7 } }, '减少蓝光，适合睡前')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.warm, onchange: e => this.setPref('warm', e.target.checked) }), h('i'))))
+      sw('warm', '暖色滤镜', '减少蓝光，适合睡前'))
     if (kind === 'flow') {
       parts.push(h('h4', null, '字体'), seg('font', FONTS),
         h('h4', null, '排版'),
@@ -560,16 +871,19 @@ class Reader {
         stepper('段距', 'paraSpace', 0, 1.6, 0.1, v => v.toFixed(1)),
         stepper('页边距', 'margin', 0, 3, 1, v => ['窄', '标准', '宽', '很宽'][v]),
         h('div', { class: 'row', style: { gap: '8px', marginTop: '10px' } },
-          ['紧凑', '标准', '舒适'].map((l, i) => h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => {
-            Object.assign(this.prefs, [{ fontSize: 17, lineHeight: 1.6, paraSpace: 0.3, margin: 0 }, { fontSize: 19, lineHeight: 1.85, paraSpace: 0.5, margin: 1 }, { fontSize: 21, lineHeight: 2.1, paraSpace: 0.8, margin: 2 }][i])
+          ['紧凑', '标准', '舒适'].map((l, i) => h('button', { class: 'btn small', type: 'button', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => {
+            for (const [k, v] of Object.entries([{ fontSize: 17, lineHeight: 1.6, paraSpace: 0.3, margin: 0 }, { fontSize: 19, lineHeight: 1.85, paraSpace: 0.5, margin: 1 }, { fontSize: 21, lineHeight: 2.1, paraSpace: 0.8, margin: 2 }][i])) this.setPrefQuiet(k, v)
             this.applyPrefs(); this.drawSheet()
           } }, l))),
         h('h4', null, '翻页方式'), seg('flow', [['paginated', '左右翻页'], ['scrolled', '上下滚动']]),
         p.flow === 'paginated' ? h('div', { style: { marginTop: '8px' } }, seg('columns', [['auto', '宽屏双栏'], ['1', '始终单栏']])) : null,
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '首行缩进')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.indent, onchange: e => this.setPref('indent', e.target.checked) }), h('i'))),
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '两端对齐')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.justify, onchange: e => this.setPref('justify', e.target.checked) }), h('i'))),
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '翻页动画')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.animated, onchange: e => this.setPref('animated', e.target.checked) }), h('i'))),
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '选中文字查字典'), h('div', { class: 'h', style: { fontSize: '12px', opacity: .7 } }, '弹出读音、释义，可以让 AI 结合上下文解释')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.dict !== false, onchange: e => this.setPref('dict', e.target.checked) }), h('i'))))
+        sw('indent', '首行缩进'),
+        sw('justify', '两端对齐'),
+        sw('animated', '翻页动画'),
+        sw('t2s', '繁体转简体', '只对这本书，原文不改'),
+        sw('dict', '选中文字查字典', '弹出读音、释义，可以让 AI 结合上下文解释'))
+    } else if (kind === 'comic-fxl') {
+      parts.push(h('h4', null, '缩放'), seg('fxlZoom', [['fit-page', '整页'], ['fit-width', '适应宽度']]))
     } else if (kind === 'comic') {
       parts.push(h('h4', null, '阅读模式'), seg('comicMode', [['single', '单页'], ['double', '双页'], ['webtoon', '条漫']]),
         h('h4', null, '翻页方向'), seg('comicDir', [['auto', '自动'], ['ltr', '从左到右'], ['rtl', '从右到左']]),
@@ -579,11 +893,13 @@ class Reader {
     } else if (kind === 'pdf') {
       parts.push(h('h4', null, '阅读模式'), seg('pdfMode', [['scroll', '连续滚动'], ['page', '单页翻页']]),
         stepper('缩放', 'pdfZoom', 0.6, 2.5, 0.1, v => Math.round(v * 100) + '%'),
-        h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '夜间反色'), h('div', { class: 'h', style: { fontSize: '12px', opacity: .7 } }, '深色主题下把白底黑字的页面反转成深底浅字')), h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: p.pdfInvert, onchange: e => this.setPref('pdfInvert', e.target.checked) }), h('i'))))
+        sw('pdfInvert', '夜间反色', '深色主题下把白底黑字的页面反转成深底浅字'),
+        sw('dict', '选中文字查字典', '弹出读音、释义，可以让 AI 结合上下文解释'))
     }
+    if (kind) parts.push(h('small', { style: { display: 'block', marginTop: '8px', fontSize: '12px', opacity: .7 } }, '翻页方式、漫画模式和方向、缩放、繁转简按这本书记住'))
     if (this.info?.files?.length > 1) {
       parts.push(h('h4', null, '换个格式读'), h('div', { class: 'row wrap', style: { gap: '6px' } }, this.info.files.map(f => h('button', {
-        class: 'btn small', style: { background: f.id === this.info.file_id ? 'var(--r-rule)' : 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' },
+        class: 'btn small', type: 'button', style: { background: f.id === this.info.file_id ? 'var(--r-rule)' : 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' },
         onclick: () => { if (f.id !== this.info.file_id) location.hash = `#/read/${this.id}?file=${f.id}` },
       }, f.format.toUpperCase()))))
     }
@@ -594,6 +910,10 @@ class Reader {
         if (!this.narrator) await this.makeNarrator()
         fill(ttsBox, ...(await this.narrator.sheetSection()))
       })()
+    }
+    if (this.engine) {
+      parts.push(h('h4', null, '进度'), h('div', { class: 'row', style: { gap: '8px' } },
+        h('button', { class: 'btn small', type: 'button', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => this.restart() }, icon('undo'), '从头读')))
     }
     fill(this.sheet, h('div', { class: 'r-sheet-hd' }, h('span', { class: 'grab' }), h('b', null, '阅读设置'), iconBtn('close', '关闭', () => this.closeOverlays())), ...parts.flat())
   }
