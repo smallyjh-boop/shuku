@@ -23,8 +23,8 @@
   .lead { color: var(--ink-3); margin: 4px 0 30px; }
   .card { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 18px 20px; margin-bottom: 16px; }
   h2 { font-size: 16px; margin: 0 0 10px; font-weight: 600; }
-  ol { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; display: grid; gap: 6px; }
-  label { display: grid; gap: 6px; margin-bottom: 14px; }
+  ol { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; display: grid; grid-gap: 6px; gap: 6px; }
+  label { display: grid; grid-gap: 6px; gap: 6px; margin-bottom: 14px; } /* grid-gap：旧的网页组件（墨水屏阅读器）只认这个 */
   label span { font-size: 13px; color: var(--ink-2); }
   input { width: 100%; height: 44px; padding: 0 12px; border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--bg); color: inherit; font: inherit; outline: none; }
   input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

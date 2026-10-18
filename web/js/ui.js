@@ -368,6 +368,23 @@ export function debounce(fn, ms) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms) }
 }
 
+// ---------- 墨水屏模式、界面字号（boot.js 在页面绘制前先做了一遍，设置改了以后用这里的马上生效） ----------
+export const isEInk = () => document.documentElement.classList.contains('eink')
+export const einkDetected = () => !!window.SHUKU_EINK_DETECTED
+// 自动的界面字号：墨水屏按屏幕每英寸的网页像素放大（1～1.4 倍），其他设备 1
+export const autoUIScale = (eink) => eink ? Math.max(1, Math.min(1.4, Math.round((window.SHUKU_SCREEN_PPI || 160) / 160 * 115) / 100)) : 1
+export function applyEInk(p) {
+  const root = document.documentElement
+  const mode = p.eink || 'auto'
+  const on = mode === 'on' || (mode === 'auto' && einkDetected())
+  root.classList.toggle('eink', on)
+  const scale = +p.uiScale > 0 ? +p.uiScale : autoUIScale(on)
+  if (scale === 1) root.style.removeProperty('--ui-scale')
+  else root.style.setProperty('--ui-scale', String(scale))
+}
+// 墨水屏上阅读的默认字号：字身大约 3.8 毫米（0.15 英寸），按屏幕每英寸的网页像素算
+export const einkFontSize = () => Math.max(16, Math.min(30, Math.round(0.15 * (window.SHUKU_SCREEN_PPI || 160))))
+
 export function store(key, def) {
   try { return { ...def, ...JSON.parse(localStorage.getItem(key) || '{}') } } catch { return { ...def } }
 }

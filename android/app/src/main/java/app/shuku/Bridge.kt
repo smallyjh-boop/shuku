@@ -82,7 +82,7 @@ class Bridge(private val activity: MainActivity) {
      */
     @JavascriptInterface fun prefs(): String = JSONObject()
         .put("volume_keys", app.config.bool("volume_keys", true))
-        .put("keep_screen_on", app.config.bool("keep_screen_on", true))
+        .put("keep_screen_on", app.config.bool("keep_screen_on", !EInk.detected))
         .put("auto_download", app.config.bool("auto_download", false))
         .put("tts_engine", app.config.str("tts_engine", "server"))
         .put("download_limit_mb", app.downloads.limitMb())

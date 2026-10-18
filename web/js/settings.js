@@ -1,4 +1,4 @@
-import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog, debounce, fmtTime, fmtBytes, fmtDateTime, coverEl } from './ui.js'
+import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog, debounce, fmtTime, fmtBytes, fmtDateTime, coverEl, einkDetected, autoUIScale, isEInk } from './ui.js'
 import { api, apiUrl, auth, net } from './api.js'
 import { isNative, call, callJSON, onNative, refreshDownloads } from './native.js'
 import { downloadToPhone } from './library.js'
@@ -43,12 +43,28 @@ async function putSettings(body) {
 
 // ---------- 外观 ----------
 function appearance(ctx) {
-  const opts = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']]
-  const seg = h('div', { class: 'seg' })
-  const draw = () => fill(seg, ...opts.map(([v, l]) => h('button', { class: ctx.appPrefs.appearance === v ? 'on' : '', onclick: () => { ctx.setAppearance(v); draw() } }, l)))
-  draw()
-  return sec('外观', '书库界面的深浅色。阅读时的夜间模式在阅读器的“Aa”里单独设置，可以按时间自动切换。',
-    h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '界面颜色')), seg))
+  const p = ctx.appPrefs
+  const segOf = (opts, cur, pick) => {
+    const seg = h('div', { class: 'seg' })
+    const draw = () => fill(seg, ...opts.map(([v, l]) => h('button', { class: String(cur()) === String(v) ? 'on' : '', type: 'button', onclick: () => { pick(v); draw(); drawHints() } }, l)))
+    draw()
+    return seg
+  }
+  const colors = segOf([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']], () => p.appearance, v => ctx.setAppearance(v))
+  // 墨水屏阅读器（墨案、文石等）：黑白、没有动画和阴影，阅读时按页翻
+  const eink = segOf([['auto', '自动'], ['on', '开'], ['off', '关']], () => p.eink || 'auto', v => ctx.setDisplay('eink', v))
+  const scale = segOf([['auto', '自动'], ['0.9', '小'], ['1', '标准'], ['1.15', '大'], ['1.3', '特大']], () => p.uiScale || 'auto', v => ctx.setDisplay('uiScale', v))
+  const einkHint = h('div', { class: 'h' })
+  const scaleHint = h('div', { class: 'h' })
+  function drawHints() {
+    einkHint.textContent = (einkDetected() ? '这台设备是墨水屏阅读器，' : '没认出是墨水屏阅读器，') + (isEInk() ? '现在开着' : '现在关着') + '。黑白显示、没有动画，阅读时按页翻'
+    scaleHint.textContent = '自动：' + (isEInk() ? `墨水屏按屏幕尺寸放大到 ${Math.round(autoUIScale(true) * 100)}%` : '标准大小') + '。只改书库界面的字，书里的字号在阅读器的“Aa”里调'
+  }
+  drawHints()
+  return sec('外观', '书库界面的深浅色、字的大小，墨水屏阅读器的显示方式。阅读时的夜间模式在阅读器的“Aa”里单独设置，可以按时间自动切换。',
+    h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '界面颜色')), colors),
+    h('div', { class: 'set-row wrap-sm' }, h('div', null, h('div', { class: 'l' }, '界面字号'), scaleHint), scale),
+    h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '墨水屏模式'), einkHint), eink))
 }
 
 // ---------- 网络 ----------

@@ -4,7 +4,7 @@
 import '/vendor/foliate-js/view.js'
 import { Overlayer } from '/vendor/foliate-js/overlayer.js'
 import * as CFI from '/vendor/foliate-js/epubcfi.js'
-import { h, clear, debounce, toast } from '../ui.js'
+import { h, clear, debounce, toast, isEInk } from '../ui.js'
 import { api, download } from '../api.js'
 import { isNative, callJSON } from '../native.js'
 import { splitSentences } from './tts.js'
@@ -275,7 +275,7 @@ export class Engine {
     r.setAttribute('gap', (narrow ? Math.max(6, margins / 4) : margins / 8 + 3) + '%')
     r.setAttribute('max-inline-size', Math.max(480, 860 - margins * 2) + 'px')
     r.setAttribute('max-column-count', p.columns === '1' ? '1' : '2')
-    if (p.animated) r.setAttribute('animated', '')
+    if (p.animated && !isEInk()) r.setAttribute('animated', '') // 墨水屏不要翻页动画（一路残影）
     else r.removeAttribute('animated')
     r.setStyles?.(this.css(p, t))
     // overlayer 的划线颜色在深色主题下淡一点

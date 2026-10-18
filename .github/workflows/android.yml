@@ -240,6 +240,18 @@ jobs:
             echo "::warning::取不到上一版镜像，这次不测升级"
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22' # 构建兼容旧系统的网页；旧浏览器检查要用 Node 22 自带的 WebSocket
+
+      - name: 兼容旧系统的网页（墨水屏阅读器、旧安卓自带的网页组件用）
+        run: |
+          set -o pipefail
+          # 网页降级成旧浏览器认识的普通脚本和样式，放进 web/legacy（镜像里跟着网页一起），书库按浏览器版本自动选用
+          cd tools/legacy
+          npm ci --no-audit --no-fund 2>&1 | tail -n 3
+          node build.mjs 2>&1 | grep -v -e '^ ' -e '^$' | tee -a "$RUNNER_TEMP/build.log"
+
       - name: 打包服务器镜像并试运行
         run: |
           set -o pipefail
@@ -316,6 +328,29 @@ jobs:
           print("文字识别（%s）：" % page["lang"], text.replace("\n", " / "))
           assert "12345" in text, text
           EOF
+          # 兼容旧系统的网页：文件在，网页文件清单默认不列（别的手机不用多下载），网页组件旧的 App 要的时候列出来
+          curl -fsS http://127.0.0.1:18080/legacy/app.js -o "$RUNNER_TEMP/legacy-app.js" 2>/dev/null || true
+          curl -fsS http://127.0.0.1:18080/api/assets -o "$RUNNER_TEMP/assets.json" 2>/dev/null || true
+          curl -fsS "http://127.0.0.1:18080/api/assets?legacy=1" -o "$RUNNER_TEMP/assets-legacy.json" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP" <<'EOF' || { ok=""; echo "兼容旧系统的网页不对"; }
+          import json, os, sys
+          t = sys.argv[1]
+          assert os.path.getsize(t + "/legacy-app.js") > 100000, "legacy/app.js"
+          a = [f["p"] for f in json.load(open(t + "/assets.json"))["files"]]
+          b = [f["p"] for f in json.load(open(t + "/assets-legacy.json"))["files"]]
+          assert not any(p.startswith("/legacy/") for p in a), "默认清单里不该有 legacy"
+          assert "/legacy/app.js" in b and "/legacy/pdf.worker.js" in b, "legacy=1 的清单"
+          print("兼容旧系统的网页：正常（%d 个文件）" % sum(p.startswith("/legacy/") for p in b))
+          EOF
+          # 旧版 Chromium（Chrome 64，像墨案这类旧安卓自带的网页组件）打开书库：书架、EPUB、TXT、PDF、漫画都要能用。
+          # 浏览器在 npm 的 chrome-aws-lambda 包里（brotli 压缩的 headless_shell），测试书由测试脚本现做、上传
+          if ( cd "$RUNNER_TEMP" && npm pack -q chrome-aws-lambda@64.0.3264 > /dev/null 2>&1 && tar xzf chrome-aws-lambda-64.0.3264.tgz \
+              && node -e "const z=require('zlib'),fs=require('fs');fs.writeFileSync('chromium64',z.brotliDecompressSync(fs.readFileSync('package/bin/chromium.br')));fs.chmodSync('chromium64',0o755)" ); then
+            node tools/legacy/test-old-chrome.mjs "$RUNNER_TEMP/chromium64" http://127.0.0.1:18080 "$tok" "$RUNNER_TEMP/old-chrome" --samples 2>&1 | tee -a "$RUNNER_TEMP/build.log" \
+              || { ok=""; echo "旧版浏览器打不开书库"; }
+          else
+            echo "::warning::取不到旧版 Chromium，这次不测旧浏览器"
+          fi
           for f in shuku-android.apk shuku-wear.apk shuku-extension.zip; do
             curl -fsS http://127.0.0.1:18080/dl/$f -o "$RUNNER_TEMP/dl-$f" 2>/dev/null || true
             cmp -s "$RUNNER_TEMP/dl-$f" "dist/$f" && echo "下载 $f：正常" || { ok=""; echo "从书库下载的 $f 不对"; }

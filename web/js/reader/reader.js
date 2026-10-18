@@ -1,7 +1,7 @@
 // 阅读器外壳：工具栏、目录/书签/笔记/搜索侧栏、阅读设置、夜间模式、进度同步、剩余时间
 // 具体渲染交给 engines：flow（EPUB/MOBI/AZW3/FB2/TXT）、pdf、comic
 
-import { h, clear, fill, icon, iconBtn, toast, toastError, store, save, debounce, pct, confirmDialog } from '../ui.js'
+import { h, clear, fill, icon, iconBtn, toast, toastError, store, save, debounce, pct, confirmDialog, isEInk, einkFontSize } from '../ui.js'
 import { api, deviceName, net } from '../api.js'
 import { isNative, call, callJSON, onNative } from '../native.js'
 import { putProgress, queueProgress, takeQueued, rememberUser, setActiveBook } from './sync.js'
@@ -34,6 +34,12 @@ const DEFAULTS = {
 
 // 按书记住的设置。BOOK_ONLY 只记在这本书上（换一本书不跟着变）；
 // BOOK_DEFAULT 记在这本书上，同时当作以后打开别的书时的默认值
+// 墨水屏阅读器上的默认值：白底黑字、不自动变夜间、没有翻页动画、PDF 按页翻（滚动在墨水屏上是一片残影），
+// 字号按屏幕实际尺寸算。自己改过的照样记住
+const einkDefaults = () => ({ theme: 'white', nightMode: 'off', animated: false, pdfMode: 'page', fontSize: einkFontSize(), brightness: 1, warm: false })
+// 墨水屏上一律按页翻：这本书在手机上选过“上下滚动”（按书记在书库里，各设备通用）也不跟着滚
+const einkPaged = p => isEInk() ? Object.assign(p, { flow: 'paginated', pdfMode: 'page' }) : p
+
 const BOOK_ONLY = ['comicDir', 'pdfZoom', 't2s', 'fxlZoom']
 const BOOK_DEFAULT = ['comicMode', 'comicFit', 'pdfMode', 'flow', 'columns']
 const BOOK_KEYS = new Set([...BOOK_ONLY, ...BOOK_DEFAULT])
@@ -119,9 +125,9 @@ class Reader {
     this.back = back
     // 本机记的东西（位置、按书设置、阅读速度）按人分开：一台平板几个人轮流登录不会串
     this.uid = rememberUser(ctx)
-    this.g = store('shuku.reader', DEFAULTS) // 全局设置
+    this.g = store('shuku.reader', isEInk() ? { ...DEFAULTS, ...einkDefaults() } : DEFAULTS) // 全局设置
     this.b = {}                                // 这本书自己的设置
-    this.prefs = { ...this.g }
+    this.prefs = einkPaged({ ...this.g })
     this.loc = null
     this.bookmarks = []
     this.cleanups = []
@@ -129,7 +135,12 @@ class Reader {
     this.activeSecs = 0
   }
 
-  get theme() { return themeById(isNight(this.prefs) ? this.prefs.nightTheme : this.prefs.theme) }
+  get theme() {
+    const t = themeById(isNight(this.prefs) ? this.prefs.nightTheme : this.prefs.theme)
+    // 墨水屏只有黑白：浅色主题一律白底纯黑字，深色主题黑底纯白字（灰色的字在墨水屏上发虚）
+    if (isEInk()) return { ...t, bg: t.dark ? '#000000' : '#FFFFFF', fg: t.dark ? '#FFFFFF' : '#000000' }
+    return t
+  }
 
   // ---------- 本机记的位置 ----------
   get posKey() { return `shuku.pos.${this.uid}.${this.id}` }
@@ -681,8 +692,8 @@ class Reader {
     this.nightBtn.setAttribute('aria-label', this.nightBtn.title)
     document.querySelector('#theme-color')?.setAttribute('content', t.bg)
     call('setThemeColor', t.bg, t.dark)
-    this.dim.style.opacity = String(1 - this.prefs.brightness)
-    this.warm.classList.toggle('on', !!this.prefs.warm)
+    this.dim.style.opacity = isEInk() ? '0' : String(1 - this.prefs.brightness)
+    this.warm.classList.toggle('on', !isEInk() && !!this.prefs.warm)
     this.engine?.applyPrefs(this.prefs, t)
   }
 
@@ -702,7 +713,7 @@ class Reader {
     if (local.dirty && local.prefs) { b = local.prefs; this.saveBookPrefsSoon() }
     this.b = {}
     for (const [k, v] of Object.entries(b || {})) if (BOOK_KEYS.has(k)) this.b[k] = v
-    this.prefs = { ...this.g, ...this.b }
+    this.prefs = einkPaged({ ...this.g, ...this.b })
   }
 
   saveBookPrefsSoon = debounce(() => this.saveBookPrefs(), 1200)
@@ -861,7 +872,8 @@ class Reader {
       s.onchange = () => this.setPref('nightStart', s.value); e.onchange = () => this.setPref('nightEnd', e.value)
       parts.push(h('div', { class: 'time-row' }, s, '到', e))
     }
-    parts.push(h('h4', null, '亮度'), stepper('亮度', 'brightness', 0.3, 1, 0.05, v => Math.round(v * 100) + '%'),
+    // 墨水屏：亮度、暖色滤镜只会让字变灰，不显示
+    if (!isEInk()) parts.push(h('h4', null, '亮度'), stepper('亮度', 'brightness', 0.3, 1, 0.05, v => Math.round(v * 100) + '%'),
       sw('warm', '暖色滤镜', '减少蓝光，适合睡前'))
     if (kind === 'flow') {
       parts.push(h('h4', null, '字体'), seg('font', FONTS),
@@ -875,11 +887,11 @@ class Reader {
             for (const [k, v] of Object.entries([{ fontSize: 17, lineHeight: 1.6, paraSpace: 0.3, margin: 0 }, { fontSize: 19, lineHeight: 1.85, paraSpace: 0.5, margin: 1 }, { fontSize: 21, lineHeight: 2.1, paraSpace: 0.8, margin: 2 }][i])) this.setPrefQuiet(k, v)
             this.applyPrefs(); this.drawSheet()
           } }, l))),
-        h('h4', null, '翻页方式'), seg('flow', [['paginated', '左右翻页'], ['scrolled', '上下滚动']]),
+        isEInk() ? null : [h('h4', null, '翻页方式'), seg('flow', [['paginated', '左右翻页'], ['scrolled', '上下滚动']])],
         p.flow === 'paginated' ? h('div', { style: { marginTop: '8px' } }, seg('columns', [['auto', '宽屏双栏'], ['1', '始终单栏']])) : null,
         sw('indent', '首行缩进'),
         sw('justify', '两端对齐'),
-        sw('animated', '翻页动画'),
+        isEInk() ? null : sw('animated', '翻页动画'),
         sw('t2s', '繁体转简体', '只对这本书，原文不改'),
         sw('dict', '选中文字查字典', '弹出读音、释义，可以让 AI 结合上下文解释'))
     } else if (kind === 'comic-fxl') {
@@ -891,7 +903,7 @@ class Reader {
         h('h4', null, '图片质量'), seg('comicQuality', [['auto', '自动'], ['original', '原图'], ['saver', '省流量']]),
         h('small', { style: { display: 'block', marginTop: '6px', fontSize: '12px', opacity: .7 } }, '自动：内网看原图，Tailscale 下按屏幕大小压缩'))
     } else if (kind === 'pdf') {
-      parts.push(h('h4', null, '阅读模式'), seg('pdfMode', [['scroll', '连续滚动'], ['page', '单页翻页']]),
+      parts.push(isEInk() ? null : [h('h4', null, '阅读模式'), seg('pdfMode', [['scroll', '连续滚动'], ['page', '单页翻页']])],
         stepper('缩放', 'pdfZoom', 0.6, 2.5, 0.1, v => Math.round(v * 100) + '%'),
         sw('pdfInvert', '夜间反色', '深色主题下把白底黑字的页面反转成深底浅字'),
         sw('dict', '选中文字查字典', '弹出读音、释义，可以让 AI 结合上下文解释'))

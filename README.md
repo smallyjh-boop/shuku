@@ -182,6 +182,15 @@ NAS 上已经装好 Tailscale（Tailscale 地址 `100.81.34.58`），书库用�
 
 需要的权限：网络、通知（显示听书控制和上传进度）、前台服务（后台听书）。
 
+### 墨水屏阅读器（墨案 inkPad、文石 BOOX 等）
+
+装同一个 `shuku-android.apk` 就行（32 位、64 位的设备都能装）。
+
+- **墨水屏模式**：App 认出是墨水屏阅读器（品牌、型号，墨案固件号里的“EPD”）时自动打开，也可以在“设置 → 外观”里手动开关。纯黑白显示，没有动画、阴影和半透明（墨水屏上会留残影、发虚），选中的地方反白；阅读时默认按页翻、没有翻页动画，PDF 默认单页翻页，翻页键（PAGE UP / PAGE DOWN）和音量键都能翻页；阅读设置里不显示亮度、暖色滤镜。
+- **字号按屏幕尺寸**：App 把屏幕的实际尺寸告诉网页，界面字号自动放大一些（“设置 → 外观 → 界面字号”能自己调，所有设备都能用）；阅读的默认字号按屏幕算成大约 3.8 毫米高，自己调过的照样记住。
+- **旧系统也能打开**：这类设备的系统自带网页组件（Android System WebView）往往很旧，新写法的网页跑不起来（打开是一片白）。书库会自动给旧浏览器换一套降级过的网页（功能一样，`tools/legacy` 构建，打包时一起放进镜像），App 也会把这一套预先缓存，离线也能打开。
+- 万一还是打不开，屏幕上会显示网页组件的版本和出错原因（不再是一片白），拍下来就能知道是哪里不兼容。
+
 ## Wear OS 手表
 
 **安装**：手表 App 没上架应用商店，要用电脑的 adb 装（Wear OS 3 及以上）。adb 在 Google 的 [SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) 里，下载 Windows 版解压就能用：
@@ -242,7 +251,7 @@ NAS 服务器镜像、安卓 App、手表 App 和浏览器插件都用 GitHub Ac
 1. GitHub 仓库页面 → Actions →“打包 App 和插件”→ Run workflow。可以填版本号（只用数字和点，最多三段，比如 `1.0.1`），留空就用 `android/gradle.properties` 里的；后面会自动接上第几次打包，比如 `1.0.1.12`。
 2. 每次都把服务器、手机 App、手表 App、插件一起打包（各端的安装包要放进服务器镜像，在线升级才能拿到），大约 6～8 分钟。运行环境分两层做成镜像，没变就一直用：`ghcr.io/smallyjh-boop/shuku-base`（Debian、Calibre 等，只在 Dockerfile 里 `base` 那一段改了、或者勾了“重新制作基础镜像”时重做，多 3 分钟左右，NAS 要多下载几百 MB）；`ghcr.io/smallyjh-boop/shuku-runtime`（再加上本地字典，只在字典数据、转换程序改了或者勾了“重新生成本地字典”时重做，多 1 分钟左右，NAS 要多下载几十 MB）。镜像推到 `ghcr.io/smallyjh-boop/shuku`，NAS 一分钟内自动升级；安装文件另外发在仓库的 Releases 里（文件见上面“部署到威联通”的表格），另有校验值 `SHA256SUMS.txt`。
 
-为了省 Actions 的分钟数和存储额度：整个打包只有一个任务；手机和手表在同一次 Gradle 里并行打包；服务器只打 x86 版（NAS 是 Intel 处理器），不用模拟器；不建缓存、不上传 Artifacts（Release 附件不占存储额度），ghcr.io 上只留最近 10 个版本（可以退回），超过 35 分钟自动停止。服务器先跑自动测试（数据库升级、家人账号、回收站、扫描、备份恢复等）；镜像再试运行，接口、网页、各端安装包的下载、转换工具、Calibre 转换和本地字典都正常，并且用上一版建的数据库升级后书、进度、笔记、登录都还在，才推送和发布。每次运行的内部版本号自动加一，新的 APK 可以直接覆盖安装。
+为了省 Actions 的分钟数和存储额度：整个打包只有一个任务；手机和手表在同一次 Gradle 里并行打包；服务器只打 x86 版（NAS 是 Intel 处理器），不用模拟器；不建缓存、不上传 Artifacts（Release 附件不占存储额度），ghcr.io 上只留最近 10 个版本（可以退回），超过 35 分钟自动停止。服务器先跑自动测试（数据库升级、家人账号、回收站、扫描、备份恢复等）；构建兼容旧系统的网页（Node，几秒钟）；镜像再试运行，接口、网页、各端安装包的下载、转换工具、Calibre 转换和本地字典都正常，并且用上一版建的数据库升级后书、进度、笔记、登录都还在，才推送和发布。每次运行的内部版本号自动加一，新的 APK 可以直接覆盖安装。
 
 签名：默认用仓库里的 `android/signing/shuku.jks`（密码 `shuku-app`），自己用没问题。如果要公开分发，请换成自己的签名：在仓库 Settings → Secrets and variables → Actions 添加 `SHUKU_KEYSTORE_BASE64`（签名文件 `base64 -w0` 后的内容）、`SHUKU_KEYSTORE_PASSWORD`、`SHUKU_KEY_ALIAS`、`SHUKU_KEY_PASSWORD`。换签名后手机和手表都要卸载重装。
 
@@ -278,7 +287,7 @@ NAS 服务器镜像、安卓 App、手表 App 和浏览器插件都用 GitHub Ac
 server/        Go 服务端（API、入库、识别、整理、格式转换、配对、链接下载、公开书库）
   vendor/      依赖（构建时不需要联网下载 Go 模块）
   qr/          生成配对二维码
-web/           网页端（原生 JavaScript，不需要打包）
+web/           网页端（原生 JavaScript，新浏览器不需要打包）
   js/reader/   阅读器：flow.js（EPUB 等）、pdf.js、comic.js、tts.js（听书）
   js/native.js 在安卓 App 里运行时和原生代码之间的桥
   vendor/      foliate-js（电子书渲染）、pdf.js 4.10 legacy（兼容旧版 Safari）
@@ -286,6 +295,8 @@ android/       安卓 App（app/）和 Wear OS 手表 App（wear/），共用 co
   tools/       不装 Android SDK 也能做的代码检查（check.sh）
 extension/     Chrome / Edge 浏览器插件
 tools/         测试工具：生成乱名测试书、端到端检查（e2e.py）
+  legacy/      给旧浏览器构建降级的网页（web/legacy，不进 git）：npm ci && node build.mjs；
+               test-old-chrome.mjs 用旧版 Chromium（Chrome 64）检查书架、EPUB、TXT、PDF、漫画
 .github/       打包服务器镜像、App 和插件的 GitHub Actions（只能手动运行）
 Dockerfile
 docker-compose.yml

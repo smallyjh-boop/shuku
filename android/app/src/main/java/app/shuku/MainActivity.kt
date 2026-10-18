@@ -367,7 +367,8 @@ class MainActivity : Activity() {
     }
 
     fun refreshKeepScreen() {
-        if (readerMode && app.config.bool("keep_screen_on", true)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 墨水屏不用常亮（画面本来就留着），常亮反而让设备不休眠、费电：默认关
+        if (readerMode && app.config.bool("keep_screen_on", !EInk.detected)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 

@@ -474,6 +474,11 @@ def setup(fresh=True):
     if fresh:
         subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make-samples.py"), T], check=True, stdout=subprocess.DEVNULL)
     dict_db = make_dict(os.path.join(T, "shuku-e2e-server"))
+    # 兼容旧系统的那一套网页（装了 Node 和 tools/legacy 的依赖时构建；打包时在 Actions 里构建）
+    leg = os.path.join(ROOT, "tools", "legacy")
+    if shutil.which("node") and os.path.isdir(os.path.join(leg, "node_modules")):
+        print("构建兼容旧系统的网页…", flush=True)
+        subprocess.run(["node", "build.mjs"], cwd=leg, check=True, stdout=subprocess.DEVNULL)
     srv = ThreadingHTTPServer(("127.0.0.1", MPORT), Mock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     env = dict(os.environ,
@@ -1866,6 +1871,7 @@ def ui_tests():
             if "连续入库测试" in b["title"]:
                 api("DELETE", f"/api/books/{b['id']}")
         ui_reader_v7(browser, context, attach, reader_ready, shot)
+        ui_v8_eink_legacy(browser, context, attach, reader_ready, shot)
         browser.close()
 
     section("网页：脚本错误")
@@ -1935,6 +1941,111 @@ TEXT_POINT_JS = """(word) => {
 }"""
 DOC_JS = "document.querySelector('foliate-view').renderer.getContents()[0].doc"
 has_toast = lambda pg, text: pg.evaluate("(t) => [...document.querySelectorAll('#toasts .toast')].some(e => e.textContent.includes(t))", text)
+
+
+def ui_v8_eink_legacy(browser, context, attach, reader_ready, shot):
+    section("网页：墨水屏模式、兼容旧系统的网页、打不开时的诊断（1.0.0.8）")
+    books = all_books()
+    epub = next((b for b in books if "epub" in str(b.get("formats"))), None)
+    pdf = next((b for b in books if "pdf" in str(b.get("formats"))), None)
+    comic = next((b for b in books if b.get("kind") == "comic"), None)
+
+    # ---- 新浏览器默认用新的那一套；设置里打开墨水屏模式 ----
+    ctx = context(w=702, h=936, mobile=True)
+    pg = ctx.new_page(); attach(pg, "v8-eink")
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-look")
+    check("新浏览器用新的那一套网页（ES 模块）", pg.evaluate("() => window.SHUKU_LEGACY") is False)
+    row = pg.locator("#set-look .set-row", has_text="墨水屏模式")
+    row.locator("button", has_text="开").click()
+    check("设置里打开墨水屏模式：马上生效", pg.evaluate("() => document.documentElement.classList.contains('eink')"))
+    scale = pg.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim()")
+    check("墨水屏模式自动放大界面字号", scale in ("1.15",), scale)
+    shot(pg, "70-eink-settings")
+    pg.goto(BASE + "/#/all")
+    pg.wait_for_selector(".book")
+    pg.wait_for_timeout(500)
+    st = pg.evaluate("""() => ({ bg: getComputedStyle(document.body).backgroundColor, on: getComputedStyle(document.querySelector('.chip.on') || document.body).backgroundColor,
+        shadow: getComputedStyle(document.querySelector('.cv')).boxShadow, trans: getComputedStyle(document.querySelector('.btn') || document.body).transitionDuration })""")
+    check("墨水屏：白底、选中的反白、封面没有阴影、没有动画", st["bg"] == "rgb(255, 255, 255)" and st["on"] == "rgb(0, 0, 0)" and st["shadow"] == "none" and st["trans"] in ("0s", ""), st)
+    shot(pg, "71-eink-shelf")
+    if epub:
+        pg.goto(BASE + f"/#/read/{epub['id']}")
+        reader_ready(pg)
+        pg.wait_for_timeout(800)
+        r = pg.evaluate("""() => { const v = document.querySelector('foliate-view'); const p = v && v.renderer
+            const d = p && p.getContents ? p.getContents()[0] : null
+            return { animated: p ? p.hasAttribute('animated') : null, color: d ? getComputedStyle(d.doc.body).color : '', size: d ? parseFloat(getComputedStyle(d.doc.body).fontSize) : 0 } }""")
+        check("墨水屏阅读：纯黑字、没有翻页动画、字号按屏幕算", r["animated"] is False and r["color"] in ("rgb(0, 0, 0)",) and r["size"] >= 20, r)
+        # 点屏幕中间显示工具栏（刚打开时工具栏可能本来就显示着，点一下反而收起）
+        for _ in range(3):
+            if pg.evaluate("() => document.querySelector('.reader').classList.contains('ui')"):
+                break
+            pg.mouse.click(351, 468)
+            pg.wait_for_timeout(400)
+        pg.click(".r-top button[title='阅读设置']")
+        pg.wait_for_selector(".r-sheet.show")
+        sheet = pg.inner_text(".r-sheet")
+        check("墨水屏：阅读设置里没有亮度、暖色、翻页动画", "亮度" not in sheet and "暖色" not in sheet and "翻页动画" not in sheet, sheet[:200])
+        shot(pg, "72-eink-reader")
+    if pdf:
+        pg.goto(BASE + f"/#/read/{pdf['id']}")
+        reader_ready(pg)
+        pg.wait_for_function("() => [...document.querySelectorAll('.pdfv canvas')].some(c => c.width > 50)", timeout=30000)
+        check("墨水屏：PDF 按页翻（不滚动，这本书在别处选过滚动也一样）", pg.evaluate("() => !!document.querySelector('.pdfv.paged')"))
+        shot(pg, "72-eink-pdf")
+    # 关掉
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-look")
+    pg.locator("#set-look .set-row", has_text="墨水屏模式").locator("button", has_text="关").click()
+    check("关掉墨水屏模式", not pg.evaluate("() => document.documentElement.classList.contains('eink')"))
+    ctx.close()
+
+    # ---- 兼容旧系统的那一套（tools/legacy 构建；旧浏览器自动用它，这里用 ?legacy=1 强制） ----
+    if not os.path.exists(os.path.join(ROOT, "web", "legacy", "app.js")):
+        check("兼容旧系统的网页已构建（web/legacy）", False, "先运行 cd tools/legacy && npm ci && node build.mjs")
+    else:
+        ctx = context(w=1100, h=860)
+        pg = ctx.new_page(); attach(pg, "v8-legacy")
+        pg.goto(BASE + "/?legacy=1#/all")
+        pg.wait_for_selector(".book")
+        check("兼容旧系统的那一套：书架打开（普通脚本，不是 ES 模块）", pg.evaluate("() => window.SHUKU_LEGACY === true && !!document.querySelector('script[src=\"/legacy/app.js\"]') && !document.querySelector('script[type=module]')"))
+        check("兼容旧系统的那一套：用降级的样式", pg.evaluate("() => document.getElementById('app-css').getAttribute('href')") == "/legacy/app.css")
+        if epub:
+            pg.goto(BASE + f"/?legacy=1#/read/{epub['id']}")
+            reader_ready(pg)
+            pg.wait_for_timeout(800)
+            n = pg.evaluate("() => { const v = document.querySelector('foliate-view'); const d = v && v.renderer && v.renderer.getContents ? v.renderer.getContents() : []; return d.map(x => x.doc.body.textContent).join('').length }")
+            check("兼容旧系统的那一套：EPUB 能读", n > 20, n)
+            pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(500)
+        if pdf:
+            pg.goto(BASE + f"/?legacy=1#/read/{pdf['id']}")
+            reader_ready(pg)
+            pg.wait_for_function("() => [...document.querySelectorAll('.pdfv canvas')].some(c => c.width > 50)", timeout=30000)
+            pg.wait_for_function("() => [...document.querySelectorAll('.pdfv .textLayer')].some(t => t.textContent.length > 5)", timeout=30000)
+            check("兼容旧系统的那一套：PDF 画出来、有文字层（普通脚本的 worker）", True)
+            shot(pg, "73-legacy-pdf")
+        if comic:
+            pg.goto(BASE + f"/?legacy=1#/read/{comic['id']}")
+            reader_ready(pg)
+            pg.wait_for_function("() => [...document.querySelectorAll('.reader img')].some(i => i.naturalWidth > 0)", timeout=20000)
+            check("兼容旧系统的那一套：漫画能看", True)
+        ctx.close()
+
+    # ---- 打不开时显示原因（脚本加载不了），不是一片空白 ----
+    ctx = context()
+    pg = ctx.new_page()
+    pg.route("**/js/main.js", lambda r: r.abort())
+    pg.route("**/legacy/app.js", lambda r: r.abort())
+    pg.goto(BASE + "/")
+    try:
+        pg.wait_for_selector("text=书库没有打开", timeout=9000)
+        txt = pg.inner_text("body")
+        check("网页打不开时显示原因和浏览器版本", "没有加载上" in txt and "浏览器：" in txt, txt[:200])
+    except Exception as e:
+        check("网页打不开时显示原因和浏览器版本", False, str(e)[:200])
+    shot(pg, "74-boot-diagnose")
+    ctx.close()
 
 
 def ui_reader_v7(browser, context, attach, reader_ready, shot):

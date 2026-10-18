@@ -17,8 +17,9 @@ import * as acorn from 'acorn'
 import compat from 'core-js-compat'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const HERE = import.meta.dirname
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '../..')
 const WEB = path.join(ROOT, 'web')
 const OUT = path.join(WEB, 'legacy')
@@ -163,6 +164,7 @@ for (const k of Object.keys(PATCHES)) {
   const r = transformCSS({ filename: 'app.css', code: src, targets: CSS_TARGETS, minify: true })
   let css = Buffer.from(r.code).toString()
   css = css.replace(/env\(\s*safe-area-inset-[a-z]+\s*(?:,\s*([^()]*?))?\)/g, (_, fallback) => (fallback || '0px').trim())
+  css = legacyCSS(css)
   fs.writeFileSync(path.join(OUT, 'app.css'), css)
   for (const w of r.warnings || []) console.warn('app.css：', w.message)
   console.log(`app.css  ${(css.length / 1024).toFixed(0)} KB`)
@@ -170,3 +172,126 @@ for (const k of Object.keys(PATCHES)) {
 
 if (failed) process.exit(1)
 console.log('兼容旧系统的网页已生成：' + rel(OUT))
+
+// ---------- 样式的进一步降级（lightningcss 不管的） ----------
+// 1. 选择器列表里有旧浏览器不认识的（:focus-visible、:has() 等），整条规则都会被丢掉：拆开，认识的那些照样生效
+// 2. gap：Chrome 84 以前 flex 不支持，Chrome 66 以前 grid 只认 grid-gap。grid 补 grid-gap；flex 换成子元素之间的外边距
+function legacyCSS(css) {
+  const tree = parse(css)
+  const info = new Map() // 选择器 → { display, dir, wrap }（各条规则合起来）
+  walk(tree, r => {
+    const d = decls(r.body)
+    for (const sel of splitTop(r.sel)) {
+      const k = sel.trim()
+      const o = info.get(k) || {}
+      if (d.display) o.display = d.display
+      if (d['flex-direction']) o.dir = d['flex-direction']
+      if (d['flex-flow']) { o.dir = /column/.test(d['flex-flow']) ? 'column' : o.dir; if (/wrap/.test(d['flex-flow'])) o.wrap = 'wrap' }
+      if (d['flex-wrap']) o.wrap = d['flex-wrap']
+      info.set(k, o)
+    }
+  })
+  return serialize(transformList(tree, info))
+}
+
+function transformList(list, info) {
+  const UNSUPPORTED = /:focus-visible|:focus-within|:has\(|:is\(|:where\(|::marker|:placeholder-shown|::backdrop/
+  const out = []
+  for (const n of list) {
+    if (n.type === 'group') { out.push({ ...n, children: transformList(n.children, info) }); continue }
+    if (n.type !== 'rule') { out.push(n); continue }
+    const sels = splitTop(n.sel)
+    const bad = sels.filter(x => UNSUPPORTED.test(x))
+    const good = sels.filter(x => !UNSUPPORTED.test(x))
+    if (bad.length && good.length) {
+      out.push({ type: 'rule', sel: good.join(','), body: n.body }, { type: 'rule', sel: bad.join(','), body: n.body })
+    } else out.push(n)
+    const d = decls(n.body)
+    let row = null, col = null
+    if (d.gap) { const v = splitTop(d.gap, ' ').filter(Boolean); row = v[0]; col = v[1] || v[0] }
+    if (d['row-gap']) row = d['row-gap']
+    if (d['column-gap']) col = d['column-gap']
+    if (row == null && col == null) continue
+    const zero = v => v == null || v === 'normal' || /^0(px|em|rem)?$/.test(v)
+    let gridDone = false
+    for (const sel of good) {
+      const k = sel.trim()
+      const o = { ...(info.get(k) || {}), ...(d.display ? { display: d.display } : {}), ...(d['flex-direction'] ? { dir: d['flex-direction'] } : {}), ...(d['flex-wrap'] ? { wrap: d['flex-wrap'] } : {}) }
+      if (/grid/.test(o.display || '')) {
+        if (!gridDone) { gridDone = true; out.push({ type: 'rule', sel: good.join(','), body: `grid-row-gap:${zero(row) ? 0 : row};grid-column-gap:${zero(col) ? 0 : col}` }) }
+      } else if (/flex/.test(o.display || '')) {
+        const column = /column/.test(o.dir || '')
+        if (/^wrap/.test(o.wrap || '')) {
+          const m = [!zero(col) && `margin-right:${col}`, !zero(row) && `margin-bottom:${row}`].filter(Boolean).join(';')
+          if (m) out.push({ type: 'rule', sel: `${k}>*`, body: m })
+        } else if (column ? !zero(row) : !zero(col)) {
+          out.push({ type: 'rule', sel: `${k}>*+*`, body: column ? `margin-top:${row}` : `margin-left:${col}` })
+        }
+      }
+    }
+  }
+  return out
+}
+
+function walk(list, fn) { for (const n of list) n.type === 'group' ? walk(n.children, fn) : n.type === 'rule' && fn(n) }
+function serialize(list) { return list.map(n => n.type === 'group' ? `${n.prelude}{${serialize(n.children)}}` : n.type === 'rule' ? `${n.sel}{${n.body}}` : n.text).join('') }
+function decls(body) {
+  const o = {}
+  for (const part of splitTop(body, ';')) {
+    const i = part.indexOf(':')
+    if (i > 0) o[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+  }
+  return o
+}
+// 按分隔符拆开（括号、引号里的不算）
+function splitTop(s, sep = ',') {
+  const out = []
+  let depth = 0, q = null, start = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue }
+    if (c === '"' || c === "'") q = c
+    else if (c === '(' || c === '[') depth++
+    else if (c === ')' || c === ']') depth--
+    else if (c === sep && depth === 0) { out.push(s.slice(start, i)); start = i + 1 }
+  }
+  out.push(s.slice(start))
+  return out.filter(x => x.trim() !== '')
+}
+function parse(css) {
+  const out = []
+  let i = 0
+  while (i < css.length) {
+    const start = i
+    let depth = 0, q = null
+    while (i < css.length) {
+      const c = css[i]
+      if (q) { if (c === '\\') i++; else if (c === q) q = null }
+      else if (c === '"' || c === "'") q = c
+      else if (c === '(') depth++
+      else if (c === ')') depth--
+      else if ((c === '{' || c === ';') && depth === 0) break
+      i++
+    }
+    const prelude = css.slice(start, i).trim()
+    if (i >= css.length) { if (prelude) out.push({ type: 'raw', text: prelude }); break }
+    if (css[i] === ';') { out.push({ type: 'raw', text: prelude + ';' }); i++; continue }
+    i++
+    const bodyStart = i
+    let d = 1
+    q = null
+    while (i < css.length && d > 0) {
+      const c = css[i]
+      if (q) { if (c === '\\') i++; else if (c === q) q = null }
+      else if (c === '"' || c === "'") q = c
+      else if (c === '{') d++
+      else if (c === '}') d--
+      i++
+    }
+    const body = css.slice(bodyStart, i - 1)
+    if (/^@(media|supports|layer|container)\b/.test(prelude)) out.push({ type: 'group', prelude, children: parse(body) })
+    else if (prelude.startsWith('@')) out.push({ type: 'raw', text: `${prelude}{${body}}` })
+    else out.push({ type: 'rule', sel: prelude, body })
+  }
+  return out
+}

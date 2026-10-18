@@ -1,4 +1,4 @@
-import { h, $, clear, fill, add, icon, iconBtn, toast, toastError, store, save, closeMenu } from './ui.js'
+import { h, $, clear, fill, add, icon, iconBtn, toast, toastError, store, save, closeMenu, isEInk, applyEInk } from './ui.js'
 import { api, auth, net, deviceName, setUnauthorizedHandler } from './api.js'
 import { renderLibrary } from './library.js'
 import { renderSeriesList } from './series.js'
@@ -48,13 +48,17 @@ function readerNightOn() {
 }
 export function applyAppearance() {
   const mode = ctx.appPrefs.appearance
-  const dark = readerNightOn() || mode === 'dark' || (mode === 'system' && darkMQ.matches)
+  // 墨水屏上“跟随系统”一律用浅色（深色只在自己选了“深色”时用）
+  const eink = isEInk()
+  const dark = (readerNightOn() && !eink) || mode === 'dark' || (mode === 'system' && !eink && darkMQ.matches)
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   $('#theme-color').content = dark ? '#14181E' : '#F8F8F6'
   if (!document.querySelector('.reader')) call('setThemeColor', dark ? '#14181E' : '#F8F8F6', dark)
 }
 darkMQ.addEventListener('change', applyAppearance)
 ctx.setAppearance = (mode) => { ctx.appPrefs.appearance = mode; save('shuku.app', ctx.appPrefs); applyAppearance() }
+// 墨水屏模式（auto / on / off）、界面字号（auto 或倍数）
+ctx.setDisplay = (k, v) => { ctx.appPrefs[k] = v; save('shuku.app', ctx.appPrefs); applyEInk(ctx.appPrefs); applyAppearance() }
 
 // ---------- 登录 ----------
 // 只有一个人：只输密码；家里有好几个人：先点自己的名字，再输密码（记住上次选的人）
@@ -292,9 +296,14 @@ let importRun = null // 这一轮（60 秒内连着来的）动态的统计
 function showEvents(evs) {
   if (!evs.length) return
   const now = Date.now()
-  if (!importRun || now - importRun.at > 60000) importRun = { n: 0, ok: 0, review: 0, err: 0, other: 0 }
+  if (!importRun || now - importRun.at > 60000) importRun = { n: 0, ok: 0, review: 0, err: 0, other: 0, titles: [] }
   const r = importRun
   r.at = now
+  // 从旧到新记下书名（同一秒入库好几本时，最新的那条不一定是刚加的那本，所以列最近的几本）
+  for (const e of [...evs].reverse()) {
+    const m = /《[^》]+》/.exec(e.message)
+    if (m) r.titles = [m[0], ...r.titles.filter(x => x !== m[0])].slice(0, 3)
+  }
   for (const e of evs) {
     r.n++
     if (/^已入库/.test(e.message)) r.ok++
@@ -312,9 +321,8 @@ function showEvents(evs) {
   if (r.review) parts.push(`${r.review} 本识别把握不大，放进了待确认`)
   if (r.err) parts.push(`${r.err} 个出错`)
   if (r.other) parts.push(`另有 ${r.other} 条动态`)
-  const t = /《[^》]+》/.exec(latest.message)
   let msg = parts.join('，') || latest.message
-  if (t) msg += `（最近：${t[0]}）`
+  if (r.titles.length) msg += `（最近：${r.titles.join('')}${r.ok + r.review > r.titles.length ? '等' : ''}）`
   const go = r.review || r.err ? { label: '去整理', run: () => ctx.navigate('#/organize') } : { label: '看书架', run: () => ctx.navigate('#/all') }
   toast(msg, { key: 'import', error: r.err > 0 && !r.ok && !r.review, action: go, duration: 10000 })
 }

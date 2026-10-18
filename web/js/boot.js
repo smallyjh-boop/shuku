@@ -21,7 +21,8 @@
 })();
 
 // 墨水屏模式（设置 → 外观：自动 / 开 / 关）。自动：App 认出是墨水屏阅读器（墨案、文石等）时打开。
-// 打开后：纯黑白、没有动画和阴影；界面字号按屏幕的实际尺寸放大（也可以在设置里自己调）
+// 打开后：纯黑白、没有动画和阴影，阅读时按页翻。界面字号（设置里能调）：自动时墨水屏按屏幕的实际尺寸放大。
+// web/js/ui.js 的 applyEInk 是同一套逻辑（设置改了马上生效用）
 (function () {
   var root = document.documentElement
   try {
@@ -29,12 +30,7 @@
     var N = window.ShukuNative
     var detected = /ShukuEInk/.test(navigator.userAgent)
     if (!detected && N && N.isEInk) { try { detected = !!N.isEInk() } catch (e) {} }
-    var mode = p.eink || 'auto'
-    var on = mode === 'on' || (mode === 'auto' && detected)
-    window.SHUKU_EINK_DETECTED = detected
-    if (!on) return
-    root.classList.add('eink')
-    // 屏幕每英寸多少个网页像素（安卓手机大约 160）。墨水屏拿得远一些、对比度低，字要大一点
+    // 屏幕每英寸多少个网页像素（安卓手机大约 160）
     var ppi = 0
     if (N && N.deviceInfo) {
       try {
@@ -43,9 +39,15 @@
         if (x && d.density) ppi = x / d.density
       } catch (e) {}
     }
+    window.SHUKU_EINK_DETECTED = detected
     window.SHUKU_SCREEN_PPI = ppi || 160
-    var scale = +p.einkScale > 0 ? +p.einkScale : Math.max(1, Math.min(1.4, Math.round((ppi || 160) / 160 * 115) / 100))
-    root.style.setProperty('--fs', String(scale))
+    var mode = p.eink || 'auto'
+    var on = mode === 'on' || (mode === 'auto' && detected)
+    if (on) root.classList.add('eink')
+    // 墨水屏拿得远一些、对比度低，字要大一点：每英寸的网页像素越多（字看起来越小），放得越大
+    var auto = on ? Math.max(1, Math.min(1.4, Math.round((ppi || 160) / 160 * 115) / 100)) : 1
+    var scale = +p.uiScale > 0 ? +p.uiScale : auto
+    if (scale !== 1) root.style.setProperty('--ui-scale', String(scale))
   } catch (e) {}
 })();
 

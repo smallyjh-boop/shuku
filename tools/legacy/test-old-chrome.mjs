@@ -1,18 +1,21 @@
 // 用旧版 Chromium 打开书库，检查兼容旧系统的那一套网页（模拟墨案 inkPad 这类旧安卓的网页组件）。
 //
-//   node tools/legacy/test-old-chrome.mjs <旧版 chromium 路径> <书库地址> <登录令牌> [截图目录] [--strip]
+//   node tools/legacy/test-old-chrome.mjs <旧版 chromium 路径> <书库地址> <登录令牌> [截图目录] [--strip] [--samples]
 //
 // 旧版 Chromium：npm 上 chrome-aws-lambda@64.0.3264 包里的 bin/chromium.br（Chrome 64 的 headless_shell，brotli 压缩），
 // 用 node -e "require('zlib').brotliDecompressSync(...)" 解开。
 // --strip：再删掉 Chrome 58～63 没有的功能（ResizeObserver、Promise.finally、元素的 scrollTo、DOMMatrix），检查补上的那些能用。
+// --samples：先往书库里放几本测试书（EPUB、TXT、PDF、漫画，这里现做），打包时在空的书库上检查用。
 // 走一遍：书架、EPUB 翻页、TXT、PDF（含翻页）、漫画；页面报的错全部打印出来，有错就退出码 1。
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 
 const [bin, base, token, shotsArg] = process.argv.slice(2).filter(a => !a.startsWith('--'))
 const strip = process.argv.includes('--strip')
+const samples = process.argv.includes('--samples')
 if (!bin || !base || !token) {
   console.log('用法：node test-old-chrome.mjs <chromium> <书库地址> <令牌> [截图目录] [--strip]')
   process.exit(2)
@@ -99,8 +102,12 @@ await send('Page.addScriptToEvaluateOnNewDocument', {
 })
 
 const api = async (p) => (await fetch(base + p, { headers: { Authorization: 'Bearer ' + token } })).json()
+const t0 = Math.floor(Date.now() / 1000) - 5
+if (samples) await addSamples()
 const books = (await api('/api/books?limit=200&sort=title')).items || []
-const pick = (re) => books.find(b => re.test([].concat(b.formats || []).join(',')))
+// 放了测试书时优先用刚放进去的（书库里原有的书可能是扫描版 PDF 之类，没有文字层）
+const fmtOf = b => [].concat(b.formats || []).join(',')
+const pick = (re) => (samples && books.find(b => re.test(fmtOf(b)) && b.created_at >= t0)) || books.find(b => re.test(fmtOf(b)))
 console.log(`书库里有 ${books.length} 本书`)
 
 async function step(name, fn) {
@@ -120,7 +127,7 @@ await step('打开书库（兼容旧系统的那一套）', async () => {
 })
 
 async function openReader(name, book, after) {
-  if (!book) { fail(name + '：书库里没有这种书'); return }
+  if (!book) { console.log(`  - ${name}：书库里没有这种书，跳过`); return }
   await step(name, async () => {
     await evaluate(`location.hash = '#/read/${book.id}'`)
     await waitFor("document.querySelector('.reader') && !document.querySelector('.reader .r-loading')", 40000, '阅读器打开')
@@ -161,3 +168,116 @@ proc.kill('SIGKILL')
 fs.rmSync(ud, { recursive: true, force: true })
 console.log(failures ? `\n${failures} 项有问题，截图在 ${shots}` : `\n全部通过，截图在 ${shots}`)
 process.exit(failures ? 1 : 0)
+
+// ---------- 测试书（--samples）：不靠别的工具，现做 ----------
+
+async function addSamples() {
+  const files = {
+    '旧浏览器测试-红楼梦.epub': makeEpub('旧浏览器测试红楼梦', '曹雪芹', [['第一回', '甄士隐梦幻识通灵，贾雨村风尘怀闺秀。'.repeat(40)], ['第二回', '贾夫人仙逝扬州城，冷子兴演说荣国府。'.repeat(40)]]),
+    '旧浏览器测试-活着.txt': Buffer.from(['第一章', '我比现在年轻十岁的时候，获得了一个游手好闲的职业。'.repeat(30), '第二章', '那天傍晚，我走到了一棵大树下。'.repeat(30)].join('\n'), 'utf8'),
+    '旧浏览器测试-深度学习.pdf': makePdf(['Shuku legacy test page one', 'Neural networks learn representations', 'from data, layer by layer.'], 3),
+    '旧浏览器测试-漫画 第1卷.cbz': makeZip([1, 2, 3].map(n => [`${String(n).padStart(3, '0')}.png`, makePng(300, 450, n)])),
+  }
+  for (const [name, data] of Object.entries(files)) {
+    const r = await fetch(base + '/api/upload?path=' + encodeURIComponent(name), { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: data })
+    if (!r.ok) throw new Error('上传测试书失败：' + name + ' ' + r.status)
+  }
+  // 等入库
+  for (let i = 0; i < 120; i++) {
+    const items = (await api('/api/books?limit=200')).items || []
+    const have = f => items.some(b => [].concat(b.formats || []).join(',').includes(f))
+    if (['epub', 'txt', 'pdf', 'cbz'].every(have)) return
+    await sleep(1000)
+  }
+  console.log('  （测试书没有全部入库，后面缺的跳过）')
+}
+
+// （函数声明会提升：上面先调用 addSamples 时这些已经能用）
+var crcTable = null // var：上面先调用时也能用（let 会报未初始化）
+function CRC(buf) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256)
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0 }
+  }
+  let c = 0xFFFFFFFF
+  for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8)
+  return (c ^ 0xFFFFFFFF) >>> 0
+}
+
+// 不压缩的 zip（EPUB 的 mimetype 必须在第一个、不压缩）
+function makeZip(entries) {
+  const locals = [], centrals = []
+  let off = 0
+  for (const [name, content] of entries) {
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')
+    const fn = Buffer.from(name, 'utf8')
+    const crc = CRC(data)
+    const lh = Buffer.alloc(30)
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(0, 8)
+    lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(fn.length, 26)
+    const ch = Buffer.alloc(46)
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8)
+    ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(fn.length, 28); ch.writeUInt32LE(off, 42)
+    locals.push(lh, fn, data)
+    centrals.push(ch, fn)
+    off += 30 + fn.length + data.length
+  }
+  const cd = Buffer.concat(centrals)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16)
+  return Buffer.concat([...locals, cd, end])
+}
+
+function makeEpub(title, author, chapters) {
+  const items = chapters.map((_, i) => `<item id="c${i}" href="c${i}.xhtml" media-type="application/xhtml+xml"/>`).join('')
+  const spine = chapters.map((_, i) => `<itemref idref="c${i}"/>`).join('')
+  return makeZip([
+    ['mimetype', 'application/epub+zip'],
+    ['META-INF/container.xml', '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'],
+    ['content.opf', `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">shuku-legacy-test</dc:identifier><dc:title>${title}</dc:title><dc:creator>${author}</dc:creator><dc:language>zh</dc:language></metadata><manifest>${items}</manifest><spine>${spine}</spine></package>`],
+    ...chapters.map(([t, text], i) => [`c${i}.xhtml`, `<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${t}</title></head><body><h2>${t}</h2><p>${text}</p><p>${text}</p></body></html>`]),
+  ])
+}
+
+function makePdf(lines, pages) {
+  const objs = []
+  const kids = []
+  objs[1] = '<< /Type /Catalog /Pages 2 0 R >>'
+  objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+  for (let p = 0; p < pages; p++) {
+    const page = 4 + p * 2, content = page + 1
+    kids.push(`${page} 0 R`)
+    const text = lines.map((l, i) => `BT /F1 22 Tf 72 ${760 - i * 34} Td (${l}${i === 0 ? ' ' + (p + 1) : ''}) Tj ET`).join('\n')
+    objs[page] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`
+    objs[content] = `<< /Length ${Buffer.byteLength(text)} >>\nstream\n${text}\nendstream`
+  }
+  objs[2] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${pages} >>`
+  let out = '%PDF-1.4\n'
+  const offs = []
+  for (let i = 1; i < objs.length; i++) { offs[i] = Buffer.byteLength(out); out += `${i} 0 obj\n${objs[i]}\nendobj\n` }
+  const xref = Buffer.byteLength(out)
+  out += `xref\n0 ${objs.length}\n0000000000 65535 f \n` + offs.slice(1).map(o => String(o).padStart(10, '0') + ' 00000 n \n').join('')
+  out += `trailer\n<< /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  return Buffer.from(out, 'latin1')
+}
+
+// 灰度 PNG：边框、几条横线，深浅按页码变
+function makePng(w, h, n) {
+  const raw = Buffer.alloc((w + 1) * h)
+  for (let y = 0; y < h; y++) {
+    raw[y * (w + 1)] = 0
+    for (let x = 0; x < w; x++) {
+      const edge = x < 6 || y < 6 || x >= w - 6 || y >= h - 6 || (y % 60 < 4)
+      raw[y * (w + 1) + 1 + x] = edge ? 20 : 245 - n * 30
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length)
+    const td = Buffer.concat([Buffer.from(type, 'latin1'), data])
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(CRC(td))
+    return Buffer.concat([len, td, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 0
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))])
+}
