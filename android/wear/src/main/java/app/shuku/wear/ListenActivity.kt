@@ -19,8 +19,10 @@ import java.util.Locale
 import kotlin.math.ceil
 
 /**
- * 手表上的听书播放页：正在读的这一句、上一句 / 暂停 / 下一句、语速、定时、回到文字。
+ * 手表上的听书播放页：正在读的这一句、上一句 / 暂停 / 下一句、语速、定时、回到文字，
+ * 已经准备好多少离线听的语音、“多准备一些（离线听）”。
  * 没连耳机时提示去连（Wear OS 建议听东西用蓝牙耳机），手表有扬声器的话也可以选用扬声器。
+ * Tile、表盘复杂功能上点“继续听”也打开这里（带 EXTRA_RESUME），所以要 exported。
  */
 class ListenActivity : Activity() {
     private val app get() = WearApp.app
@@ -35,20 +37,22 @@ class ListenActivity : Activity() {
     private lateinit var options: LinearLayout
     private lateinit var speedButton: TextView
     private lateinit var timerButton: TextView
+    private lateinit var offlineView: TextView
+    private lateinit var moreButton: TextView
     private lateinit var textButton: TextView
     private lateinit var stopButton: TextView
 
-    private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) = update()
-    }
+    private var visible = false
 
-    // 定时还剩几分钟：每半分钟刷新一次
-    private val tick = object : Runnable {
-        override fun run() {
-            update()
-            app.main.postDelayed(this, 30_000)
+    // 听书的状态变了：看得见的时候才刷新（看不见时 onResume 再刷新）
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (visible) update()
         }
     }
+
+    // 定了时：看得见的时候每半分钟刷新一次“还剩几分”；没定时不刷新
+    private val tick = Runnable { update() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,16 +65,57 @@ class ListenActivity : Activity() {
             app.config.prefs.edit().putBoolean("asked_notifications", true).apply()
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        // 系统重建页面时（savedInstanceState 不为空）不要再开始一遍
+        if (savedInstanceState == null) handleLaunch(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunch(intent)
+        update()
+    }
+
+    /**
+     * Tile、表盘复杂功能上的“继续听”：从这本书上次的位置接着听（EXTRA_RESUME 是书的 ID，-1 表示 Tile 上现在显示的那本）。
+     * 已经在听这本书就接着放。在这个页面里启动听书服务：页面在前台，Android 12 起才允许启动前台服务。
+     */
+    private fun handleLaunch(i: Intent?) {
+        val rid = i?.getLongExtra(EXTRA_RESUME, 0L) ?: 0L
+        if (rid == 0L) return
+        i?.removeExtra(EXTRA_RESUME)
+        if (!app.config.configured) {
+            ListenService.lastReason = "还没连接书库。请在手表上打开书库，连接以后再听。"
+            return
+        }
+        var id = rid
+        var title = i?.getStringExtra("title") ?: ""
+        if (id < 0) {
+            val b = Today.info().book
+            if (b == null) {
+                ListenService.lastReason = "还没有在读的书。打开一本书，点“听书”。"
+                return
+            }
+            id = b.id
+            title = b.title
+        }
+        if (ListenService.listening(id)) ListenService.play()
+        else try {
+            ListenService.start(this, id, title, -1, 0.0)
+        } catch (e: IllegalStateException) {
+            // 系统不让启动前台服务（理论上页面在前台时不会）：提示再点一次
+            ListenService.lastReason = "没能开始听书，请点一下“返回”再试一次。"
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        visible = true
         update()
-        app.main.removeCallbacks(tick)
-        app.main.postDelayed(tick, 30_000)
     }
 
     override fun onPause() {
+        visible = false
         app.main.removeCallbacks(tick)
         super.onPause()
     }
@@ -119,6 +164,11 @@ class ListenActivity : Activity() {
         options.addView(timerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = gap })
         col.addView(options, Ui.lp(this, 8f, matchWidth = false))
 
+        // 离线听：已经准备好多少；多准备一些（约 1 小时）
+        offlineView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 10f)) }
+        moreButton = Ui.button(this, "多准备一些（离线听）") { ListenService.setMore(!ListenService.state().more) }
+            .also { col.addView(it, Ui.lp(this, 6f)) }
+
         textButton = Ui.button(this, "看文字") { openText() }.also { col.addView(it, Ui.lp(this, 8f)) }
         stopButton = Ui.text(this, "停止听书", 12f, Ui.INK2, center = true).apply {
             val v = Ui.dp(this@ListenActivity, 6f)
@@ -133,6 +183,8 @@ class ListenActivity : Activity() {
 
     private fun update() {
         val s = ListenService.state()
+        app.main.removeCallbacks(tick)
+        if (visible && s.active && s.timer > 0) app.main.postDelayed(tick, 30_000)
         if (!s.active) {
             // 停了（读完了、在别处点了停止）
             titleView.text = "听书"
@@ -142,12 +194,15 @@ class ListenActivity : Activity() {
             outputBox.visibility = View.GONE
             controls.visibility = View.GONE
             options.visibility = View.GONE
+            offlineView.visibility = View.GONE
+            moreButton.visibility = View.GONE
             stopButton.visibility = View.GONE
             textButton.text = "返回"
             return
         }
         controls.visibility = View.VISIBLE
         options.visibility = View.VISIBLE
+        moreButton.visibility = View.VISIBLE
         stopButton.visibility = View.VISIBLE
         textButton.text = "看文字"
         titleView.text = s.title
@@ -171,6 +226,20 @@ class ListenActivity : Activity() {
             s.timer > 0 -> "还剩 ${ceil(s.timerLeftMs / 60_000.0).toInt()} 分"
             else -> "定时"
         }
+        offlineView.text = offlineLine(s)
+        offlineView.visibility = if (offlineView.text.isEmpty()) View.GONE else View.VISIBLE
+        moreButton.text = if (s.more) "不用多准备了" else "多准备一些（离线听）"
+    }
+
+    /** 离开手机、没网时还能听多久（平时自动准备几分钟；点了“多准备一些”准备约半小时） */
+    private fun offlineLine(s: ListenService.State): String {
+        val min = s.offlineSec / 60
+        return when {
+            !s.online -> if (min > 0) "没联网，准备好的还能听约 $min 分钟" else "没联网"
+            s.more && s.preparing -> if (min > 0) "正在准备离线听（约半小时），已准备 $min 分钟" else "正在准备离线听（约半小时）…"
+            min > 0 -> "已准备离线 $min 分钟"
+            else -> ""
+        }
     }
 
     /** 回到文字：从阅读页来的就回去（阅读页会跟到正在读的地方），否则打开这本书 */
@@ -182,5 +251,10 @@ class ListenActivity : Activity() {
         }
         startActivity(Intent(this, ReadActivity::class.java).putExtra("id", s.bookId).putExtra("title", s.title))
         finish()
+    }
+
+    companion object {
+        /** “继续听”：书的 ID，-1 表示 Tile 上现在显示的那本 */
+        const val EXTRA_RESUME = "resume"
     }
 }

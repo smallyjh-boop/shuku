@@ -36,6 +36,7 @@ class ConnectActivity : Activity() {
                     if (isDestroyed) return@runOnUiThread
                     if (err == null) {
                         app.config.prefs.edit().remove("connect_error").apply()
+                        Today.updateViews()
                         finish() // 回到首页，首页会刷新
                     } else {
                         status.setTextColor(Ui.DANGER)

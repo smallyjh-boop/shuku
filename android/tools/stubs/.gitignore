@@ -1,0 +1,3 @@
+# 仓库根目录的 .gitignore 忽略了所有 data/ 目录（书库的数据目录）；
+# 存根里 Kotlin 包 androidx.wear.watchface.complications.data 对应的目录要提交
+!data/

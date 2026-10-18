@@ -52,8 +52,23 @@ android {
         abortOnError = false
         checkReleaseBuilds = false
     }
+
+    packaging {
+        resources {
+            // 表盘复杂功能的库会带进 kotlinx-coroutines；有的版本 jar 里多了这个编译缓存文件，两份同名时打包会报重复
+            excludes += "META-INF/versions/9/previous-compilation-data.bin"
+        }
+    }
 }
 
 dependencies {
     implementation("com.google.android.gms:play-services-wearable:18.2.0")
+    // Tile 和表盘复杂功能。都是已经发布的稳定版：tiles 1.4.1 和 protolayout 1.2.1 是同一天（2024-10-16）发布的一对，
+    // 表盘复杂功能 1.2.1 是官方文档里用的版本。只用了 protolayout 最基础的元素，没用 material
+    implementation("androidx.wear.tiles:tiles:1.4.1")
+    implementation("androidx.wear.protolayout:protolayout:1.2.1")
+    implementation("androidx.wear.protolayout:protolayout-expression:1.2.1")
+    implementation("androidx.wear.watchface:watchface-complications-data-source:1.2.1")
+    // TileService 要返回 ListenableFuture（用 CallbackToFutureAdapter 做）；1.1.0 是 2020 年就发布的稳定版，tiles 本身也用这个库
+    implementation("androidx.concurrent:concurrent-futures:1.1.0")
 }

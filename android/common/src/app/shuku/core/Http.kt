@@ -25,6 +25,13 @@ class HttpResult(val code: Int, val body: ByteArray, private val headers: Map<St
 object Http {
     @Volatile var userAgent = "ShukuApp"
 
+    /**
+     * 建立连接最多等多久（毫秒）。地址到不了的时候（比如出门了还连内网地址、手机没开 Tailscale），
+     * 几秒就放弃、去换线路，不用等完整个请求的超时；连上以后的读超时不受影响（合成语音、下载照样等得够久）。
+     * 内网、Tailscale 正常时连接都在一两秒内，0 表示不限制。
+     */
+    @Volatile var maxConnectMs = 5000
+
     /** 响应头（HttpURLConnection 把状态行放在 null 键下，去掉） */
     private fun headersOf(c: HttpURLConnection): Map<String, List<String>> {
         val out = HashMap<String, List<String>>()
@@ -39,7 +46,8 @@ object Http {
     fun open(url: String, method: String, token: String?, timeoutMs: Int, headers: Map<String, String>): HttpURLConnection {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = method
-        c.connectTimeout = timeoutMs
+        val cap = maxConnectMs
+        c.connectTimeout = if (cap > 0 && timeoutMs > 0) minOf(timeoutMs, cap) else timeoutMs
         c.readTimeout = maxOf(timeoutMs, 15000)
         c.instanceFollowRedirects = true
         c.useCaches = false

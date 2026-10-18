@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 添加 Tile 时显示的预览图（示意：今天读了多少、书名两行、进度，下面“继续读”“继续听”两个按钮），200dp 约等于 400px -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="200dp" android:height="200dp" android:viewportWidth="200" android:viewportHeight="200">
+    <!-- 表盘 -->
+    <path android:fillColor="#FF000000" android:pathData="M0,100a100,100 0,1 0,200 0a100,100 0,1 0,-200 0z" />
+    <!-- 书的图标 -->
+    <path android:fillColor="#FF86B6CB" android:pathData="M87,31L99,33L99,45L87,43Z" />
+    <path android:fillColor="#FF86B6CB" android:pathData="M101,33L113,31L113,43L101,45Z" />
+    <!-- 今天读了多少 -->
+    <path android:fillColor="#FF86B6CB" android:pathData="M75,56h50a3,3 0,0 1,3 3a3,3 0,0 1,-3 3h-50a3,3 0,0 1,-3 -3a3,3 0,0 1,3 -3z" />
+    <!-- 书名 -->
+    <path android:fillColor="#FFE4DED2" android:pathData="M53.5,72h93a5.5,5.5 0,0 1,5.5 5.5a5.5,5.5 0,0 1,-5.5 5.5h-93a5.5,5.5 0,0 1,-5.5 -5.5a5.5,5.5 0,0 1,5.5 -5.5z" />
+    <path android:fillColor="#FFE4DED2" android:pathData="M69.5,89h61a5.5,5.5 0,0 1,5.5 5.5a5.5,5.5 0,0 1,-5.5 5.5h-61a5.5,5.5 0,0 1,-5.5 -5.5a5.5,5.5 0,0 1,5.5 -5.5z" />
+    <!-- 进度 -->
+    <path android:fillColor="#FF9A968E" android:pathData="M85,107h30a3,3 0,0 1,3 3a3,3 0,0 1,-3 3h-30a3,3 0,0 1,-3 -3a3,3 0,0 1,3 -3z" />
+    <!-- 继续读 -->
+    <path android:fillColor="#FF2A2F36" android:pathData="M52,124h32a12,12 0,0 1,12 12a12,12 0,0 1,-12 12h-32a12,12 0,0 1,-12 -12a12,12 0,0 1,12 -12z" />
+    <path android:fillColor="#FFE4DED2" android:pathData="M59,133h18a3,3 0,0 1,3 3a3,3 0,0 1,-3 3h-18a3,3 0,0 1,-3 -3a3,3 0,0 1,3 -3z" />
+    <!-- 继续听 -->
+    <path android:fillColor="#FF86B6CB" android:pathData="M116,124h32a12,12 0,0 1,12 12a12,12 0,0 1,-12 12h-32a12,12 0,0 1,-12 -12a12,12 0,0 1,12 -12z" />
+    <path android:fillColor="#FF000000" android:pathData="M123,133h18a3,3 0,0 1,3 3a3,3 0,0 1,-3 3h-18a3,3 0,0 1,-3 -3a3,3 0,0 1,3 -3z" />
+</vector>

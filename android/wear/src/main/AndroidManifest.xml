@@ -49,10 +49,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".ReadActivity" android:exported="false" />
+        <!-- Tile 上的“继续读”“继续听”由系统的 Tile 界面打开，页面必须 exported（只带书的 ID、书名） -->
+        <activity android:name=".ReadActivity" android:exported="true" />
         <activity
             android:name=".ListenActivity"
-            android:exported="false"
+            android:exported="true"
             android:launchMode="singleTop" />
         <activity android:name=".TocActivity" android:exported="false" />
         <activity android:name=".BooksActivity" android:exported="false" />
@@ -75,6 +76,41 @@
                 <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
                 <data android:host="*" android:pathPrefix="/shuku" android:scheme="wear" />
             </intent-filter>
+        </service>
+
+        <!-- Tile：今天读了多少、在读的书、继续读 / 继续听（只有系统能绑定） -->
+        <service
+            android:name=".ShukuTile"
+            android:description="@string/tile_description"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/tile_label"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data
+                android:name="androidx.wear.tiles.PREVIEW"
+                android:resource="@drawable/tile_preview" />
+        </service>
+
+        <!-- 表盘复杂功能：今天 N 分，点一下继续听（只有系统能绑定）。省电：系统最多半小时来要一次（过了零点要清零），
+             平时靠 App 在读书时长、听书状态变了时推送（ComplicationDataSourceUpdateRequester） -->
+        <service
+            android:name=".TodayComplication"
+            android:exported="true"
+            android:icon="@drawable/ic_book"
+            android:label="@string/complication_label"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter>
+                <action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" />
+            </intent-filter>
+            <meta-data
+                android:name="android.support.wearable.complications.SUPPORTED_TYPES"
+                android:value="SHORT_TEXT,LONG_TEXT" />
+            <meta-data
+                android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
+                android:value="1800" />
         </service>
     </application>
 </manifest>

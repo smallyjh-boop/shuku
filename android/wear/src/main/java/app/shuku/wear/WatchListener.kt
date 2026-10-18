@@ -39,13 +39,17 @@ class WatchListener : WearableListenerService() {
                 }
                 app.config.prefs.edit().putString("connect_error", err ?: "").apply()
                 sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(packageName))
+                if (err == null) Today.updateViews() // Tile、表盘上不再显示“还没连接书库”
             }
             "/shuku/config/error" -> {
                 app.config.prefs.edit().putString("connect_error", String(event.data)).apply()
                 sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(packageName))
             }
             "/shuku/tts/state" -> {
-                app.config.prefs.edit().putString("tts_state", String(event.data)).putLong("tts_at", System.currentTimeMillis()).apply()
+                // 和上次一样（比如首页问了一下、手机那边没变化）：不写、不通知，省电
+                val s = String(event.data)
+                if (s == app.config.str("tts_state", "")) return
+                app.config.prefs.edit().putString("tts_state", s).putLong("tts_at", System.currentTimeMillis()).apply()
                 sendBroadcast(Intent(WearApp.ACTION_TTS).setPackage(packageName))
             }
         }

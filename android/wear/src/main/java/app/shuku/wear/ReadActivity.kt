@@ -17,6 +17,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
@@ -28,6 +29,8 @@ import kotlin.math.min
  * 用表冠滚动。进度换算成网页阅读器认识的位置（sec:节:比例 / p:页:0）传回书库，手机、网页能接着读。
  * 读过的这一章和下一章存在手表上，路上没网也能接着读。
  * 点“听书”（章节开头）或者点一下正文再点“从这里听”，就在手表上朗读；听的时候这一页跟着读到的地方走。
+ * 存进度时带上打开书时书库进度的版本：在别的设备上读到了别处的话，书库不覆盖，这里跳到那边的位置。
+ * Tile 上点“继续读”也打开这里（extras：id、title），所以要 exported。
  */
 class ReadActivity : Activity() {
     private val app get() = WearApp.app
@@ -73,6 +76,12 @@ class ReadActivity : Activity() {
         super.onCreate(savedInstanceState)
         bookId = intent.getLongExtra("id", 0)
         bookTitle = intent.getStringExtra("title") ?: ""
+        if (bookId <= 0 || !app.config.configured) {
+            // 从 Tile 打开、但还没连书库（或者没带书）：回首页
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            finish()
+            return
+        }
         files = BookFiles(this, bookId)
         val f = IntentFilter(WearApp.ACTION_LISTEN)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver, f)
@@ -135,34 +144,32 @@ class ReadActivity : Activity() {
                     message("这本书没有可以显示的文字")
                     return@ui
                 }
-                val resume = toc.optJSONObject("resume")
-                var i = resume?.optInt("i") ?: 0
-                var frac = resume?.optDouble("frac", 0.0) ?: 0.0
+                var i: Int
+                var frac: Double
                 val listen = ListenService.state()
                 if (listen.active && listen.bookId == bookId && listen.fileId == fileId) {
-                    // 正在手表上听这本书：从读到的地方开始看
+                    // 正在手表上听这本书：从读到的地方开始看（进度由听书来存）
                     i = listen.chapterIndex
                     frac = listen.frac
-                } else if (toc.optBoolean("_offline")) {
-                    // 没网：用手表上次记下的位置
-                    runCatching { JSONObject(app.config.str("pos_$bookId", "")) }.getOrNull()?.let {
-                        if (it.optLong("file") == fileId) {
-                            i = it.optInt("i")
-                            frac = it.optDouble("frac", 0.0)
-                        }
-                    }
+                } else {
+                    // 联网时用书库上的位置，没网时用手表上次记下的位置
+                    val p = files.openPoint(toc)
+                    i = p.first
+                    frac = p.second
                 }
                 if (frac.isNaN()) frac = 0.0
                 followedAt = System.currentTimeMillis()
-                open(i.coerceIn(0, chapters.length() - 1), frac)
+                Today.noteBook(bookId, bookTitle)
+                open(i.coerceIn(0, chapters.length() - 1), frac, quiet = true)
             }
         }
     }
 
-    private fun open(i: Int, frac: Double) {
+    /** 打开第 i 章的 frac 处。quiet：停在书库（或听书）原来的位置，没翻动就不存回书库 */
+    private fun open(i: Int, frac: Double, quiet: Boolean = false) {
         if (chapter != null && i != cur) saveNow(force = true)
         chapter = null // 加载期间不保存进度
-        retry = { open(i, frac) }
+        retry = { open(i, frac, quiet) }
         val my = ++loadSeq
         // 手表上存着这一章时几乎是立刻显示，不闪“正在加载”
         app.main.postDelayed({ if (my == loadSeq && doneSeq != my && !isDestroyed) message("正在加载…") }, 250)
@@ -174,7 +181,7 @@ class ReadActivity : Activity() {
             ui {
                 if (my != loadSeq) return@ui
                 doneSeq = my
-                r.onSuccess { show(i, it, frac) }.onFailure { fail(it) }
+                r.onSuccess { show(i, it, frac, quiet) }.onFailure { fail(it) }
             }
             // 顺便把下一章存到手表上，点“下一章”马上就能看，没网也能接着读
             if (r.isSuccess && nextMeta != null) runCatching { files.chapter(i + 1, fid, nextMeta) }
@@ -193,7 +200,10 @@ class ReadActivity : Activity() {
         val (_, col) = Ui.page(this)
         if (bookTitle.isNotEmpty()) col.addView(Ui.text(this, bookTitle, 14f, Ui.ACCENT, bold = true, center = true, maxLines = 2))
         col.addView(Ui.text(this, text, 13f, if (canRetry) Ui.DANGER else Ui.INK2, center = true), Ui.lp(this, 10f))
-        if (canRetry) col.addView(Ui.button(this, "重试", primary = true) { retry() }, Ui.lp(this, 12f))
+        if (canRetry) col.addView(Ui.button(this, "重试", primary = true) {
+            app.retryNow() // 不管刚才是不是不通，马上重新连
+            retry()
+        }, Ui.lp(this, 12f))
     }
 
     private fun fail(e: Throwable) {
@@ -201,7 +211,7 @@ class ReadActivity : Activity() {
         else message(e.message ?: "打开失败", canRetry = true)
     }
 
-    private fun show(i: Int, ch: JSONObject, frac: Double) {
+    private fun show(i: Int, ch: JSONObject, frac: Double, quiet: Boolean = false) {
         cur = i
         lastLoc = null
         val (s, col) = Ui.page(this, overlay = true)
@@ -252,6 +262,11 @@ class ReadActivity : Activity() {
                 tv.layout ?: return
                 tv.viewTreeObserver.removeOnGlobalLayoutListener(this)
                 if (frac > 0.0) scrollToFrac(frac, smooth = false)
+                // 停在原来的位置：当作已经存过，翻动了才存（不白白更新书库上的进度版本，免得正在别处读的人被跳回来）
+                if (quiet) here()?.let {
+                    lastLoc = it.first
+                    lastPercent = it.second
+                }
                 scheduleSave()
             }
         })
@@ -271,10 +286,11 @@ class ReadActivity : Activity() {
 
     private fun cycleFont() {
         val ch = chapter ?: return
+        saveNow() // 翻动过还没存的先存上，换字号后停在同一处就不再存
         val frac = position()
         val k = sizes.indexOfFirst { it >= fontSize - 0.1f }
         fontSize = sizes[(k + 1) % sizes.size]
-        show(cur, ch, frac)
+        show(cur, ch, frac, quiet = true)
     }
 
     private fun toc() {
@@ -324,20 +340,20 @@ class ReadActivity : Activity() {
         startActivity(Intent(this, ListenActivity::class.java).putExtra("from", bookId))
     }
 
-    /** 跟到听书读到的地方（手表上记下的位置比已经跟上的新） */
+    /** 跟到听书读到的地方（听书读到的这一句比已经跟上的新） */
     private fun follow(force: Boolean) {
         if (chapter == null) return
-        val p = runCatching { JSONObject(app.config.str("pos_$bookId", "")) }.getOrNull() ?: return
-        if (p.optString("by") != "listen" || p.optLong("file") != fileId) return
-        val at = p.optLong("at")
+        val p = ListenService.state()
+        if (!p.active || p.bookId != bookId || p.fileId != fileId) return
+        val at = p.posAt
         if (at <= followedAt) return
         if (!force && SystemClock.uptimeMillis() - lastInput < 8000) return
         followedAt = at
-        val i = p.optInt("i")
-        val frac = p.optDouble("frac", 0.0)
+        val i = p.chapterIndex
+        val frac = p.frac
         if (i != cur && i in 0 until chapters.length()) {
             chapter = null // 换章前不要把这一页的旧位置存回书库
-            open(i, frac)
+            open(i, frac, quiet = true)
         } else if (i == cur) scrollToFrac(frac, smooth = !force)
     }
 
@@ -365,16 +381,20 @@ class ReadActivity : Activity() {
         app.main.postDelayed(saveTask, 2500)
     }
 
-    private fun saveNow(force: Boolean = false) {
-        app.main.removeCallbacks(saveTask)
-        val ch = chapter ?: return
-        // 正在听这本书：进度由听书来存，这一页只是跟着走
-        if (ListenService.listening(bookId)) return
+    /** 现在读到的地方：（网页阅读器认识的位置，全书百分比，这一章里的比例） */
+    private fun here(): Triple<String, Double, Double>? {
+        val ch = chapter ?: return null
         var frac = position()
         val last = cur == chapters.length() - 1
         if (last && atEnd()) frac = 1.0
-        val percent = BookPos.percent(ch, frac, last && frac >= 1.0)
-        val loc = BookPos.location(chapters, cur, frac)
+        return Triple(BookPos.location(chapters, cur, frac), BookPos.percent(ch, frac, last && frac >= 1.0), frac)
+    }
+
+    private fun saveNow(force: Boolean = false) {
+        app.main.removeCallbacks(saveTask)
+        // 正在听这本书：进度由听书来存，这一页只是跟着走
+        if (ListenService.listening(bookId)) return
+        val (loc, percent, frac) = here() ?: return
         val now = SystemClock.elapsedRealtime()
         val secs = if (activeSince > 0) ((now - activeSince) / 1000).toInt() else 0
         val same = loc == lastLoc && abs(percent - lastPercent) < 0.001
@@ -386,7 +406,35 @@ class ReadActivity : Activity() {
         val body = JSONObject().put("file_id", fileId).put("location", loc).put("percent", percent)
             .put("device", WearApp.DEVICE).put("seconds", min(600, secs))
         val id = bookId
-        bg { app.saveProgress(id, body) }
+        Today.noteBook(id, bookTitle, percent)
+        bg {
+            if (app.saveProgress(id, body).conflict) ui { onConflict() }
+        }
+    }
+
+    /**
+     * 书库上的位置被别的设备更新过（在手机、网页上读到了别处），这次没有覆盖：接受书库的位置，跳过去。
+     * 之后再翻页就按新的版本存，不会两边来回覆盖。
+     */
+    private fun onConflict() {
+        if (ListenService.listening(bookId)) return // 在听这本书：听书那边会跟过去，这一页跟着听书走
+        val my = ++loadSeq
+        bg {
+            val toc = runCatching { files.toc() }.getOrNull()?.takeIf { !it.optBoolean("_offline") }
+            ui {
+                if (my != loadSeq || toc == null) return@ui
+                if (toc.optLong("file_id") != fileId) {
+                    openBook() // 书库那边换了一个文件读：重新打开
+                    return@ui
+                }
+                chapters = toc.optJSONArray("chapters") ?: chapters
+                val (i, frac) = files.openPoint(toc)
+                if (i == cur && abs(frac - position()) < 0.02) return@ui
+                Toast.makeText(this, "在别处读到了新的地方，已跳过去", Toast.LENGTH_SHORT).show()
+                chapter = null // 跳之前不要把这一页的旧位置存回书库
+                open(i.coerceIn(0, max(0, chapters.length() - 1)), frac, quiet = true)
+            }
+        }
     }
 
     companion object {

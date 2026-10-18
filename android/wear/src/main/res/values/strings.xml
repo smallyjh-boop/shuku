@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">书库</string>
+    <string name="tile_label">书库</string>
+    <string name="tile_description">今天读了多少分钟、在读的书，点一下继续读或继续听</string>
+    <string name="complication_label">今天读书</string>
 </resources>

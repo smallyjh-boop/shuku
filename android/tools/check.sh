@@ -1,6 +1,7 @@
 #!/bin/bash
 # 本地类型检查安卓、手表两个 App 的 Kotlin 代码，不需要安装 Android SDK：
-# 用 Gradle 自带的 Kotlin 编译器 + android.jar（API 35）+ Play 服务的签名存根。
+# 用 Gradle 自带的 Kotlin 编译器 + android.jar（API 35）+ 库的签名存根（tools/stubs：Play 服务、Wear Tiles、
+# ProtoLayout、表盘复杂功能等，签名照各库发布版本的 api/*.txt 写；Java 写的库用 Java 存根，Kotlin 写的库用 Kotlin 存根）。
 # 用法：ANDROID_JAR=/path/to/android.jar tools/check.sh
 # 正式打包用 GitHub Actions（.github/workflows/android.yml）。
 set -e
@@ -17,9 +18,15 @@ for j in kotlin-reflect kotlin-script-runtime trove4j kotlinx-coroutines-core-jv
 done
 OUT=${OUT:-/tmp/shuku-android-check}
 rm -rf "$OUT" && mkdir -p "$OUT/stubs" "$OUT/gen"
-# Play 服务存根
-javac -nowarn -d "$OUT/stubs" -cp "$ANDROID_JAR" $(find "$HERE/tools/stubs/src" -name '*.java') 2>&1 | grep -v "^Picked up" || true
 kotlinc() { java -cp "$CP_COMPILER" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -no-stdlib -no-reflect -jvm-target 17 "$@" 2>&1 | grep -v "^Picked up" ; }
+# 库的存根：先编 Java 写的，再编 Kotlin 写的（Kotlin 存根可以用到 Java 存根）
+log=$(javac -nowarn -d "$OUT/stubs" -cp "$ANDROID_JAR" $(find "$HERE/tools/stubs/src" -name '*.java') 2>&1 | grep -v "^Picked up") || true
+if echo "$log" | grep -q "error"; then echo "$log"; echo "存根：有编译错误"; exit 1; fi
+KT_STUBS=$(find "$HERE/tools/stubs/src" -name '*.kt')
+if [ -n "$KT_STUBS" ]; then
+  log=$(kotlinc -cp "$ANDROID_JAR:$STD:$OUT/stubs" -d "$OUT/stubs" $KT_STUBS) || true
+  if echo "$log" | grep -q "error:"; then echo "$log" | grep -E "error:"; echo "存根：有编译错误"; exit 1; fi
+fi
 check() {
   local mod=$1 pkg=$2
   mkdir -p "$OUT/gen/$mod/$(echo $pkg | tr . /)"

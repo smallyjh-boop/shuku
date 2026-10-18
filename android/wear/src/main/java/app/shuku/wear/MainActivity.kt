@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private var loadedAt = 0L
     private var loading = false
     private var waitingPhone: Runnable? = null
+    private var visible = false
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -41,11 +42,38 @@ class MainActivity : Activity() {
                     loadedAt = 0
                     render()
                     if (app.config.configured) load()
+                    Today.updateViews()
                 }
-                WearApp.ACTION_TTS -> renderTts()
-                WearApp.ACTION_LISTEN -> renderListen()
+                // 看不见的时候不重画（onResume 时再画）
+                WearApp.ACTION_TTS -> if (visible) {
+                    renderTts()
+                    schedulePhonePoll()
+                }
+                WearApp.ACTION_LISTEN -> if (visible) renderListen()
             }
         }
+    }
+
+    /**
+     * 手机听书时不会每读一句就告诉手表（省电）：首页看得见、手机又正在读的时候，每 25 秒问一次读到哪句了；
+     * 首页看不见（onPause）就不问。手机开始、暂停、换书时会自己发过来。
+     */
+    private val phonePoll = Runnable {
+        if (visible && phoneReading()) {
+            bg { PhoneLink.send(this, "/shuku/tts/state") }
+            schedulePhonePoll()
+        }
+    }
+
+    private fun schedulePhonePoll() {
+        app.main.removeCallbacks(phonePoll)
+        if (visible && phoneReading()) app.main.postDelayed(phonePoll, 25_000)
+    }
+
+    private fun phoneReading(): Boolean {
+        val s = runCatching { JSONObject(app.config.str("tts_state", "")) }.getOrNull() ?: return false
+        val fresh = System.currentTimeMillis() - app.config.prefs.getLong("tts_at", 0) < 3 * 3600_000L
+        return fresh && s.optBoolean("active") && s.optBoolean("playing")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,18 +90,28 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         try { unregisterReceiver(receiver) } catch (e: Exception) {}
         waitingPhone?.let { app.main.removeCallbacks(it) }
+        app.main.removeCallbacks(phonePoll)
         super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
+        visible = true
         if (shownConfigured != app.config.configured) render()
         renderListen()
+        renderTts()
         if (app.config.configured) {
             if (System.currentTimeMillis() - loadedAt > 30_000) load()
-            // 请手机发一次听书状态
+            // 请手机发一次听书状态；手机正在读的话，看得见期间隔一会儿再问
             bg { PhoneLink.send(this, "/shuku/tts/state") }
+            schedulePhonePoll()
         }
+    }
+
+    override fun onPause() {
+        visible = false
+        app.main.removeCallbacks(phonePoll)
+        super.onPause()
     }
 
     private fun bg(task: () -> Unit) = app.io.execute(task)
@@ -147,7 +185,11 @@ class MainActivity : Activity() {
         val cached = app.config.str("reading_cache", "")
         if (cached.isNotEmpty()) showBooks(JSONArray(cached)) else listBox!!.addView(Ui.text(this, "正在加载…", 13f, Ui.INK2))
         col.addView(Ui.button(this, "找书") { startActivity(Intent(this, BooksActivity::class.java)) }, Ui.lp(this, 14f))
-        col.addView(Ui.button(this, "刷新") { loadedAt = 0; load() }, Ui.lp(this, 8f))
+        col.addView(Ui.button(this, "刷新") {
+            app.retryNow() // 不管刚才是不是不通，马上重新连
+            loadedAt = 0
+            load()
+        }, Ui.lp(this, 8f))
         val dis = Ui.button(this, "断开书库") {}
         dis.setOnClickListener {
             if (dis.tag == null) {
@@ -156,11 +198,14 @@ class MainActivity : Activity() {
                 dis.setTextColor(Ui.DANGER)
                 return@setOnClickListener
             }
-            // 顺手在书库的设备列表里注销这块手表
+            ListenService.stopNow()
+            // 顺手在书库的设备列表里注销这块手表；手表上准备的离线听书删掉
             bg {
                 runCatching { app.api("POST", "/api/auth/logout", JSONObject(), 5000) }
                 app.config.clear()
                 app.config.prefs.edit().remove("connect_error").remove("reading_cache").apply()
+                runCatching { ListenStore.clearAll(app) }
+                Today.clear()
                 ui { render() }
             }
         }
@@ -201,6 +246,8 @@ class MainActivity : Activity() {
                 val items = res.getOrThrow().optJSONArray("items") ?: JSONArray()
                 app.config.prefs.edit().putString("reading_cache", items.toString()).apply()
                 showBooks(items)
+                // Tile、表盘复杂功能上的“今天读了多少”顺便也更新一下（刚连上书库，最多两分钟一次）
+                Today.refresh(force = true)
             }
         }
     }
