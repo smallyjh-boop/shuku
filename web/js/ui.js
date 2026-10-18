@@ -295,7 +295,8 @@ function hashStr(s) {
   return h >>> 0
 }
 
-const hasHan = s => /\p{Script=Han}/u.test(s)
+// 汉字（不用 \p{Script=Han}：旧浏览器不认识）
+const hasHan = s => /[\u2E80-\u2FDF\u3005\u3007\u3021-\u3029\u3038-\u303B\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]|[\uD840-\uD87F][\uDC00-\uDFFF]/.test(s)
 
 export function genCover(title, author) {
   const t = (title || '未命名').trim()

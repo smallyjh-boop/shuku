@@ -33,7 +33,16 @@ FROM base AS runtime
 # （注释写在这里：base 那一段从 FROM 到下一个 FROM 之间，连注释、空行改了都会让基础镜像重做）
 COPY --from=build /out/dict/ /app/dict/
 
-FROM runtime
+FROM runtime AS ocr
+# 扫描版 PDF 识别文字：tesseract 和简体、繁体、英文、日文的识别模型（Debian 打包的是“快速”模型，十几 MB）。
+# 发布时这一段单独做成 ghcr.io/smallyjh-boop/shuku-runtime:ocr-…（运行环境和这一段没变就一直用同一个），
+# 放在字典后面：加它不用重新下载字典
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-jpn \
+ && rm -f /usr/share/tesseract-ocr/*/tessdata/osd.traineddata \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM ocr
 # 威联通上要用宿主机网络（network_mode: host）运行，书库直接监听 SHUKU_PORT；默认 27200，避开 QTS 自己的 8080
 ENV TZ=Asia/Bangkok \
     SHUKU_PORT=27200 \

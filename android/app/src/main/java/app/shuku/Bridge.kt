@@ -70,6 +70,12 @@ class Bridge(private val activity: MainActivity) {
 
     // ---------- App 设置 ----------
 
+    /** 是不是墨水屏阅读器（网页据此自动打开墨水屏模式） */
+    @JavascriptInterface fun isEInk(): Boolean = EInk.detected
+
+    /** 设备信息（屏幕实际尺寸、网页组件版本）：墨水屏模式按屏幕尺寸定字号；设置页“手机 App”里显示，排查兼容问题用 */
+    @JavascriptInterface fun deviceInfo(): String = EInk.info(activity).toString()
+
     /**
      * download_limit_mb：下载到手机的书最多占多少 MB（0 表示不限），超过时先删最早下载、已经读完的书；
      * auto_clean_finished：App 启动连上书库时，把下载以后读完了的书从手机上删掉

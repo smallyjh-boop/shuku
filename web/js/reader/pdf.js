@@ -1,13 +1,14 @@
 // PDF：pdf.js 渲染，按需分段下载（大文件不用等全部下完），连续滚动或单页翻页，夜间反色
 // 文字层：能选字（查字典、划线、复制）、书内搜索；划线用浏览器的 CSS 高亮画在文字层上
 
-import * as pdfjs from '/vendor/pdfjs/pdf.mjs'
+import { loadPdfjs } from './pdfjs.js'
 import { h, clear, debounce } from '../ui.js'
 import { splitSentences } from './tts.js'
 import { api, auth, net } from '../api.js'
 import { around } from './dict.js'
 
-pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs'
+let pdfjs = null // 第一次打开 PDF 时加载
+const lib = async () => pdfjs || (pdfjs = await loadPdfjs())
 const VENDOR = '/vendor/pdfjs/'
 const HL_COLORS = ['yellow', 'green', 'blue', 'pink']
 
@@ -50,6 +51,7 @@ function textOffsets(root, range) {
 // 离线保存时用（offline.js）：把几页的文字读一遍，用到的字符映射表（很多中文 PDF 要）、标准字体就经 Service Worker 存进缓存，
 // 断网时也画得出字
 export async function warmFonts(data) {
+  await lib()
   const doc = await pdfjs.getDocument({ data, cMapUrl: VENDOR + 'cmaps/', cMapPacked: true, standardFontDataUrl: VENDOR + 'standard_fonts/', isEvalSupported: false }).promise
   try {
     const n = doc.numPages
@@ -71,6 +73,7 @@ export class Engine {
 
   async open(info, saved) {
     this.info = info
+    await lib()
     const headers = auth.token ? { Authorization: 'Bearer ' + auth.token } : {}
     const task = pdfjs.getDocument({
       url: (net.base || '') + info.url, httpHeaders: headers, withCredentials: false,

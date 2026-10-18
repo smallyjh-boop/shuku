@@ -14,11 +14,11 @@ self.addEventListener('activate', e => {
 
 // 存了哪些书、令牌是谁：页面改了以后会发消息过来，重新读
 let meta = null
-self.addEventListener('message', e => { if (e.data?.type === 'offline-changed') meta = null })
+self.addEventListener('message', e => { if (e.data && e.data.type === 'offline-changed') meta = null })
 async function loadMeta() {
   if (meta) return meta
   const c = await caches.open(OFFLINE)
-  const rd = async k => { const r = await c.match(k); try { return r ? await r.json() : {} } catch { return {} } }
+  const rd = async k => { const r = await c.match(k); try { return r ? await r.json() : {} } catch (e) { return {} } }
   meta = { index: await rd('/__shuku/offline.json'), sessions: await rd('/__shuku/sessions.json') }
   return meta
 }
@@ -79,12 +79,12 @@ const timeout = (p, ms) => new Promise((resolve, reject) => { const t = setTimeo
 
 async function apiFetch(req, u, r) {
   let saved = null
-  try { saved = await offlineMatch(req, u, r) } catch {}
+  try { saved = await offlineMatch(req, u, r) } catch (e) {}
   // 没有离线存这本书：和平常一样
   if (!saved) return fetch(req)
   if (self.navigator.onLine === false) return answer(req, saved)
   // 先走网络（拿最新的）；连不上、等太久时用存好的
-  try { return await timeout(fetch(req), r.file ? 12000 : 6000) } catch { return answer(req, saved) }
+  try { return await timeout(fetch(req), r.file ? 12000 : 6000) } catch (e) { return answer(req, saved) }
 }
 
 self.addEventListener('fetch', e => {

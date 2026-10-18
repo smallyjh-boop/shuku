@@ -4,3 +4,5 @@ server/shuku
 *.db-shm
 data/
 .claude/
+web/legacy/
+tools/legacy/node_modules/

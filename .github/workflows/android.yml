@@ -214,6 +214,22 @@ jobs:
             -t "$R" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           docker push "$R"
 
+      - name: 文字识别（运行环境加上 tesseract，没改就用做好的）
+        run: |
+          set -o pipefail
+          # 标签按运行环境和 Dockerfile 里 ocr 那一段算：都没变就一直用同一个。放在字典层后面，加它 NAS 不用重新下载字典
+          key="$RUNTIME|$(awk '/^FROM .* AS ocr$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile)"
+          O="$RUNTIME_IMAGE:ocr-$(printf '%s' "$key" | sha256sum | cut -c1-12)"
+          echo "OCR=$O" >> "$GITHUB_ENV"
+          if docker buildx imagetools inspect "$O" > /dev/null 2>&1; then
+            echo "用已有的 $O"
+            exit 0
+          fi
+          echo "制作 $O"
+          docker buildx build --platform linux/amd64 --target ocr --build-context runtime="docker-image://$RUNTIME" \
+            -t "$O" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          docker push "$O"
+
       - name: 取上一版镜像（试运行时测试从上一版升级）
         continue-on-error: true
         run: |
@@ -227,8 +243,8 @@ jobs:
       - name: 打包服务器镜像并试运行
         run: |
           set -o pipefail
-          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成做好的（带字典）
-          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context runtime="docker-image://$RUNTIME" \
+          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成做好的（带字典和文字识别）
+          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context ocr="docker-image://$OCR" \
             -t "$IMAGE:latest" -t "$IMAGE:v$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           # 和 NAS 上一样用宿主机网络试运行：接口、网页、各端安装包都要能取到
           docker run -d --name shuku-test --network host -e SHUKU_PORT=18080 "$IMAGE:latest" > /dev/null
@@ -275,6 +291,30 @@ jobs:
           tools = json.load(open(sys.argv[1]))["tools"]
           print("转换工具：", tools)
           assert all(tools.values()), [k for k, v in tools.items() if not v]
+          EOF
+          # 扫描版 PDF 识别文字：放进一页图片 PDF，识别出上面的字
+          curl -fsS -X POST -H "Authorization: Bearer $tok" --data-binary @server/testdata/scan-en.pdf "http://127.0.0.1:18080/api/upload?path=scan-en.pdf" > /dev/null 2>&1 || true
+          python3 - "$tok" <<'EOF' || { ok=""; echo "文字识别不对"; }
+          import json, sys, time, urllib.request
+          tok = sys.argv[1]
+          def get(p):
+              r = urllib.request.Request("http://127.0.0.1:18080" + p, headers={"Authorization": "Bearer " + tok})
+              return json.load(urllib.request.urlopen(r, timeout=180))
+          fid = None
+          for i in range(60):
+              items = get("/api/books?limit=50")["items"]
+              for b in items:
+                  for f in get(f"/api/books/{b['id']}").get("files", []):
+                      if f.get("format") == "pdf":
+                          fid = f["id"]
+              if fid:
+                  break
+              time.sleep(1)
+          assert fid, "扫描版 PDF 没有入库"
+          page = get(f"/api/files/{fid}/ocr/1")
+          text = "\n".join(l["text"] for l in page["lines"])
+          print("文字识别（%s）：" % page["lang"], text.replace("\n", " / "))
+          assert "12345" in text, text
           EOF
           for f in shuku-android.apk shuku-wear.apk shuku-extension.zip; do
             curl -fsS http://127.0.0.1:18080/dl/$f -o "$RUNNER_TEMP/dl-$f" 2>/dev/null || true

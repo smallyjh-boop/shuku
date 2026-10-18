@@ -1,0 +1,20 @@
+{
+  "name": "shuku-legacy-web",
+  "private": true,
+  "description": "书库：给旧浏览器（墨水屏阅读器、旧安卓的网页组件）构建一套降级过的网页，输出到 web/legacy/",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@juggle/resize-observer": "3.4.0",
+    "abortcontroller-polyfill": "1.7.8",
+    "acorn": "8.18.0",
+    "core-js": "3.50.0",
+    "core-js-compat": "3.50.0",
+    "esbuild": "0.28.2",
+    "fflate": "0.8.2",
+    "lightningcss": "1.33.0",
+    "web-streams-polyfill": "4.3.0"
+  }
+}

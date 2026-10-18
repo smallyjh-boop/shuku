@@ -615,14 +615,19 @@ func routesP2(mux *http.ServeMux) {
 
 var assetsCache struct {
 	sync.Mutex
-	at   time.Time
-	body []byte
+	at   [2]time.Time
+	body [2][]byte
 }
 
+// 网页文件清单。兼容旧系统的那一套网页（/legacy/）只有网页组件旧的 App 才要（?legacy=1），别的手机不用多下载几 MB
 func handleAssets(w http.ResponseWriter, r *http.Request) {
+	v := 0
+	if r.URL.Query().Get("legacy") == "1" {
+		v = 1
+	}
 	assetsCache.Lock()
 	defer assetsCache.Unlock()
-	if time.Since(assetsCache.at) > time.Minute || assetsCache.body == nil {
+	if time.Since(assetsCache.at[v]) > time.Minute || assetsCache.body[v] == nil {
 		type item struct {
 			P string `json:"p"`
 			S int64  `json:"s"`
@@ -636,17 +641,17 @@ func handleAssets(w http.ResponseWriter, r *http.Request) {
 			}
 			rel, _ := filepath.Rel(cfg.WebDir, p)
 			rel = "/" + filepath.ToSlash(rel)
-			if strings.HasPrefix(filepath.Base(p), ".") || rel == "/sw.js" {
+			if strings.HasPrefix(filepath.Base(p), ".") || rel == "/sw.js" || (v == 0 && strings.HasPrefix(rel, "/legacy/")) {
 				return nil
 			}
 			files = append(files, item{rel, info.Size(), info.ModTime().Unix()})
 			fmt.Fprintf(h, "%s|%d|%d\n", rel, info.Size(), info.ModTime().Unix())
 			return nil
 		})
-		assetsCache.body = []byte(toJSON(map[string]any{"version": hex.EncodeToString(h.Sum(nil))[:16], "files": files}))
-		assetsCache.at = time.Now()
+		assetsCache.body[v] = []byte(toJSON(map[string]any{"version": hex.EncodeToString(h.Sum(nil))[:16], "files": files}))
+		assetsCache.at[v] = time.Now()
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(assetsCache.body)
+	w.Write(assetsCache.body[v])
 }

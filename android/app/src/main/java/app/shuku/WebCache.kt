@@ -84,7 +84,8 @@ class WebCache(private val app: ShukuApp) {
     fun precache() {
         val base = app.link.base ?: return
         try {
-            val r = Http.request("$base/api/assets", timeoutMs = 8000)
+            // 网页组件旧（会用兼容旧系统的那一套网页）：把那一套也缓存上，离线也能打开
+            val r = Http.request("$base/api/assets" + (if (EInk.legacyWeb) "?legacy=1" else ""), timeoutMs = 8000)
             if (!r.ok) return
             val j = JSONObject(r.text)
             val version = j.optString("version")

@@ -28,7 +28,16 @@ export async function putProgress(bookId, body, { keepalive } = {}) {
   try { tok = localStorage.getItem('shuku.token') || '' } catch {}
   if (tok) headers.Authorization = 'Bearer ' + tok
   try {
-    const r = await fetch(url, { method: 'PUT', body: JSON.stringify(body), headers, keepalive: !!keepalive, credentials: net.base ? 'omit' : 'same-origin', cache: 'no-store' })
+    const opts = { method: 'PUT', body: JSON.stringify(body), headers, credentials: net.base ? 'omit' : 'same-origin', cache: 'no-store' }
+    let r
+    try {
+      // 兼容旧系统的那一套网页（旧浏览器）不用 keepalive：发不出去，还白白报错
+      r = await fetch(url, { ...opts, keepalive: !!keepalive && !window.SHUKU_LEGACY })
+    } catch (e) {
+      // 旧浏览器（Chrome 81 以前）带登录信息的 keepalive 请求发不出去：页面还在（只是退出阅读器），不带 keepalive 再发一次
+      if (!keepalive) throw e
+      r = await fetch(url, opts)
+    }
     if (r.status === 404 || r.status === 403 || r.status === 400) return { gone: true, status: r.status }
     if (!r.ok) return { failed: true, status: r.status }
     const d = await r.json().catch(() => ({}))

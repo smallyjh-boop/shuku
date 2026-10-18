@@ -173,7 +173,9 @@ class MainActivity : Activity() {
         s.setSupportZoom(true)
         s.builtInZoomControls = true // 漫画可以双指放大
         s.displayZoomControls = false
-        s.userAgentString = s.userAgentString + " ShukuApp/" + BuildConfig.VERSION_NAME
+        s.userAgentString = s.userAgentString + " ShukuApp/" + BuildConfig.VERSION_NAME + (if (EInk.detected) " ShukuEInk" else "")
+        // 墨水屏：不要拉到头时的光晕动画（墨水屏上是一片残影）
+        if (EInk.detected) web.overScrollMode = View.OVER_SCROLL_NEVER
         web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         web.addJavascriptInterface(bridge, "ShukuNative")
         Events.attach(web)
@@ -340,6 +342,14 @@ class MainActivity : Activity() {
     override fun onBackPressed() = goBack()
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 墨水屏阅读器、翻页笔的翻页键
+        val page = event.keyCode == KeyEvent.KEYCODE_PAGE_DOWN || event.keyCode == KeyEvent.KEYCODE_PAGE_UP
+        if (page && readerMode) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                Events.emit("key", JSONObject().put("dir", if (event.keyCode == KeyEvent.KEYCODE_PAGE_DOWN) "next" else "prev"))
+            }
+            return true
+        }
         val vol = event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || event.keyCode == KeyEvent.KEYCODE_VOLUME_UP
         // 阅读时音量键翻页；听书时音量键还是调音量
         if (vol && readerMode && app.config.bool("volume_keys", true) && NarrationService.instance == null) {

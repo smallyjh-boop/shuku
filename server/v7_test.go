@@ -721,4 +721,3 @@ func TestGuessCategory(t *testing.T) {
 		t.Error("取过以后应该删掉")
 	}
 }
-
