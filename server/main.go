@@ -60,11 +60,13 @@ func main() {
 	}
 	// 联网服务地址可以换成镜像或本地模拟服务（测试用）
 	for k, p := range map[string]*string{"SHUKU_DOUBAN_BASE": &doubanBase, "SHUKU_OPENLIBRARY_BASE": &olBase, "SHUKU_OPENLIBRARY_COVERS": &olCoverBase,
-		"SHUKU_GOOGLE_BASE": &googleBase, "SHUKU_BANGUMI_BASE": &bangumiBase, "SHUKU_EDGE_WSS": &edgeWSS} {
+		"SHUKU_GOOGLE_BASE": &googleBase, "SHUKU_BANGUMI_BASE": &bangumiBase, "SHUKU_EDGE_WSS": &edgeWSS,
+		"SHUKU_MS_TRANSLATE_AUTH": &msTranslateAuth, "SHUKU_MS_TRANSLATE_BASE": &msTranslateBase} {
 		if v := env(k, ""); v != "" {
 			*p = strings.TrimRight(v, "/")
 		}
 	}
+	tesseractBin = env("SHUKU_TESSERACT", "tesseract")
 	for _, d := range []string{cfg.DataDir, cfg.Inbox, filepath.Join(cfg.DataDir, "covers"), filepath.Join(cfg.DataDir, "cache")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			log.Fatalf("创建目录 %s 失败: %v", d, err)

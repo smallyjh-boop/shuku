@@ -263,22 +263,37 @@ func normalizeAuthor(a string) string {
 }
 
 func guessCategory(tags []string) string {
-	t := strings.Join(tags, " ")
+	t := strings.ToLower(strings.Join(tags, " "))
+	t = strings.NewReplacer("nonfiction", " ", "non-fiction", " ").Replace(t)
+	// 顺序有讲究：少儿、小说在前（Juvenile fiction 是少儿，Science fiction 是小说）
 	rules := []struct{ cat, words string }{
-		{"小说", "小说 fiction novel 科幻 奇幻 武侠 仙侠 言情 悬疑 推理 玄幻 都市"},
-		{"计算机", "计算机 编程 程序 computer programming software python java 算法"},
-		{"历史", "历史 history"},
-		{"经济管理", "经济 管理 商业 金融 投资 business economics finance"},
-		{"哲学宗教", "哲学 宗教 philosophy religion"},
-		{"科学技术", "科学 科普 物理 化学 生物 数学 science"},
-		{"社科", "社会 政治 心理 法律 social psychology"},
-		{"文学", "文学 散文 诗歌 literature poetry essay"},
-		{"少儿", "儿童 少儿 童话 children"},
+		{"少儿", "儿童 少儿 童话 绘本 children juvenile fairy nursery"},
+		{"小说", "小说 科幻 奇幻 武侠 仙侠 言情 悬疑 推理 玄幻 都市 演义 章回 话本 fiction novel novels romance mystery detective adventure fantasy"},
+		{"计算机", "计算机 编程 程序 computer computers programming software python java 算法 algorithms"},
+		{"历史", "历史 史部 正史 编年 纪传 history historical"},
+		{"经济管理", "经济 管理 商业 金融 投资 business economics finance management"},
+		{"哲学宗教", "哲学 宗教 佛教 佛经 道教 儒家 经部 子部 philosophy religion buddhism taoism christianity theology"},
+		{"科学技术", "科学 科普 物理 化学 生物 数学 天文 医学 science sciences physics chemistry biology mathematics astronomy medicine technology"},
+		{"社科", "社会 政治 心理 法律 social sociology politics psychology law"},
+		{"文学", "文学 散文 诗歌 诗词 诗经 楚辞 戏曲 戏剧 杂剧 集部 literature poetry poems essays drama plays"},
+		{"艺术", "艺术 美术 音乐 书法 绘画 摄影 art arts music painting photography"},
+		{"生活", "生活 烹饪 美食 旅行 健康 cooking travel"},
+		{"教育考试", "教育 考试 教材 education textbooks"},
 	}
-	low := strings.ToLower(t)
+	have := map[string]bool{}
+	for _, c := range categories() {
+		have[c] = true
+	}
 	for _, r := range rules {
+		if !have[r.cat] {
+			continue // 自己改过分类列表、没有这一类
+		}
 		for _, w := range strings.Fields(r.words) {
-			if strings.Contains(low, w) {
+			if w[0] < 0x80 {
+				if regexp.MustCompile(`\b` + regexp.QuoteMeta(w) + `\b`).MatchString(t) {
+					return r.cat
+				}
+			} else if strings.Contains(t, w) {
 				return r.cat
 			}
 		}

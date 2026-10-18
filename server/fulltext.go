@@ -59,6 +59,8 @@ func dropMainFulltext() {
 }
 
 func migrateFulltext() {
+	// 翻译过的段落（也能重建：再翻一次就有了）
+	db.Exec(`CREATE TABLE IF NOT EXISTS fts.tr_cache (key TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS fts.ft_chunks (id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL, file_id INTEGER NOT NULL, sec INTEGER NOT NULL, part INTEGER NOT NULL DEFAULT 0, label TEXT NOT NULL DEFAULT '')`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS fts.idx_ft_chunks_file ON ft_chunks(file_id)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS fts.ft_files (file_id INTEGER PRIMARY KEY, hash TEXT NOT NULL, chunks INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', indexed_at INTEGER NOT NULL)`)

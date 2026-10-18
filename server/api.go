@@ -79,6 +79,8 @@ func routes() http.Handler {
 	mux.HandleFunc("GET /api/files/{fid}/pdf", a(handleConvertedPDF))
 	mux.HandleFunc("GET /api/files/{fid}/pages", a(handlePages))
 	mux.HandleFunc("GET /api/files/{fid}/pages/{n}", a(handlePage))
+	mux.HandleFunc("GET /api/files/{fid}/ocr/{page}", a(handleOCR))
+	mux.HandleFunc("POST /api/translate", a(handleTranslate))
 
 	mux.HandleFunc("POST /api/upload", ad(handleUpload))
 	mux.HandleFunc("GET /api/status", a(handleStatus))
@@ -1465,6 +1467,7 @@ func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"categories":  categories(),
 			"network":     net,
 			"version":     version,
+			"translate":   translateConfig(),
 		})
 		return
 	}
@@ -1483,6 +1486,7 @@ func handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"inbox":           cfg.Inbox,
 		"version":         version,
 		"tools":           toolStatus(),
+		"translate":       translateConfig(),
 	})
 }
 
@@ -1515,6 +1519,17 @@ func handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				n.LanURL = strings.TrimRight(strings.TrimSpace(n.LanURL), "/")
 				n.RemoteURL = strings.TrimRight(strings.TrimSpace(n.RemoteURL), "/")
 				setSetting(k, toJSON(n))
+			}
+		case "translate":
+			var t TranslateConfig
+			if json.Unmarshal(v, &t) == nil {
+				if t.Engine != "ai" {
+					t.Engine = "microsoft"
+				}
+				if translateLangs[t.To] == "" {
+					t.To = "zh-Hans"
+				}
+				setSetting(k, toJSON(t))
 			}
 		case "tts":
 			var t TTSConfig
@@ -1592,7 +1607,7 @@ func toolStatus() map[string]bool {
 		}
 		return false
 	}
-	return map[string]bool{"calibre": has("ebook-convert"), "djvu": has("ddjvu"), "7z": has("7z", "7za", "7zz"), "pdf_cover": has("mutool", "pdftoppm"), "dict": dictInstalled()}
+	return map[string]bool{"calibre": has("ebook-convert"), "djvu": has("ddjvu"), "7z": has("7z", "7za", "7zz"), "pdf_cover": has("mutool", "pdftoppm"), "dict": dictInstalled(), "ocr": has(tesseractBin)}
 }
 
 // ---------- 网页 ----------

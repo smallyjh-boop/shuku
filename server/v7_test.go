@@ -685,3 +685,40 @@ func TestPeekArchiveTar(t *testing.T) {
 		t.Error("图片排序", imgs)
 	}
 }
+
+// ---------- 自动分类：书源的主题也算 ----------
+
+func TestGuessCategory(t *testing.T) {
+	setupDB(t)
+	cases := map[string][]string{
+		"小说":   {"Science fiction", "Space flight -- Fiction"},
+		"少儿":   {"Juvenile fiction"},
+		"历史":   {"China -- History"},
+		"文学":   {"Poetry"},
+		"其他":   {"Heart disease"}, // art 不能匹配到 heart
+		"哲学宗教": {"Philosophy, Chinese"},
+	}
+	for want, tags := range cases {
+		if got := guessCategory(tags); got != want {
+			t.Errorf("%v → %s，应该是 %s", tags, got, want)
+		}
+	}
+	if guessCategory([]string{"Nonfiction"}) == "小说" {
+		t.Error("nonfiction 不是小说")
+	}
+	// 发现页带来的书目信息：书里没有的才补，主题合并
+	m := Meta{Title: "书里的书名", Tags: []string{"a"}}
+	setIngestHint("/inbox/x.epub", ingestHint{Title: "书源书名", Author: "书源作者", Tags: []string{"Fiction", "A"}})
+	if h := takeIngestHint("/inbox/x.epub"); h == nil {
+		t.Fatal("没取到")
+	} else {
+		applyHint(&m, h)
+	}
+	if m.Title != "书里的书名" || m.Author != "书源作者" || len(m.Tags) != 2 || guessCategory(m.Tags) != "小说" {
+		t.Error(m)
+	}
+	if takeIngestHint("/inbox/x.epub") != nil {
+		t.Error("取过以后应该删掉")
+	}
+}
+

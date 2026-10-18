@@ -20,7 +20,7 @@ import (
 
 // 这几种缓存参与总量控制（听书的语音缓存另外限制在 400MB，见 tts.go）
 var cacheKinds = []struct{ dir, name string }{
-	{"arc", "漫画解压"}, {"pages", "漫画页面"}, {"conv", "格式转换"}, {"covers", "封面小图"}, {"text", "提取的正文"},
+	{"arc", "漫画解压"}, {"pages", "漫画页面"}, {"conv", "格式转换"}, {"covers", "封面小图"}, {"text", "提取的正文"}, {"ocr", "文字识别"},
 }
 
 func cacheRoot() string { return filepath.Join(cfg.DataDir, "cache") }
@@ -243,6 +243,7 @@ func purgeExpired() {
 			gone++
 		}
 	}
+	pruneTranslations()
 	if len(ids) > 0 || gone > 0 {
 		logEvent("info", 0, "清理：回收站里超过 30 天的 "+strconv.Itoa(len(ids))+" 本书、文件找不到超过 30 天的 "+strconv.Itoa(gone)+" 本书已彻底删除")
 		invalidateSuggestions()
@@ -329,10 +330,10 @@ func handleStorageClean(w http.ResponseWriter, r *http.Request) {
 	switch req.Kind {
 	case "":
 		_, freed = trimCaches()
-	case "all", "tts", "arc", "pages", "conv", "covers", "text":
+	case "all", "tts", "arc", "pages", "conv", "covers", "text", "ocr":
 		kinds := []string{req.Kind}
 		if req.Kind == "all" {
-			kinds = []string{"arc", "pages", "conv", "covers", "text", "tts"}
+			kinds = []string{"arc", "pages", "conv", "covers", "text", "ocr", "tts"}
 		}
 		for _, k := range kinds {
 			for _, e := range cacheEntries(k) {

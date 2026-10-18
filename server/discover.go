@@ -96,6 +96,7 @@ type DiscoverEntry struct {
 	Kind     string         `json:"kind"` // book | nav
 	Href     string         `json:"href,omitempty"`
 	Formats  []DiscoverLink `json:"formats,omitempty"`
+	Tags     []string       `json:"tags,omitempty"` // 书源给的主题、分类（加入书库时用来自动分类）
 }
 
 type DiscoverPage struct {
@@ -187,6 +188,11 @@ type atomEntry struct {
 	Issued   string     `xml:"issued"`
 	Date     string     `xml:"date"`
 	Links    []atomLink `xml:"link"`
+	// 主题、分类：<category term="…" label="…"/>
+	Categories []struct {
+		Term  string `xml:"term,attr"`
+		Label string `xml:"label,attr"`
+	} `xml:"category"`
 }
 
 type atomFeed struct {
@@ -264,6 +270,15 @@ func parseOPDS(body []byte, base string) (*DiscoverPage, string, error) {
 		}
 		if len(e.Language) > 0 {
 			de.Language = e.Language[0]
+		}
+		for _, c := range e.Categories {
+			t := cleanSpace(c.Label)
+			if t == "" && !strings.Contains(c.Term, "/") {
+				t = cleanSpace(c.Term)
+			}
+			if t != "" && len(de.Tags) < 8 {
+				de.Tags = append(de.Tags, truncate(t, 60))
+			}
 		}
 		de.Year = yearOf(e.Issued + " " + e.Date)
 		for _, l := range e.Links {
@@ -539,6 +554,16 @@ func iaSearch(ctx context.Context, c *Catalog, q string, page int) (*DiscoverPag
 			Cover:   iaBase(c) + "/services/img/" + url.PathEscape(id),
 			Formats: []DiscoverLink{{Type: "EPUB/PDF", Label: "下载（自动选 EPUB 或 PDF）", URL: "ia:" + id}}}
 		e.Year, _ = strconv.Atoi(anyString(d["year"]))
+		switch s := d["subject"].(type) {
+		case string:
+			e.Tags = []string{truncate(s, 60)}
+		case []any:
+			for _, x := range s {
+				if t, ok := x.(string); ok && len(e.Tags) < 8 {
+					e.Tags = append(e.Tags, truncate(t, 60))
+				}
+			}
+		}
 		p.Entries = append(p.Entries, e)
 	}
 	if page*30 < r.Response.NumFound {

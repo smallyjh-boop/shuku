@@ -35,6 +35,7 @@ type FetchJob struct {
 	Finished int64  `json:"finished_at,omitempty"`
 
 	catalog string
+	hint    ingestHint
 	referer string
 	cancel  context.CancelFunc
 }
@@ -71,7 +72,7 @@ var mimeExt = map[string]string{
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx", "application/rtf": "rtf", "text/plain": "txt",
 }
 
-func newFetchJob(rawURL, name, source, catalog, referer string) (*FetchJob, error) {
+func newFetchJob(rawURL, name, source, catalog, referer string, hint ingestHint) (*FetchJob, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if !strings.HasPrefix(rawURL, "ia:") {
 		u, err := url.Parse(rawURL)
@@ -86,7 +87,7 @@ func newFetchJob(rawURL, name, source, catalog, referer string) (*FetchJob, erro
 			return j, nil // 同一个链接正在下载
 		}
 	}
-	j := &FetchJob{ID: randToken(5), URL: rawURL, Name: strings.TrimSpace(name), Status: "queued", Source: source, Created: now(), catalog: catalog, referer: referer}
+	j := &FetchJob{ID: randToken(5), URL: rawURL, Name: strings.TrimSpace(name), Status: "queued", Source: source, Created: now(), catalog: catalog, referer: referer, hint: hint}
 	fetchJobs.list = append(fetchJobs.list, j)
 	// 只保留最近 100 条
 	if len(fetchJobs.list) > 100 {
@@ -259,6 +260,7 @@ func doFetch(ctx context.Context, j *FetchJob) (string, error) {
 	}
 	old := time.Now().Add(-10 * time.Second)
 	os.Chtimes(dest, old, old)
+	setIngestHint(dest, j.hint)
 	kickInbox()
 	return filepath.Base(dest), nil
 }
@@ -272,12 +274,26 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 		Source  string `json:"source"`
 		Catalog string `json:"catalog"`
 		Referer string `json:"referer"`
+		// 书源上的书目信息（发现页加入时带上）：入库时用来补书名作者、自动分类
+		Title    string   `json:"title"`
+		Author   string   `json:"author"`
+		Summary  string   `json:"summary"`
+		Language string   `json:"language"`
+		Year     int      `json:"year"`
+		Tags     []string `json:"tags"`
 	}
 	if readJSON(r, &req) != nil {
 		errJSON(w, 400, "格式不正确")
 		return
 	}
-	j, err := newFetchJob(req.URL, req.Name, req.Source, req.Catalog, req.Referer)
+	hint := ingestHint{Title: strings.TrimSpace(req.Title), Author: strings.TrimSpace(req.Author), Summary: truncate(strings.TrimSpace(req.Summary), 600),
+		Language: strings.TrimSpace(req.Language), Year: req.Year, Source: strings.TrimSpace(req.Source)}
+	for _, t := range req.Tags {
+		if t = strings.TrimSpace(t); t != "" && len(hint.Tags) < 10 {
+			hint.Tags = append(hint.Tags, truncate(t, 60))
+		}
+	}
+	j, err := newFetchJob(req.URL, req.Name, req.Source, req.Catalog, req.Referer, hint)
 	if err != nil {
 		errJSON(w, 400, err.Error())
 		return

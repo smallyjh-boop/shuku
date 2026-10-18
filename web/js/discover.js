@@ -150,7 +150,9 @@ export async function renderDiscover(main, params, ctx) {
       onclick: async ev => {
         ev.currentTarget.disabled = true
         try {
-          await api('/api/fetch', { method: 'POST', body: { url: f.url, name: [b.title, b.author].filter(Boolean).join(' - '), catalog: source.id, source: source.name } })
+          // 书源上的书名、作者、主题、简介一起带上：入库时补全信息、自动分类
+          await api('/api/fetch', { method: 'POST', body: { url: f.url, name: [b.title, b.author].filter(Boolean).join(' - '), catalog: source.id, source: source.name,
+            title: b.title || '', author: b.author || '', summary: b.summary || '', language: b.language || '', year: b.year || 0, tags: b.tags || [] } })
           toast(`《${b.title}》开始下载，完成后自动入库`)
           jobs.poll(true)
           d.close()

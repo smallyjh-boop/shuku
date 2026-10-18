@@ -157,6 +157,77 @@ type IngestResult struct {
 var ingestMu sync.Mutex
 
 // fromInbox=true：入库后按模板移动到书库；false：书库里已有的文件，原地登记
+// 发现页加入书库时，书源上已知的书目信息（书名、作者、主题、简介）：下载到投递目录后按路径记下，入库时用来补全、自动分类
+type ingestHint struct {
+	Title, Author, Summary, Language, Source string
+	Year                                     int
+	Tags                                     []string
+}
+
+var ingestHints = struct {
+	sync.Mutex
+	m map[string]hintEntry
+}{m: map[string]hintEntry{}}
+
+type hintEntry struct {
+	h  ingestHint
+	at time.Time
+}
+
+func setIngestHint(p string, h ingestHint) {
+	if h.Title == "" && h.Author == "" && h.Summary == "" && len(h.Tags) == 0 {
+		return
+	}
+	ingestHints.Lock()
+	defer ingestHints.Unlock()
+	for k, e := range ingestHints.m {
+		if time.Since(e.at) > 48*time.Hour {
+			delete(ingestHints.m, k)
+		}
+	}
+	ingestHints.m[filepath.Clean(p)] = hintEntry{h, time.Now()}
+}
+
+func takeIngestHint(p string) *ingestHint {
+	ingestHints.Lock()
+	defer ingestHints.Unlock()
+	e, ok := ingestHints.m[filepath.Clean(p)]
+	if !ok {
+		return nil
+	}
+	delete(ingestHints.m, filepath.Clean(p))
+	return &e.h
+}
+
+// 书里自带的信息优先，书源的只用来补空的；主题合在一起（自动分类、AI 识别都会参考）
+func applyHint(m *Meta, h *ingestHint) {
+	if m.Title == "" {
+		m.Title = h.Title
+	}
+	if m.Author == "" {
+		m.Author = h.Author
+	}
+	if m.Description == "" {
+		m.Description = h.Summary
+	}
+	if m.Language == "" {
+		m.Language = h.Language
+	}
+	if m.Year == 0 {
+		m.Year = h.Year
+	}
+	seen := map[string]bool{}
+	for _, t := range m.Tags {
+		seen[strings.ToLower(t)] = true
+	}
+	for _, t := range h.Tags {
+		if !seen[strings.ToLower(t)] {
+			seen[strings.ToLower(t)] = true
+			m.Tags = append(m.Tags, t)
+		}
+	}
+}
+
 func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	ingestMu.Lock()
 	defer ingestMu.Unlock()
@@ -187,6 +258,11 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 		}
 	}
 	m := extractMeta(p, fi.Format)
+	if fromInbox {
+		if h := takeIngestHint(p); h != nil {
+			applyHint(&m, h)
+		}
+	}
 	kind := fi.Kind
 	if fi.Kind == "comic" && !m.IsComic {
 		if fi.Format == "zip" || fi.Format == "rar" || fi.Format == "7z" {
