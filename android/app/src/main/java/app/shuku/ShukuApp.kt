@@ -50,6 +50,9 @@ class ShukuApp : Application() {
             description = "下载书到手机、把文件加入书库的进度"
             setShowBadge(false)
         })
+        nm.createNotificationChannel(NotificationChannel(CH_UPDATE, "App 更新", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "新版本下载好了，点一下安装"
+        })
     }
 
     /** 网络变化（连上 / 断开 Wi-Fi、开关 Tailscale）时重新选线路，并告诉网页 */
@@ -81,5 +84,6 @@ class ShukuApp : Application() {
             private set
         const val CH_PLAY = "playback"
         const val CH_TASK = "tasks"
+        const val CH_UPDATE = "update"
     }
 }

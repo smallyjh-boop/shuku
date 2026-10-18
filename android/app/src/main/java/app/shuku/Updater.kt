@@ -1,6 +1,9 @@
 package app.shuku
 
+import android.app.Activity
 import android.app.AlertDialog
+import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ContentValues
@@ -23,8 +26,13 @@ import java.security.MessageDigest
  */
 object Updater {
     private const val CHECK_EVERY = 3600 * 1000L
+    private const val SKIP = "update_skip"
+    private const val NOTIF_INSTALL = 41
     private val app get() = ShukuApp.app
     @Volatile private var busy = false
+
+    /** 要用户确认安装、但通知发不出来时，等回到 App 再弹 */
+    @Volatile private var pendingConfirm: Intent? = null
 
     class Info(val versionCode: Int, val versionName: String, val url: String, val sha256: String)
 
@@ -35,7 +43,10 @@ object Updater {
         return Info(j.optInt("versionCode"), j.optString("versionName"), j.optString("url"), j.optString("sha256"))
     }
 
-    /** 打开 App 时检查（最多 1 小时一次），有新版本就问要不要更新。启动时会有两处同时调用，加锁免得弹两次 */
+    /**
+     * 打开 App 时检查（最多 1 小时一次），有新版本就问要不要更新。启动时会有两处同时调用，加锁免得弹两次。
+     * 用户对这个版本点过“以后”就不再问（设置里手动“检查更新”照样能更新）
+     */
     @Synchronized
     fun checkQuietly(activity: MainActivity) {
         val prefs = app.config.prefs
@@ -43,7 +54,8 @@ object Updater {
         if (busy || now - prefs.getLong("update_checked", 0) < CHECK_EVERY) return
         val info = try { latest("android") } catch (e: Exception) { null } ?: return
         prefs.edit().putLong("update_checked", now).apply()
-        if (info.versionCode > BuildConfig.VERSION_CODE) activity.runOnUiThread { ask(activity, info) }
+        val skipped = try { prefs.getInt(SKIP, 0) } catch (e: Exception) { 0 }
+        if (info.versionCode > BuildConfig.VERSION_CODE && info.versionCode != skipped) activity.runOnUiThread { ask(activity, info) }
     }
 
     /** 网页“设置 → 版本与升级”里点“更新” */
@@ -69,7 +81,8 @@ object Updater {
             .setTitle("书库 App 有新版本")
             .setMessage("新版本 ${info.versionName}，现在用的是 ${BuildConfig.VERSION_NAME}。下载后按系统提示安装，下载到手机的书和设置都会保留。")
             .setPositiveButton("更新") { _, _ -> install(activity, info) }
-            .setNegativeButton("以后", null)
+            // 记住这个版本：打开 App 时不再为它提示，想更新时在“设置 → 版本与升级”里点“更新”
+            .setNegativeButton("以后") { _, _ -> app.config.prefs.edit().putInt(SKIP, info.versionCode).apply() }
             .show()
     }
 
@@ -85,22 +98,28 @@ object Updater {
         if (busy) return
         busy = true
         activity.toast("正在下载新版本……")
+        // 下载时开着前台服务：切到别的 App 也不会停
+        val job = "update:${info.versionCode}:${System.nanoTime()}"
+        TransferService.begin(activity, job, "书库 App ${info.versionName}", "正在下载新版本")
         app.io.execute {
             try {
-                val f = fetch(info, "shuku-android.apk")
+                val f = fetch(info, "shuku-android.apk") { done, total ->
+                    TransferService.update(job, "正在下载新版本 · ${TransferService.mb(done)}", if (total > 0) done.toDouble() / total else -1.0)
+                }
                 installApk(activity.applicationContext, f)
             } catch (e: Exception) {
-                activity.runOnUiThread { activity.toast("更新失败：${e.message ?: e.javaClass.simpleName}") }
+                app.main.post { Toast.makeText(app, "更新失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
             } finally {
                 busy = false
+                TransferService.end(job)
             }
         }
     }
 
     /** 下载安装包到缓存目录，核对校验值 */
-    private fun fetch(info: Info, name: String): File {
+    private fun fetch(info: Info, name: String, onProgress: (Long, Long) -> Unit = { _, _ -> }): File {
         val f = File(File(app.cacheDir, "update").apply { mkdirs() }, name)
-        Http.download(app.link.url(info.url), null, f)
+        Http.download(app.link.url(info.url), null, f, onProgress)
         if (info.sha256.isNotEmpty()) {
             val md = MessageDigest.getInstance("SHA-256")
             f.inputStream().use { input ->
@@ -176,6 +195,49 @@ object Updater {
         }
     }
 
+    /**
+     * 系统安装器要用户确认。App 在前台就直接弹出来；不在前台时（下载期间切到了别的 App）系统会拦下，
+     * 改成发一条通知，点通知再弹。通知也发不出来（没给通知权限）就等回到 App 时再弹
+     */
+    fun confirm(ctx: Context, confirm: Intent) {
+        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (MainActivity.visible) {
+            try {
+                ctx.startActivity(confirm)
+                return
+            } catch (e: Exception) {}
+        }
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        val canNotify = nm != null && nm.areNotificationsEnabled() &&
+            nm.getNotificationChannel(ShukuApp.CH_UPDATE)?.importance != NotificationManager.IMPORTANCE_NONE
+        if (!canNotify) {
+            pendingConfirm = confirm
+            return
+        }
+        val pi = PendingIntent.getActivity(ctx, NOTIF_INSTALL, confirm, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = Notification.Builder(ctx, ShukuApp.CH_UPDATE)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("书库 App 新版本下载好了")
+            .setContentText("点这里安装")
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        try { nm?.notify(NOTIF_INSTALL, n) } catch (e: Exception) { pendingConfirm = confirm }
+    }
+
+    /** 回到 App 时：有等着确认的安装（通知发不出来的那种）就弹出来 */
+    fun showPendingInstall(activity: Activity) {
+        val c = pendingConfirm ?: return
+        pendingConfirm = null
+        try { activity.startActivity(c) } catch (e: Exception) {}
+    }
+
+    /** 安装结束（装好、取消、失败）：收起“点这里安装”的通知 */
+    fun installFinished(ctx: Context) {
+        pendingConfirm = null
+        try { ctx.getSystemService(NotificationManager::class.java)?.cancel(NOTIF_INSTALL) } catch (e: Exception) {}
+    }
+
     /** 存到公共的“下载”文件夹（Android 10 起不需要存储权限），同名的旧文件先删掉 */
     @android.annotation.TargetApi(29)
     private fun saveToDownloads(ctx: Context, f: File, name: String): Uri {
@@ -198,21 +260,22 @@ object Updater {
     }
 }
 
-/** 系统安装器的结果：需要用户确认时弹出确认界面 */
+/** 系统安装器的结果：需要用户确认时弹出确认界面（App 不在前台时发通知） */
 class InstallReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 @Suppress("DEPRECATION")
                 val confirm: Intent? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java) else intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                if (confirm != null) {
-                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    try { ctx.startActivity(confirm) } catch (e: Exception) {}
-                }
+                if (confirm != null) Updater.confirm(ctx, confirm)
             }
-            PackageInstaller.STATUS_SUCCESS -> {}
-            PackageInstaller.STATUS_FAILURE_ABORTED -> Toast.makeText(ctx, "已取消更新", Toast.LENGTH_SHORT).show()
+            PackageInstaller.STATUS_SUCCESS -> Updater.installFinished(ctx)
+            PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                Updater.installFinished(ctx)
+                Toast.makeText(ctx, "已取消更新", Toast.LENGTH_SHORT).show()
+            }
             else -> {
+                Updater.installFinished(ctx)
                 val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: ""
                 Toast.makeText(ctx, "更新没有完成" + (if (msg.isNotEmpty()) "：$msg" else ""), Toast.LENGTH_LONG).show()
             }

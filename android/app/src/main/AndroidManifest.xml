@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 下载书到手机、分享上传、下载新版本时的前台服务（Android 14 起要单独声明） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 在线升级：从书库下载新版本后交给系统安装器 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -94,6 +96,12 @@
             android:name=".NarrationService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- 下载书到手机、把分享的文件传到书库、下载新版本：切到后台、熄屏也不会停 -->
+        <service
+            android:name=".TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- 手表发来的消息（连接信息请求、听书控制） -->
         <service

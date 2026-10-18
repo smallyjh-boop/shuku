@@ -13,7 +13,8 @@ import java.io.FileInputStream
  *   book.json      书的信息（和 /api/books/<ID> 一样）
  *   read.json      打开方式（和 /api/books/<ID>/read 一样）
  *   book.<格式>     书的文件；漫画是 pages/ 下的每一页
- *   cover.jpg、progress.json、bookmarks.json、state.json
+ *   cover.jpg、progress.json、bookmarks.json
+ *   state.json     下载状态（downloading / done / error / removed），见 Downloads
  * 断网时 App 用这些文件冒充书库的接口，网页端几乎不用改就能离线阅读。
  */
 class OfflineStore(private val app: ShukuApp) {
@@ -32,9 +33,18 @@ class OfflineStore(private val app: ShukuApp) {
     /** 文件 ID → 书 ID（只看已下载完的） */
     fun bookOfFile(fid: Int): Int? = ids().firstOrNull { readInfo(it)?.optInt("file_id") == fid }
 
-    fun bookFile(id: Int): File? = dir(id).listFiles()?.firstOrNull { it.name.startsWith("book.") && !it.name.endsWith(".part") }
+    fun bookFile(id: Int): File? = dir(id).listFiles()?.firstOrNull { isBookFile(it) }
 
-    fun remove(id: Int) { dir(id).deleteRecursively() }
+    /**
+     * 删掉一本书的文件夹：先改个名（马上从列表里消失，也不会和接着重新下载的同一本书撞上），再在后台慢慢删。
+     * 改名失败才原地删
+     */
+    fun remove(id: Int) {
+        val d = dir(id)
+        if (!d.exists()) return
+        val trash = File(root, "$TRASH$id-${System.nanoTime()}")
+        if (d.renameTo(trash)) app.io.execute { trash.deleteRecursively() } else d.deleteRecursively()
+    }
 
     fun size(id: Int): Long = dir(id).walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
@@ -202,6 +212,12 @@ class OfflineStore(private val app: ShukuApp) {
         mapOf("Cache-Control" to "no-store", "Access-Control-Allow-Origin" to "*"), ByteArrayInputStream(JSONObject().put("error", msg).toString().toByteArray(Charsets.UTF_8)))
 
     companion object {
+        /** 删除中的文件夹的名字前缀（不是数字，不会被当成书） */
+        const val TRASH = ".trash-"
+
         fun readJson(f: File): JSONObject? = try { if (f.exists()) JSONObject(f.readText()) else null } catch (e: Exception) { null }
+
+        /** 书的文件是 book.<格式>；book.json 是书的信息，.part 是没下完的 */
+        fun isBookFile(f: File): Boolean = f.name.startsWith("book.") && f.name != "book.json" && !f.name.endsWith(".part")
     }
 }

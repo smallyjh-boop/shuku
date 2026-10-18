@@ -70,27 +70,39 @@ class Bridge(private val activity: MainActivity) {
 
     // ---------- App 设置 ----------
 
+    /**
+     * download_limit_mb：下载到手机的书最多占多少 MB（0 表示不限），超过时先删最早下载、已经读完的书；
+     * auto_clean_finished：App 启动连上书库时，把下载以后读完了的书从手机上删掉
+     */
     @JavascriptInterface fun prefs(): String = JSONObject()
         .put("volume_keys", app.config.bool("volume_keys", true))
         .put("keep_screen_on", app.config.bool("keep_screen_on", true))
         .put("auto_download", app.config.bool("auto_download", false))
         .put("tts_engine", app.config.str("tts_engine", "server"))
+        .put("download_limit_mb", app.downloads.limitMb())
+        .put("auto_clean_finished", app.config.bool("auto_clean_finished", false))
         .toString()
 
     @JavascriptInterface fun setPref(key: String, value: String) {
         val e = app.config.prefs.edit()
         when (key) {
-            "volume_keys", "keep_screen_on", "auto_download" -> e.putBoolean(key, value == "true")
+            "volume_keys", "keep_screen_on", "auto_download", "auto_clean_finished" -> e.putBoolean(key, value == "true")
             "tts_engine" -> e.putString(key, if (value == "device") "device" else "server")
+            "download_limit_mb" -> e.putInt(key, (value.trim().toDoubleOrNull() ?: 0.0).toInt().coerceIn(0, 100_000_000))
         }
         e.apply()
         if (key == "auto_download" && value == "true") app.io.execute { app.downloads.autoDownload() }
+        if (key == "auto_clean_finished" && value == "true") app.io.execute { app.downloads.autoClean() }
         activity.runOnUiThread { activity.refreshKeepScreen() }
     }
 
     // ---------- 下载到手机 ----------
 
+    /** 下载到手机的书（数组，每本带 size 字节）。旧版网页用这个 */
     @JavascriptInterface fun downloads(): String = app.downloads.list().toString()
+
+    /** 新版网页用：{"items": 同 downloads(), "total_size": 一共占多少字节, "limit_mb": 下载上限，0 表示不限} */
+    @JavascriptInterface fun downloadInfo(): String = app.downloads.info().toString()
 
     @JavascriptInterface fun download(bookId: Int, json: String) {
         app.downloads.start(bookId, try { JSONObject(json) } catch (e: Exception) { null })

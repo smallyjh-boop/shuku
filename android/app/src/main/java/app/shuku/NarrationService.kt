@@ -1,6 +1,7 @@
 package app.shuku
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
@@ -25,6 +26,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import app.shuku.core.Http
@@ -41,9 +43,11 @@ import java.util.concurrent.Future
 /**
  * 后台听书：网页把一段段句子交给这里，这里负责合成（书库的微软自然语音，或手机自带语音）、
  * 播放、锁屏和通知栏控制、耳机按键、音频焦点、睡眠定时。Wear OS 手表会自动显示这个播放会话。
+ * App 被划掉、网页崩溃重建以后，给句子的网页就没了：读完手上的句子就停，期间由这里存进度。
  */
 class NarrationService : Service() {
-    data class Seg(val id: String, val text: String)
+    /** 一句话；新版网页还带着它在书里的位置（loc 和进度里的 location 一样，pct 是 0～1 的百分比） */
+    data class Seg(val id: String, val text: String, val loc: String = "", val pct: Double = -1.0)
 
     private val handler = Handler(Looper.getMainLooper())
     private val pool = Executors.newFixedThreadPool(2)
@@ -70,6 +74,15 @@ class NarrationService : Service() {
     private var useDevice = false
     private var pausedByFocus = false
     private var stopped = false
+
+    // 网页不在时由这里记进度
+    private var webGen = -1          // 发来这本书的网页（Events.generation）
+    private var orphan = false       // 网页已经不在了
+    private var fileId = 0
+    private var posSeg: Seg? = null  // 读到的、还没存的位置
+    private var lastSave = 0L        // 上次存进度的时间（elapsedRealtime）
+    private var lastTick = 0L        // 听书时长从这个时间开始算（0 表示没在播放）
+    private var listenMs = 0L        // 网页不在时听书的时长，存进度时一起报给书库
 
     private var player: MediaPlayer? = null
     private var playerSeg: String? = null
@@ -117,6 +130,10 @@ class NarrationService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        if (!stopped) {
+            tick()
+            flushPosition()
+        }
         try { unregisterReceiver(noisy) } catch (e: Exception) {}
         releasePlayer()
         tts?.shutdown()
@@ -135,8 +152,17 @@ class NarrationService : Service() {
     fun handle(cmd: String, arg: String) {
         when (cmd) {
             "start" -> {
-                val j = JSONObject(arg)
+                val j = try { JSONObject(arg) } catch (e: Exception) { return }
+                // 上一本书在网页不在时读到的位置先存好
+                tick()
+                flushPosition()
                 book = j.optJSONObject("book") ?: JSONObject()
+                fileId = book.optInt("file_id")
+                webGen = Events.generation
+                orphan = false
+                posSeg = null
+                listenMs = 0
+                lastSave = SystemClock.elapsedRealtime()
                 voice = j.optString("voice")
                 speed = j.optDouble("speed", 1.0)
                 useDevice = app.config.str("tts_engine", "server") == "device" || !app.link.online
@@ -152,11 +178,12 @@ class NarrationService : Service() {
                 loadCover()
                 session.isActive = true
                 playing = true
+                lastTick = SystemClock.elapsedRealtime()
                 requestFocus()
                 playCurrent()
             }
             "append" -> {
-                add(JSONObject(arg).optJSONArray("segments"))
+                add(try { JSONObject(arg).optJSONArray("segments") } catch (e: Exception) { null })
                 needSent = false
                 if (waitingMore && playing) { waitingMore = false; index = minOf(index, queue.size - 1); playCurrent() }
             }
@@ -185,8 +212,12 @@ class NarrationService : Service() {
     private fun add(arr: JSONArray?) {
         if (arr == null) return
         for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            queue += Seg(o.getString("id"), o.getString("text"))
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            val text = o.optString("text")
+            if (id.isEmpty() || text.isBlank()) continue
+            // 旧版网页没有 loc、pct
+            queue += Seg(id, text, o.optString("loc"), if (o.has("pct")) o.optDouble("pct", -1.0) else -1.0)
         }
     }
 
@@ -196,10 +227,17 @@ class NarrationService : Service() {
         if (!playing) return
         val seg = queue.getOrNull(index)
         if (seg == null) {
-            if (ended) stop(if (timerMin == -1) "本章读完了" else "全书读完了") else { waitingMore = true; status = "加载下一章…"; publish(); askMore() }
+            when {
+                ended -> stop(if (timerMin == -1) "本章读完了" else "全书读完了")
+                // 网页没了，没人给下一段
+                !webAlive() -> stop(webGoneMessage())
+                else -> { waitingMore = true; status = "加载下一章…"; publish(); askMore() }
+            }
             return
         }
         Events.emit("tts", JSONObject().put("type", "seg").put("id", seg.id))
+        tick()
+        if (!webAlive()) notePosition(seg)
         WearSync.pushState(this, stateJson())
         askMore()
         if (useDevice) return speakDevice(seg)
@@ -262,13 +300,11 @@ class NarrationService : Service() {
         }
     }
 
+    /** 快读完手上的句子时向网页要下一段。网页没了（App 被划掉、网页重建过）就不要了，读完手上的就停 */
     private fun askMore() {
-        if (!ended && !needSent && queue.size - index <= 6) {
-            needSent = true
-            Events.emit("tts", JSONObject().put("type", "need"))
-            // 网页没响应（App 被划掉了）就读到这里为止
-            if (!Events.attached) ended = true
-        }
+        if (ended || needSent || queue.size - index > 6 || !webAlive()) return
+        needSent = true
+        Events.emit("tts", JSONObject().put("type", "need"))
     }
 
     private fun advance() {
@@ -295,16 +331,20 @@ class NarrationService : Service() {
 
     private fun pause() {
         if (!playing) return
+        tick()
         playing = false
+        lastTick = 0
         player?.takeIf { it.isPlaying }?.pause()
         tts?.stop()
         releaseLocks()
+        flushPosition()
         publish()
     }
 
     private fun resume() {
         if (playing || queue.isEmpty()) return
         playing = true
+        lastTick = SystemClock.elapsedRealtime()
         requestFocus()
         val p = player
         if (p != null && playerSeg == queue.getOrNull(index)?.id && !useDevice) {
@@ -316,6 +356,8 @@ class NarrationService : Service() {
 
     private fun stop(reason: String) {
         if (stopped) return
+        tick()
+        flushPosition()
         stopped = true
         // 马上让出 instance：紧接着再点“听书”会启动一个新的服务，而不是交给这个正在退出的
         if (instance === this) instance = null
@@ -328,6 +370,8 @@ class NarrationService : Service() {
         focusRequest?.let { audio.abandonAudioFocusRequest(it) }
         releaseLocks()
         Events.emit("tts", JSONObject().put("type", "stopped").put("reason", reason))
+        // 网页不在了，没人显示停下的原因：留一条通知
+        if (reason.isNotEmpty() && !webAlive()) notifyStopped(reason)
         WearSync.pushState(this, JSONObject().put("active", false), force = true)
         File(cacheDir, "tts").listFiles()?.forEach { it.delete() }
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -346,6 +390,68 @@ class NarrationService : Service() {
         useDevice = true
         Events.emit("tts", JSONObject().put("type", "error").put("message", "$why，已改用手机自带语音"))
         playCurrent()
+    }
+
+    // ---------- 网页不在时（App 被划掉、网页崩溃后重建）：读完手上的句子就停，进度由这里存 ----------
+
+    /** 发来这本书句子的那个网页还在 */
+    private fun webAlive() = Events.attached && Events.generation == webGen
+
+    private fun webGoneMessage() = if (Events.attached) "网页重新打开过，回到书里点“听书”可以接着听" else "书库 App 已关闭，打开 App 可以接着听"
+
+    /** 网页换了或者没了（Events 通知过来，在主线程） */
+    private fun checkWeb() {
+        if (stopped || webAlive()) return
+        if (!orphan) {
+            orphan = true
+            // 在这之前的时长网页已经算过了
+            lastTick = if (playing) SystemClock.elapsedRealtime() else 0
+        }
+        // 从现在起由这里记进度：先把正在读的这句存下来，App 重新打开时书就停在这里
+        queue.getOrNull(index)?.let { notePosition(it, now = true) }
+        // 正在等网页给下一章：不会有了
+        if (waitingMore) stop(webGoneMessage())
+    }
+
+    /** 记下读到哪一句；最多 30 秒存一次（暂停、停止时也会存） */
+    private fun notePosition(seg: Seg, now: Boolean = false) {
+        if (seg.loc.isEmpty() || seg.pct !in 0.0..1.0) return // 旧版网页没有位置
+        posSeg = seg
+        if (now || SystemClock.elapsedRealtime() - lastSave >= 30_000) flushPosition()
+    }
+
+    /** 把记下的位置和这段时间的听书时长交给 ProgressSync（存在手机上，联网时传给书库） */
+    private fun flushPosition() {
+        val seg = posSeg ?: return
+        posSeg = null
+        lastSave = SystemClock.elapsedRealtime()
+        val id = book.optInt("id")
+        if (id <= 0 || fileId <= 0) return
+        val secs = (listenMs / 1000).toInt().coerceIn(0, ProgressSync.MAX_SECONDS)
+        listenMs -= secs * 1000L
+        val body = JSONObject().put("file_id", fileId).put("location", seg.loc).put("percent", seg.pct)
+            .put("device", MainActivity.deviceName()).put("seconds", secs)
+        try { app.progress.save(id, body.toString()) } catch (e: Exception) {}
+    }
+
+    /** 听书时长：网页在的时候网页自己算阅读时长，这里只算网页不在的时候 */
+    private fun tick() {
+        val now = SystemClock.elapsedRealtime()
+        if (lastTick > 0 && !webAlive()) listenMs += (now - lastTick).coerceIn(0, 120_000)
+        lastTick = if (playing) now else 0
+    }
+
+    private fun notifyStopped(reason: String) {
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
+        val n = Notification.Builder(this, ShukuApp.CH_PLAY)
+            .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
+            .setContentTitle(book.optString("title").ifEmpty { "书库 · 听书" })
+            .setContentText(reason)
+            .setStyle(Notification.BigTextStyle().bigText(reason))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        try { getSystemService(NotificationManager::class.java)?.notify(NOTIF_STOPPED, n) } catch (e: Exception) {}
     }
 
     // ---------- 手机自带语音 ----------
@@ -508,6 +614,7 @@ class NarrationService : Service() {
             private set
         private val pending = ConcurrentLinkedQueue<Pair<String, String>>()
         private const val NOTIF_ID = 7
+        private const val NOTIF_STOPPED = 8
         const val ACT_PLAY = "app.shuku.PLAY"
         const val ACT_PAUSE = "app.shuku.PAUSE"
         const val ACT_NEXT = "app.shuku.NEXT"
@@ -527,6 +634,12 @@ class NarrationService : Service() {
         }
 
         fun state(): JSONObject = instance?.stateJson() ?: JSONObject().put("active", false)
+
+        /** 网页换了、没了（Events 调用，任何线程） */
+        fun webChanged() {
+            val s = instance ?: return
+            s.handler.post { s.checkWeb() }
+        }
 
         private fun sha1(s: String): String = MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
     }

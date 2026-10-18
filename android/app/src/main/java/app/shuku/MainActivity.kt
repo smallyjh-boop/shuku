@@ -6,18 +6,22 @@ import android.app.DownloadManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -47,10 +51,18 @@ class MainActivity : Activity() {
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var voicesTts: TextToSpeech? = null
     @Volatile private var voicesReady = false
+    private var bgColor = 0
+    private var started = false
+
+    /** 网页渲染进程崩溃后重建 WebView 时：当前地址、上一次崩溃的时间、App 在后台时等回到前台再打开的地址 */
+    private var lastUrl: String? = null
+    private var lastGone = 0L
+    private var reopenUrl: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+        bridge = Bridge(this)
         web = WebView(this)
         val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
         applyBars(if (night) "#14181E" else "#F8F8F6", night)
@@ -71,7 +83,14 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        started = true
+        visibleCount++
         web.onResume()
+        // 网页在后台时崩溃重建过：现在才打开（在后台就重新打开大 PDF、漫画，多半又会崩）
+        reopenUrl?.let { u ->
+            reopenUrl = null
+            reopen(u)
+        }
         if (app.config.configured) app.io.execute {
             val was = app.link.base
             if (app.link.probe() != was) Events.emit("network", "{}")
@@ -80,8 +99,16 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 安装新版本时系统要用户确认，但通知发不出来（没给通知权限）：回到 App 时再弹
+        Updater.showPendingInstall(this)
+    }
+
     override fun onStop() {
         super.onStop()
+        started = false
+        visibleCount--
         // 听书时网页还要继续给后台服务供句子，不能暂停
         if (NarrationService.instance == null) web.onPause()
     }
@@ -112,6 +139,8 @@ class MainActivity : Activity() {
                 app.config.lastBase = base
                 app.progress.flush()
                 app.webCache.precache()
+                // 先清理读完的书（设置里打开了的话），再自动下载在读的书
+                app.downloads.autoClean()
                 app.downloads.autoDownload()
                 Updater.checkQuietly(this)
             }
@@ -146,7 +175,6 @@ class MainActivity : Activity() {
         s.displayZoomControls = false
         s.userAgentString = s.userAgentString + " ShukuApp/" + BuildConfig.VERSION_NAME
         web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        bridge = Bridge(this)
         web.addJavascriptInterface(bridge, "ShukuNative")
         Events.attach(web)
 
@@ -155,18 +183,36 @@ class MainActivity : Activity() {
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val uri = request.url
+                // 页面里的框架（iframe）只放行阅读器要用的和书库自己的地址，别的一律拦下（包括 shuku://，书里的内容不能拿它重新配对）
+                if (!request.isForMainFrame) return !frameAllowed(uri)
                 if (uri.scheme == "shuku") { handlePairUri(uri); return true }
-                // 页面里的框架照常加载：阅读器把书的每一章放在 iframe 里，地址是 blob: 开头的，
-                // WebView 会把这种框架跳转也交到这里，拦掉的话 EPUB、TXT 这些书就一直停在“正在打开”
-                if (!request.isForMainFrame) return false
                 if (uri.scheme == "file" || uri.scheme == "blob" || uri.scheme == "data" || originOf(uri.toString()) == pageOrigin) return false
                 try { startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (e: Exception) {}
                 return true
             }
 
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                // 打开了新页面（重新加载、换地址）：原来页面里的听书就没人管了
+                Events.pageStarted(view)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                // 记下当前地址（包括网页里 # 后面的路由），网页崩溃后重新打开用
+                if (view === web && !url.isNullOrEmpty()) lastUrl = url
+            }
+
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 // 第一次打开就没网、手机上还没有缓存：显示连接页，可以重试
-                if (request.isForMainFrame && request.url.scheme != "file") web.loadUrl("file:///android_asset/setup.html#offline")
+                if (view === web && request.isForMainFrame && request.url.scheme != "file") web.loadUrl("file:///android_asset/setup.html#offline")
+            }
+
+            /**
+             * 大 PDF、漫画把网页的渲染进程撑爆了（或者系统内存不够把它杀了）。不处理的话系统会把整个 App 一起杀掉，
+             * 后台听书也会停。这里换一个新的 WebView 重新打开当前页，返回 true 表示处理好了
+             */
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                if (view === web) recreateWeb(view)
+                return true
             }
         }
         web.webChromeClient = object : WebChromeClient() {
@@ -201,13 +247,27 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 书库自己的地址：当前页面的、正在用的线路、内网、Tailscale */
+    private fun isOurs(origin: String): Boolean = origin.isNotEmpty() &&
+        (origin == pageOrigin || origin == originOf(app.link.base ?: "") || origin == originOf(app.config.lan) || origin == originOf(app.config.remote))
+
+    /**
+     * 页面里的框架（iframe）能打开的地址。阅读器把书的每一章放在 iframe 里，地址是 blob: 开头的，
+     * WebView 会把这种框架跳转也交到 shouldOverrideUrlLoading，拦掉的话 EPUB、TXT 这些书就一直停在“正在打开”，必须放行；
+     * 还有 data:、about:（空白页、srcdoc）和书库自己的地址。别的一律拦下：书里的脚本不能把框架跳到外面的网站去
+     */
+    private fun frameAllowed(uri: Uri): Boolean = when (uri.scheme?.lowercase()) {
+        "blob", "data", "about" -> true
+        "http", "https" -> isOurs(originOf(uri.toString()))
+        else -> false
+    }
+
     private fun intercept(request: WebResourceRequest): WebResourceResponse? {
         val page = pageOrigin ?: return null
         val uri = request.url
         if (request.method != "GET" || (uri.scheme != "http" && uri.scheme != "https")) return null
         val o = originOf(uri.toString())
-        val ours = o == page || o == originOf(app.link.base ?: "") || o == originOf(app.config.lan) || o == originOf(app.config.remote)
-        if (!ours) return null
+        if (!isOurs(o)) return null
         val path = uri.path ?: "/"
         if (path.startsWith("/api/") || path.startsWith("/offline-files/")) {
             // 已经下载到手机的书：直接用手机上的文件（联网时要和书库现在的版本一样）
@@ -218,6 +278,41 @@ class MainActivity : Activity() {
         }
         if (path.startsWith("/opds") || o != page) return null
         return app.webCache.serve(path)
+    }
+
+    // ---------- 网页渲染进程没了：换一个新的 WebView（App、后台听书都不受影响） ----------
+
+    private fun recreateWeb(old: WebView) {
+        val url = (try { old.url } catch (e: Exception) { null })?.takeIf { it.isNotEmpty() } ?: lastUrl
+        lastUrl = null
+        val now = SystemClock.elapsedRealtime()
+        // 一分钟内又崩了：多半是同一本书太大，回到首页，免得一直崩
+        val again = lastGone > 0 && now - lastGone < 60_000
+        lastGone = now
+        try { fileCallback?.onReceiveValue(null) } catch (e: Exception) {}
+        fileCallback = null
+        setReaderMode(false) // 新页面打开阅读器时会再告诉我们
+        Events.detach(old)
+        (old.parent as? ViewGroup)?.removeView(old)
+        try { old.destroy() } catch (e: Exception) {}
+        web = WebView(this)
+        web.setBackgroundColor(bgColor)
+        setContentView(web)
+        setupWeb()
+        val target = when {
+            url.isNullOrEmpty() || url.startsWith("about:") || url.startsWith("data:") || url.startsWith("chrome-error:") -> ""
+            again -> pageOrigin?.let { "$it/" } ?: ""
+            else -> url
+        }
+        if (started) {
+            reopen(target)
+            toast(if (again) "网页又出问题了（多半是这本书太大、内存不够），先回到首页" else "网页出了问题（多半是内存不够），已经重新打开")
+        } else reopenUrl = target
+    }
+
+    /** 重新打开网页；没有地址就从头连接书库 */
+    private fun reopen(url: String) {
+        if (url.isEmpty()) start() else web.loadUrl(url)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -271,6 +366,7 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     fun applyBars(color: String, dark: Boolean) {
         val c = try { Color.parseColor(color) } catch (e: Exception) { return }
+        bgColor = c
         window.statusBarColor = c
         window.navigationBarColor = c
         if (::web.isInitialized) web.setBackgroundColor(c)
@@ -340,6 +436,10 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_FILE = 11
         private const val REQ_NOTIFY = 12
+
+        /** 书库 App 的界面在前台（看得见）。只在主线程改 */
+        @Volatile private var visibleCount = 0
+        val visible: Boolean get() = visibleCount > 0
 
         fun originOf(url: String): String {
             if (url.isEmpty()) return ""
