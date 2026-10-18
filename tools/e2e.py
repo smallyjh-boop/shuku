@@ -846,6 +846,12 @@ def test_tts():
     section("听书（服务器语音）")
     v = j("GET", "/api/tts/voices")
     check("默认微软自然语音，含晓晓", v["engine"] == "edge" and any(x["id"] == "zh-CN-XiaoxiaoNeural" for x in v["voices"]), v["engine"])
+    th = [x for x in v["voices"] if x.get("code") == "th"]
+    check("多语言：音色带语言代码，有泰语音色、每种语言的默认音色", len(th) >= 2 and v.get("defaults", {}).get("th") == "th-TH-PremwadeeNeural" and v["defaults"].get("en") and v["defaults"].get("zh"), v.get("defaults"))
+    # 手机后台听书接着往下读：带着刚读到的位置问在哪一章
+    b2 = book_by_title("三体Ⅱ·黑暗森林")
+    c = j("GET", f"/api/books/{b2['id']}/chapters?loc=" + urllib.parse.quote("sec:2:0.5") + "&pct=0.8")
+    check("章节目录按给的位置算从哪里接着读", c["resume"]["i"] == 2 and 0.3 < c["resume"]["frac"] < 0.7, c["resume"])
     r = api("POST", "/api/tts", 502, json={"text": "你好", "voice": "zh-CN-XiaoxiaoNeural"})
     check("微软语音连不上时返回明确的错误", "语音合成失败" in r.json()["error"], r.text)
     j("PUT", "/api/settings", json={"tts": {"engine": "openai", "voice": "", "openai": {"base_url": MOCK + "/tts/v1", "api_key": "k-12345678901", "model": "tts-1", "voice": "nova", "voices": "nova,alloy"}}})

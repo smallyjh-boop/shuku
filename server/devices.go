@@ -456,6 +456,11 @@ func handleChapters(w http.ResponseWriter, r *http.Request) {
 	if p.FileID != 0 && p.FileID != f.ID && !strings.HasPrefix(loc, "sec:") {
 		loc = "" // 换了格式，只能按百分比
 	}
+	// 手机后台听书接着往下读时，带着刚读到的位置来问在哪一段（resume 按它算，不按存的进度）
+	if q := r.URL.Query().Get("loc"); q != "" || r.URL.Query().Get("pct") != "" {
+		loc = q
+		p.Percent, _ = strconv.ParseFloat(r.URL.Query().Get("pct"), 64)
+	}
 	i, frac := resumePoint(chs, loc, p.Percent)
 	total := chs[len(chs)-1].Start + chs[len(chs)-1].Chars
 	writeJSON(w, 200, map[string]any{

@@ -1,5 +1,7 @@
 package app.shuku.wear
 
+import app.shuku.core.BookPos
+import app.shuku.core.BookText
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context

@@ -703,7 +703,7 @@ func handleDictSpeak(w http.ResponseWriter, r *http.Request) {
 	var b []byte
 	var err error
 	if ttsConfig().Engine == "openai" {
-		b, err = synthesize(ctx, text, "", 0.9)
+		b, err = synthesize(ctx, text, "", "", 0.9)
 	} else {
 		b, err = synthesizeWith(ctx, "edge", text, dictVoice(lang), 0.9)
 	}

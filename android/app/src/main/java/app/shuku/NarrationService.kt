@@ -29,11 +29,14 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import app.shuku.core.BookPos
+import app.shuku.core.BookText
 import app.shuku.core.Http
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -43,7 +46,8 @@ import java.util.concurrent.Future
 /**
  * 后台听书：网页把一段段句子交给这里，这里负责合成（书库的微软自然语音，或手机自带语音）、
  * 播放、锁屏和通知栏控制、耳机按键、音频焦点、睡眠定时。Wear OS 手表会自动显示这个播放会话。
- * App 被划掉、网页崩溃重建以后，给句子的网页就没了：读完手上的句子就停，期间由这里存进度。
+ * 网页不在了（App 被划掉、熄屏后网页被系统回收或冻结）、或者要下一章时网页半天不回应：
+ * 这里直接从书库按章取正文（和手表听书一样，/api/books/{id}/chapters），切成句子接着读，进度照样存。
  */
 class NarrationService : Service() {
     /** 一句话；新版网页还带着它在书里的位置（loc 和进度里的 location 一样，pct 是 0～1 的百分比） */
@@ -69,6 +73,7 @@ class NarrationService : Service() {
     private var book = JSONObject()
     private var cover: Bitmap? = null
     private var voice = ""
+    private var lang = ""            // 书的语言（zh、en、th…）：手机自带语音读拉丁字母时按它选
     private var speed = 1.0
     private var timerMin = 0
     private var useDevice = false
@@ -87,6 +92,15 @@ class NarrationService : Service() {
     private var player: MediaPlayer? = null
     private var playerSeg: String? = null
     private val audioJobs = HashMap<String, Future<File>>()
+    // 网页不回应时从书库取章节接着读
+    private var feed = false          // 已经改由这里取句子
+    private var feedBusy = false      // 正在取下一章
+    private var feedChapters = JSONArray()
+    private var feedFile = 0L         // 章节是按哪个文件切的
+    private var feedNext = -1         // 下一个要取的章节
+    private var feedGen = 0           // 换书、重新开始时作废还在取的
+    private val needWatch = Runnable { if (needSent && playing && !ended && !feed) startFeed("网页没有回应") }
+
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var utterance: String? = null
@@ -164,7 +178,13 @@ class NarrationService : Service() {
                 listenMs = 0
                 lastSave = SystemClock.elapsedRealtime()
                 voice = j.optString("voice")
+                lang = j.optString("lang")
                 speed = j.optDouble("speed", 1.0)
+                feed = false
+                feedBusy = false
+                feedNext = -1
+                feedGen++
+                handler.removeCallbacks(needWatch)
                 useDevice = app.config.str("tts_engine", "server") == "device" || !app.link.online
                 releasePlayer()
                 tts?.stop()
@@ -183,11 +203,15 @@ class NarrationService : Service() {
                 playCurrent()
             }
             "append" -> {
+                if (feed) return // 已经改由这里从书库取了，网页晚到的句子不要（会重复）
+                handler.removeCallbacks(needWatch)
                 add(try { JSONObject(arg).optJSONArray("segments") } catch (e: Exception) { null })
                 needSent = false
                 if (waitingMore && playing) { waitingMore = false; index = minOf(index, queue.size - 1); playCurrent() }
             }
             "end" -> {
+                if (feed) return
+                handler.removeCallbacks(needWatch)
                 ended = true
                 if (waitingMore) stop(if (timerMin == -1) "本章读完了" else "全书读完了")
             }
@@ -229,15 +253,18 @@ class NarrationService : Service() {
         if (seg == null) {
             when {
                 ended -> stop(if (timerMin == -1) "本章读完了" else "全书读完了")
-                // 网页没了，没人给下一段
-                !webAlive() -> stop(webGoneMessage())
+                // 网页没了：从书库取后面的章节接着读
+                !webAlive() || feed -> { waitingMore = true; status = "加载下一章…"; publish(); startFeed("网页不在了") }
                 else -> { waitingMore = true; status = "加载下一章…"; publish(); askMore() }
             }
             return
         }
-        Events.emit("tts", JSONObject().put("type", "seg").put("id", seg.id))
+        // 从书库取的句子网页不认识 id：带上位置，网页回来时翻到这里
+        val ev = JSONObject().put("type", "seg").put("id", seg.id)
+        if (feed && seg.loc.isNotEmpty()) ev.put("loc", seg.loc).put("pct", seg.pct)
+        Events.emit("tts", ev)
         tick()
-        if (!webAlive()) notePosition(seg)
+        if (!webAlive() || feed) notePosition(seg)
         askMore()
         if (useDevice) return speakDevice(seg)
         val job = audioFor(seg)
@@ -280,7 +307,7 @@ class NarrationService : Service() {
                 val key = sha1("$v|$s|${seg.text}")
                 val f = File(cacheDir, "tts/$key.mp3")
                 if (f.exists() && f.length() > 0) return@submit f
-                val body = JSONObject().put("text", seg.text).put("voice", v).put("speed", s)
+                val body = JSONObject().put("text", seg.text).put("voice", v).put("lang", lang).put("speed", s)
                 val r = Http.postJson(app.link.url("/api/tts"), app.config.token, body, timeoutMs = 60000)
                 if (!r.ok) throw IOException(r.errorMessage())
                 f.parentFile?.mkdirs()
@@ -301,9 +328,133 @@ class NarrationService : Service() {
 
     /** 快读完手上的句子时向网页要下一段。网页没了（App 被划掉、网页重建过）就不要了，读完手上的就停 */
     private fun askMore() {
-        if (ended || needSent || queue.size - index > 6 || !webAlive()) return
+        if (ended || queue.size - index > 6) return
+        if (feed) { feedMore(); return }
+        if (needSent || !webAlive()) return
         needSent = true
         Events.emit("tts", JSONObject().put("type", "need"))
+        // 熄屏久了网页可能被系统冻结：15 秒还没给下一段，就自己从书库取
+        handler.removeCallbacks(needWatch)
+        handler.postDelayed(needWatch, 15_000)
+    }
+
+    // ---------- 网页不在或不回应时：从书库按章取正文 ----------
+
+    /** 改由这里取句子：先问书库刚读到的那句在第几章，从那句后面接着读 */
+    private fun startFeed(@Suppress("UNUSED_PARAMETER") why: String) {
+        if (feed) { feedMore(); return }
+        val id = book.optInt("id")
+        if (id <= 0 || timerMin == -1) { stop(if (timerMin == -1) "本章读完了" else webGoneMessage()); return }
+        feed = true
+        needSent = false
+        handler.removeCallbacks(needWatch)
+        val last = queue.lastOrNull { it.loc.isNotEmpty() }
+        val lastText = queue.lastOrNull()?.text ?: ""
+        val gen = feedGen
+        feedBusy = true
+        pool.execute {
+            val r = runCatching {
+                var q = "/api/books/$id/chapters?file=$fileId"
+                if (last != null) q += "&loc=" + URLEncoder.encode(last.loc, "UTF-8") + "&pct=" + last.pct
+                val toc = Http.getJson(app.link.url(q), app.config.token, 20000)
+                val chs = toc.optJSONArray("chapters") ?: JSONArray()
+                val start = toc.optJSONObject("resume")?.optInt("i") ?: 0
+                val frac = toc.optJSONObject("resume")?.optDouble("frac", 0.0) ?: 0.0
+                var segs = chapterSegs(id, toc.optLong("file_id"), chs, start, lastText, frac)
+                var next = start + 1
+                // 刚好读到这一章末尾：从下一章开始
+                while (segs.isEmpty() && next < chs.length()) { segs = chapterSegs(id, toc.optLong("file_id"), chs, next, "", 0.0); next++ }
+                Pair(Triple(chs, toc.optLong("file_id"), next), segs)
+            }
+            handler.post {
+                if (gen != feedGen || stopped) return@post
+                feedBusy = false
+                val res = r.getOrNull()
+                if (res == null) {
+                    // 书库也连不上：读完手上的就停
+                    feed = false
+                    if (waitingMore) stop("连不上书库，听书停了：" + (r.exceptionOrNull()?.message ?: ""))
+                    return@post
+                }
+                val (meta, segs) = res
+                feedChapters = meta.first
+                feedFile = meta.second
+                feedNext = meta.third
+                appendFeed(segs)
+            }
+        }
+    }
+
+    /** 快读完了：取下一章 */
+    private fun feedMore() {
+        if (feedBusy || ended || queue.size - index > 6) return
+        if (feedNext < 0 || feedNext >= feedChapters.length()) { ended = true; if (waitingMore) stop("全书读完了"); return }
+        val id = book.optInt("id")
+        val i = feedNext
+        val gen = feedGen
+        feedBusy = true
+        pool.execute {
+            val r = runCatching { chapterSegs(id, feedFile, feedChapters, i, "", 0.0) }
+            handler.post {
+                if (gen != feedGen || stopped) return@post
+                feedBusy = false
+                val segs = r.getOrNull()
+                if (segs == null) {
+                    // 取不到（断网）：一会儿再试；手上的读完了就停
+                    if (waitingMore) stop("连不上书库，听书停了")
+                    else handler.postDelayed({ if (gen == feedGen) feedMore() }, 20_000)
+                    return@post
+                }
+                feedNext = i + 1
+                appendFeed(segs)
+            }
+        }
+    }
+
+    private fun appendFeed(segs: List<Seg>) {
+        queue += segs
+        if (feedNext >= feedChapters.length() && segs.isEmpty()) ended = true
+        if (waitingMore && playing) {
+            waitingMore = false
+            if (index < queue.size) playCurrent() else feedMore()
+        } else if (segs.isEmpty()) feedMore()
+        publish()
+    }
+
+    /**
+     * 第 i 章切成句子，带上位置（sec: / p:，和阅读器、手表一样）。after 是刚读完的那句：在这一章里找到它，
+     * 从它后面开始；找不到时从 frac（这一章里的比例）开始
+     */
+    private fun chapterSegs(id: Int, fid: Long, chs: JSONArray, i: Int, after: String, frac: Double): List<Seg> {
+        if (i < 0 || i >= chs.length()) return emptyList()
+        val ch = Http.getJson(app.link.url("/api/books/$id/chapters/$i?file=$fid"), app.config.token, 20000)
+        val text = BookText.format(ch.optString("text"))
+        val len = maxOf(1, text.length)
+        val all = BookText.sentences(text)
+        var from = (frac.coerceIn(0.0, 1.0) * len).toInt()
+        val key = after.filterNot { it.isWhitespace() }.take(16)
+        if (key.length >= 4) {
+            // 正文里的空白和网页切出来的不一定一样：去掉空白再找
+            val sb = StringBuilder(); val map = ArrayList<Int>()
+            text.forEachIndexed { k, c -> if (!c.isWhitespace()) { sb.append(c); map += k } }
+            // 同一句话可能出现好几次：用离 frac 最近的那一处
+            val near = from
+            var at = -1
+            var k = sb.indexOf(key)
+            while (k >= 0) {
+                if (at < 0 || kotlin.math.abs(map[k] - near) < kotlin.math.abs(map[at] - near)) at = k
+                k = sb.indexOf(key, k + 1)
+            }
+            if (at >= 0) {
+                val restKey = after.filterNot { it.isWhitespace() }
+                val endAt = map.getOrNull(minOf(map.size - 1, at + restKey.length - 1)) ?: map[at]
+                from = endAt + 1
+            }
+        }
+        return all.filter { it.start >= from - 1 || (from == 0) }.mapIndexed { n, s ->
+            val f = s.start.toDouble() / len
+            Seg("srv:$i:$n", s.text, BookPos.location(chs, i, f), BookPos.percent(ch, f, false))
+        }
     }
 
     private fun advance() {
@@ -363,6 +514,8 @@ class NarrationService : Service() {
         playing = false
         releasePlayer()
         tts?.stop()
+        feedGen++
+        handler.removeCallbacks(needWatch)
         handler.removeCallbacks(timerTask)
         timerMin = 0
         session.isActive = false
@@ -408,8 +561,8 @@ class NarrationService : Service() {
         }
         // 从现在起由这里记进度：先把正在读的这句存下来，App 重新打开时书就停在这里
         queue.getOrNull(index)?.let { notePosition(it, now = true) }
-        // 正在等网页给下一章：不会有了
-        if (waitingMore) stop(webGoneMessage())
+        // 正在等网页给下一章：不会有了，从书库取
+        if (waitingMore || needSent) startFeed("网页不在了")
     }
 
     /** 记下读到哪一句；最多 30 秒存一次（暂停、停止时也会存） */
@@ -436,7 +589,7 @@ class NarrationService : Service() {
     /** 听书时长：网页在的时候网页自己算阅读时长，这里只算网页不在的时候 */
     private fun tick() {
         val now = SystemClock.elapsedRealtime()
-        if (lastTick > 0 && !webAlive()) listenMs += (now - lastTick).coerceIn(0, 120_000)
+        if (lastTick > 0 && (!webAlive() || feed)) listenMs += (now - lastTick).coerceIn(0, 120_000)
         lastTick = if (playing) now else 0
     }
 
@@ -479,9 +632,7 @@ class NarrationService : Service() {
             }
             return
         }
-        val han = seg.text.any { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }
-        val kana = seg.text.any { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HIRAGANA || Character.UnicodeScript.of(it.code) == Character.UnicodeScript.KATAKANA }
-        val loc = when { kana -> Locale.JAPANESE; han -> Locale.SIMPLIFIED_CHINESE; else -> Locale.US }
+        val loc = localeFor(seg.text)
         val picked = if (voice.isNotEmpty()) t.voices?.firstOrNull { it.name == voice && it.locale.language == loc.language } else null
         if (picked != null) t.voice = picked else if (t.voice?.locale?.language != loc.language) t.language = loc
         t.setSpeechRate(speed.toFloat())
@@ -490,6 +641,32 @@ class NarrationService : Service() {
         t.speak(seg.text, TextToSpeech.QUEUE_FLUSH, Bundle(), seg.id)
         status = ""
         publish()
+    }
+
+    /** 手机自带语音用哪种语言读：看文字种类（泰、韩、日、中、俄、阿拉伯）；拉丁字母按书的语言，中文书里的就用英语 */
+    private fun localeFor(text: String): Locale {
+        var thai = 0; var hangul = 0; var kana = 0; var han = 0; var cyr = 0; var arabic = 0
+        for (c in text) {
+            when (Character.UnicodeScript.of(c.code)) {
+                Character.UnicodeScript.THAI -> thai++
+                Character.UnicodeScript.HANGUL -> hangul++
+                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana++
+                Character.UnicodeScript.HAN -> han++
+                Character.UnicodeScript.CYRILLIC -> cyr++
+                Character.UnicodeScript.ARABIC -> arabic++
+                else -> {}
+            }
+        }
+        return when {
+            kana > 0 -> Locale.JAPANESE
+            thai > 0 && thai >= han * 4 -> Locale("th", "TH")
+            hangul > 0 && hangul * 2 >= han * 4 -> Locale.KOREAN
+            han > 0 -> Locale.SIMPLIFIED_CHINESE
+            cyr > 0 -> Locale("ru", "RU")
+            arabic > 0 -> Locale("ar")
+            lang.isNotEmpty() && lang !in setOf("zh", "ja", "ko", "th", "ru", "ar") -> Locale(lang)
+            else -> Locale.US
+        }
     }
 
     // ---------- 定时 ----------

@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type TTSConfig struct {
@@ -59,28 +60,179 @@ type Voice struct {
 	Lang   string `json:"lang"`
 	Gender string `json:"gender"`
 	Desc   string `json:"desc"`
+	Code   string `json:"code,omitempty"`  // 语言代码（zh、en、th…），网页按书的语言挑音色
+	Multi  bool   `json:"multi,omitempty"` // 多语言音色：别的语言也能读
 }
 
 // 微软自然语音里适合读书的音色
 var edgeVoices = []Voice{
-	{"zh-CN-XiaoxiaoNeural", "晓晓", "普通话", "女", "温暖自然，适合小说"},
-	{"zh-CN-XiaoyiNeural", "晓伊", "普通话", "女", "活泼，适合轻小说"},
-	{"zh-CN-YunxiNeural", "云希", "普通话", "男", "阳光，适合小说"},
-	{"zh-CN-YunjianNeural", "云健", "普通话", "男", "浑厚有激情，适合武侠"},
-	{"zh-CN-YunyangNeural", "云扬", "普通话", "男", "播音腔，适合社科新闻"},
-	{"zh-CN-YunxiaNeural", "云夏", "普通话", "男", "少年音"},
-	{"zh-CN-liaoning-XiaobeiNeural", "晓北", "东北话", "女", "幽默"},
-	{"zh-CN-shaanxi-XiaoniNeural", "晓妮", "陕西话", "女", ""},
-	{"zh-HK-HiuMaanNeural", "曉曼", "粤语", "女", ""},
-	{"zh-HK-WanLungNeural", "雲龍", "粤语", "男", ""},
-	{"zh-TW-HsiaoChenNeural", "曉臻", "台湾腔", "女", ""},
-	{"zh-TW-YunJheNeural", "雲哲", "台湾腔", "男", ""},
-	{"en-US-AvaMultilingualNeural", "Ava", "英语", "女", "多语言，也能读中文"},
-	{"en-US-AndrewMultilingualNeural", "Andrew", "英语", "男", "多语言"},
-	{"en-US-AriaNeural", "Aria", "英语", "女", ""},
-	{"en-GB-SoniaNeural", "Sonia", "英式英语", "女", ""},
-	{"ja-JP-NanamiNeural", "七海", "日语", "女", ""},
-	{"ja-JP-KeitaNeural", "圭太", "日语", "男", ""},
+	{"zh-CN-XiaoxiaoNeural", "晓晓", "普通话", "女", "温暖自然，适合小说", "", false},
+	{"zh-CN-XiaoyiNeural", "晓伊", "普通话", "女", "活泼，适合轻小说", "", false},
+	{"zh-CN-YunxiNeural", "云希", "普通话", "男", "阳光，适合小说", "", false},
+	{"zh-CN-YunjianNeural", "云健", "普通话", "男", "浑厚有激情，适合武侠", "", false},
+	{"zh-CN-YunyangNeural", "云扬", "普通话", "男", "播音腔，适合社科新闻", "", false},
+	{"zh-CN-YunxiaNeural", "云夏", "普通话", "男", "少年音", "", false},
+	{"zh-CN-liaoning-XiaobeiNeural", "晓北", "东北话", "女", "幽默", "", false},
+	{"zh-CN-shaanxi-XiaoniNeural", "晓妮", "陕西话", "女", "", "", false},
+	{"zh-HK-HiuMaanNeural", "曉曼", "粤语", "女", "", "", false},
+	{"zh-HK-WanLungNeural", "雲龍", "粤语", "男", "", "", false},
+	{"zh-TW-HsiaoChenNeural", "曉臻", "台湾腔", "女", "", "", false},
+	{"zh-TW-YunJheNeural", "雲哲", "台湾腔", "男", "", "", false},
+	{"en-US-AvaMultilingualNeural", "Ava", "英语", "女", "多语言，也能读中文", "", false},
+	{"en-US-AndrewMultilingualNeural", "Andrew", "英语", "男", "多语言", "", false},
+	{"en-US-AriaNeural", "Aria", "英语", "女", "", "", false},
+	{"en-GB-SoniaNeural", "Sonia", "英式英语", "女", "", "", false},
+	{"en-US-EmmaMultilingualNeural", "Emma", "英语", "女", "多语言", "", false},
+	{"en-US-BrianMultilingualNeural", "Brian", "英语", "男", "多语言", "", false},
+	{"en-US-GuyNeural", "Guy", "英语", "男", "", "", false},
+	{"en-GB-RyanNeural", "Ryan", "英式英语", "男", "", "", false},
+	{"ja-JP-NanamiNeural", "七海", "日语", "女", "", "", false},
+	{"ja-JP-KeitaNeural", "圭太", "日语", "男", "", "", false},
+	{"th-TH-PremwadeeNeural", "Premwadee", "泰语", "女", "", "", false},
+	{"th-TH-NiwatNeural", "Niwat", "泰语", "男", "", "", false},
+	{"ko-KR-SunHiNeural", "선히", "韩语", "女", "", "", false},
+	{"ko-KR-InJoonNeural", "인준", "韩语", "男", "", "", false},
+	{"fr-FR-DeniseNeural", "Denise", "法语", "女", "", "", false},
+	{"fr-FR-HenriNeural", "Henri", "法语", "男", "", "", false},
+	{"de-DE-KatjaNeural", "Katja", "德语", "女", "", "", false},
+	{"de-DE-ConradNeural", "Conrad", "德语", "男", "", "", false},
+	{"es-ES-ElviraNeural", "Elvira", "西班牙语", "女", "", "", false},
+	{"es-ES-AlvaroNeural", "Álvaro", "西班牙语", "男", "", "", false},
+	{"ru-RU-SvetlanaNeural", "Светлана", "俄语", "女", "", "", false},
+	{"ru-RU-DmitryNeural", "Дмитрий", "俄语", "男", "", "", false},
+	{"vi-VN-HoaiMyNeural", "Hoài My", "越南语", "女", "", "", false},
+	{"vi-VN-NamMinhNeural", "Nam Minh", "越南语", "男", "", "", false},
+}
+
+// 音色的语言代码：zh-CN-XiaoxiaoNeural → zh
+func voiceCode(id string) string {
+	return strings.ToLower(strings.SplitN(id, "-", 2)[0])
+}
+
+// 带上语言代码的音色列表
+func edgeVoiceList() []Voice {
+	out := make([]Voice, len(edgeVoices))
+	for i, v := range edgeVoices {
+		v.Code = voiceCode(v.ID)
+		v.Multi = strings.Contains(v.ID, "Multilingual")
+		out[i] = v
+	}
+	return out
+}
+
+// 每种语言默认用哪个音色（微软语音）：中文用设置里选的，其他按语言挑
+func edgeDefaults() map[string]string {
+	out := map[string]string{}
+	for k, v := range dictVoices {
+		out[k] = v
+	}
+	for _, v := range edgeVoices {
+		if c := voiceCode(v.ID); out[c] == "" {
+			out[c] = v.ID
+		}
+	}
+	out["zh"] = dictVoice("zh")
+	out["en"] = "en-US-AriaNeural"
+	return out
+}
+
+// ---------- 按文字挑音色：中文书里夹着的泰文、韩文这些，中文音色读不了，合成时换成能读的 ----------
+
+// 一段文字主要是哪种文字：返回语言代码；拉丁字母（英、法、德……）、数字、符号返回空（音色一般都读得了）
+func scriptLang(text string) string {
+	counts := map[string]int{}
+	letters := 0
+	for _, r := range text {
+		var k string
+		switch {
+		case r >= 0x0E00 && r <= 0x0E7F:
+			k = "th"
+		case r >= 0xAC00 && r <= 0xD7AF, r >= 0x1100 && r <= 0x11FF, r >= 0x3130 && r <= 0x318F:
+			k = "ko"
+		case r >= 0x3040 && r <= 0x30FF:
+			k = "kana"
+		case unicode.Is(unicode.Han, r):
+			k = "han"
+		case unicode.Is(unicode.Cyrillic, r):
+			k = "ru"
+		case unicode.Is(unicode.Arabic, r):
+			k = "ar"
+		case unicode.Is(unicode.Hebrew, r):
+			k = "he"
+		case unicode.Is(unicode.Devanagari, r):
+			k = "hi"
+		case unicode.Is(unicode.Greek, r):
+			k = "el"
+		case unicode.Is(unicode.Khmer, r):
+			k = "km"
+		case unicode.Is(unicode.Lao, r):
+			k = "lo"
+		case unicode.Is(unicode.Myanmar, r):
+			k = "my"
+		case unicode.IsLetter(r):
+			k = "latin"
+		default:
+			continue
+		}
+		// 一个汉字、假名差不多是一个词，一个韩文字是一个音节，按词数比：中文句子里夹个外文词不算外文
+		w := 1
+		switch k {
+		case "han", "kana":
+			w = 4
+		case "ko":
+			w = 2
+		}
+		counts[k] += w
+		letters += w
+	}
+	if letters == 0 {
+		return ""
+	}
+	if counts["kana"] > 0 && counts["kana"]+counts["han"] >= letters/2 {
+		return "ja"
+	}
+	best, n := "", 0
+	for k, c := range counts {
+		if c > n || (c == n && k < best) {
+			best, n = k, c
+		}
+	}
+	switch best {
+	case "latin":
+		return ""
+	case "han":
+		return "zh"
+	}
+	return best
+}
+
+// 同一种文字的几种语言：俄文字母也用于乌克兰语、保加利亚语，阿拉伯字母也用于波斯语、乌尔都语
+var scriptFamily = map[string][]string{"ru": {"ru", "uk", "bg", "sr", "kk"}, "ar": {"ar", "fa", "ur"}, "zh": {"zh", "ja"}, "ja": {"ja"}}
+
+// 微软语音合成前：音色读不了这段文字（比如中文音色读泰文）时换成这种语言的默认音色
+func adaptVoice(text, voice string) string {
+	want := scriptLang(text)
+	if want == "" || voice == "" {
+		return voice
+	}
+	have := voiceCode(voice)
+	ok := []string{want}
+	if f, found := scriptFamily[want]; found {
+		ok = f
+	}
+	for _, c := range ok {
+		if have == c {
+			return voice
+		}
+	}
+	// 多语言音色读得了中日韩俄文
+	if strings.Contains(voice, "Multilingual") && (want == "zh" || want == "ja" || want == "ko" || want == "ru") {
+		return voice
+	}
+	if want == "zh" && strings.HasPrefix(voice, "zh-") {
+		return voice
+	}
+	return dictVoice(want)
 }
 
 // ---------- 最小 WebSocket 客户端（只用于连接微软语音服务） ----------
@@ -444,13 +596,19 @@ func trimTTSCache() {
 
 var ttsSem = make(chan struct{}, 4) // 同时最多合成 4 段
 
-func synthesize(ctx context.Context, text, voice string, speed float64) ([]byte, error) {
+// lang：书的语言（没选音色时按它挑）
+func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([]byte, error) {
 	c := ttsConfig()
 	if voice == "" {
 		voice = c.Voice
 		if c.Engine == "openai" {
 			voice = c.OpenAI.Voice
+		} else if lang != "" {
+			voice = dictVoice(lang)
 		}
+	}
+	if c.Engine == "edge" {
+		voice = adaptVoice(text, voice)
 	}
 	return synthesizeWith(ctx, c.Engine, text, voice, speed)
 }
@@ -512,9 +670,11 @@ func handleTTSVoices(w http.ResponseWriter, r *http.Request) {
 	c := ttsConfig()
 	voices := []Voice{}
 	def := c.Voice
+	var defaults map[string]string
 	switch c.Engine {
 	case "edge":
-		voices = edgeVoices
+		voices = edgeVoiceList()
+		defaults = edgeDefaults()
 	case "openai":
 		list := c.OpenAI.Voices
 		if list == "" {
@@ -527,13 +687,14 @@ func handleTTSVoices(w http.ResponseWriter, r *http.Request) {
 		}
 		def = c.OpenAI.Voice
 	}
-	writeJSON(w, 200, map[string]any{"engine": c.Engine, "voices": voices, "default": def})
+	writeJSON(w, 200, map[string]any{"engine": c.Engine, "voices": voices, "default": def, "defaults": defaults})
 }
 
 func handleTTS(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text  string  `json:"text"`
 		Voice string  `json:"voice"`
+		Lang  string  `json:"lang"` // 书的语言（可选）
 		Speed float64 `json:"speed"`
 	}
 	if readJSON(r, &req) != nil {
@@ -550,7 +711,7 @@ func handleTTS(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	b, err := synthesize(ctx, req.Text, req.Voice, req.Speed)
+	b, err := synthesize(ctx, req.Text, req.Voice, req.Lang, req.Speed)
 	if err != nil {
 		errJSON(w, 502, "语音合成失败："+simplifyNetErr(err))
 		return

@@ -1,5 +1,7 @@
 package app.shuku.wear
 
+import app.shuku.core.BookPos
+import app.shuku.core.BookText
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationManager

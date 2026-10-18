@@ -46,7 +46,85 @@ export function splitSentences(text) {
     }
     if (buf) res.push({ text: buf, start: off, end: s.end })
   }
-  return res
+  // 泰文这类没有句号、逗号的文字：一整段还是太长时按空格再切（泰文用空格隔开句子、分句）
+  const out2 = []
+  for (const s of res) {
+    if (s.text.length <= 200 || !/\s/.test(s.text)) { out2.push(s); continue }
+    let off = s.start, buf = ''
+    for (const piece of s.text.match(/\S+\s*/g) || [s.text]) {
+      buf += piece
+      if (buf.length >= 100) { out2.push({ text: buf.trim(), start: off, end: off + buf.length }); off += buf.length; buf = '' }
+    }
+    if (buf.trim()) out2.push({ text: buf.trim(), start: off, end: s.end })
+  }
+  return out2
+}
+
+// ---------- 按书的语言挑声音 ----------
+
+// 书的语言（元数据里的 en、zh-CN、tha……）→ 两个字母的语言代码
+const LANG3 = { eng: 'en', tha: 'th', chi: 'zh', zho: 'zh', jpn: 'ja', kor: 'ko', fre: 'fr', fra: 'fr', ger: 'de', deu: 'de', spa: 'es', rus: 'ru', vie: 'vi', ita: 'it', por: 'pt' }
+export function langCode(l) {
+  l = String(l || '').toLowerCase().split(/[-_]/)[0]
+  return LANG3[l] || (l.length === 2 ? l : '')
+}
+
+// 一段文字是什么语言（只看文字种类；拉丁字母返回空）
+export function textLang(t) {
+  t = String(t || '')
+  if (/[\u0E00-\u0E7F]/.test(t)) return 'th'
+  if (/[\u3040-\u30FF]/.test(t)) return 'ja'
+  if (/[\uAC00-\uD7AF]/.test(t)) return 'ko'
+  if (/[\u4E00-\u9FFF]/.test(t)) return 'zh'
+  if (/[\u0400-\u04FF]/.test(t)) return 'ru'
+  if (/[\u0600-\u06FF]/.test(t)) return 'ar'
+  return ''
+}
+
+let voicesReq = null
+// 书库的声音列表（每个声音带语言代码）和每种语言的默认声音；同一次打开只问一次
+export function voiceInfo() {
+  if (!voicesReq) {
+    voicesReq = api('/api/tts/voices').catch(e => { voicesReq = null; throw e })
+  }
+  return voicesReq
+}
+
+// 这本书用哪个声音：这种语言选过的 → 书库给这种语言的默认 → 以前选的（中文）
+export function voiceFor(prefs, info, code) {
+  const has = id => !!id && (info?.voices || []).some(v => v.id === id)
+  const chosen = prefs.voices?.[code || 'zh']
+  if (has(chosen)) return chosen
+  if (!code || code === 'zh') return has(prefs.voice) ? prefs.voice : (info?.defaults?.zh || info?.default || '')
+  // 自定义接口（OpenAI 兼容）的声音一般都是多语言的：不分语言
+  if (!info?.defaults) return has(prefs.voice) ? prefs.voice : (info?.default || '')
+  return info.defaults[code] || info.default || ''
+}
+
+// 阅读设置里的声音下拉框：只列这种语言的（和多语言的），选了记在这种语言下
+function voiceSelect(info, code, cur, onChange) {
+  let list = info.voices || []
+  if (info.defaults && code) {
+    const same = list.filter(v => v.code === code || v.multi)
+    if (same.some(v => v.code === code)) list = same
+  }
+  const sel = h('select', { class: 'input', 'aria-label': '音色' }, list.map(v => h('option', { value: v.id, selected: v.id === cur }, `${v.name}${v.lang ? '（' + v.lang + (v.gender ? ' · ' + v.gender : '') + '）' : ''}`)))
+  sel.onchange = () => onChange(sel.value)
+  return sel
+}
+
+// 记下这种语言选的声音（中文的同时记在以前的 voice 里，旧版也认）
+function rememberVoice(prefs, code, v) {
+  prefs.voices = Object.assign({}, prefs.voices, { [code || 'zh']: v })
+  if (!code || code === 'zh') prefs.voice = v
+}
+
+// 这本书的语言：元数据里有就用，没有看正文
+function bookCode(shell, segs) {
+  const c = langCode(shell.info?.language)
+  if (c) return c
+  const sample = (segs || []).slice(0, 8).map(s => s.text).join(' ')
+  return textLang(sample) || (/[A-Za-z]/.test(sample) ? 'en' : 'zh')
 }
 
 export class Narrator {
@@ -72,12 +150,12 @@ export class Narrator {
   async engineInfo() {
     if (this.info) return this.info
     try {
-      const r = await api('/api/tts/voices')
-      this.info = r
-      if (!this.prefs.voice || !r.voices.some(v => v.id === this.prefs.voice)) this.prefs.voice = r.default
+      this.info = await voiceInfo()
     } catch { this.info = { engine: 'browser', voices: [] } }
     return this.info
   }
+
+  get voice() { return voiceFor(this.prefs, this.info, this.code) }
 
   get mode() { return this.forceBrowser || this.info?.engine === 'browser' ? 'browser' : 'server' }
 
@@ -124,6 +202,7 @@ export class Narrator {
     this.setupMediaSession()
     this.setState('准备中…')
     await this.load(true)
+    this.code = bookCode(this.shell, this.queue)
     this.play()
   }
 
@@ -231,7 +310,7 @@ export class Narrator {
 
   fetchAudio(text) {
     if (!this.cache.has(text)) {
-      const p = api('/api/tts', { method: 'POST', raw: true, body: { text, voice: this.prefs.voice, speed: this.speed } })
+      const p = api('/api/tts', { method: 'POST', raw: true, body: { text, voice: this.voice, lang: this.code || '', speed: this.speed } })
         .then(r => r.blob()).then(b => URL.createObjectURL(b))
       p.catch(() => this.cache.delete(text))
       this.cache.set(text, p)
@@ -258,7 +337,11 @@ export class Narrator {
     this.setState('')
     speechSynthesis.cancel()
     const u = new SpeechSynthesisUtterance(seg.text)
-    const lang = /[぀-ヿ]/.test(seg.text) ? 'ja-JP' : /[一-鿿]/.test(seg.text) ? 'zh-CN' : 'en-US'
+    const BCP = { zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR', th: 'th-TH', ru: 'ru-RU', ar: 'ar-SA', en: 'en-US', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', vi: 'vi-VN', it: 'it-IT', pt: 'pt-BR' }
+    // 文字是哪种就用哪种语言读；拉丁字母按书的语言（英、法、德……），中文书里的英文句子用英语
+    const t = textLang(seg.text)
+    const code = t || (this.code && this.code !== 'zh' && this.code !== 'ja' && this.code !== 'ko' && this.code !== 'th' ? this.code : 'en')
+    const lang = BCP[code] || code
     u.lang = lang
     const voices = speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-').startsWith(lang.slice(0, 2)))
     // 优先选“自然”“增强”的声音（Edge 的 Natural、苹果的 Enhanced / Premium）
@@ -294,7 +377,7 @@ export class Narrator {
   }
 
   setVoice(v) {
-    this.prefs.voice = v
+    rememberVoice(this.prefs, this.code, v)
     save(PREFS_KEY, this.prefs)
     this.restartCurrent()
   }
@@ -340,9 +423,8 @@ export class Narrator {
     if (info.engine === 'browser' || this.forceBrowser) {
       parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7 } }, '正在使用设备自带语音。在“设置 → 听书”里可以换成更自然的微软语音。'))
     } else if (info.voices?.length) {
-      const sel = h('select', { class: 'input', 'aria-label': '音色' }, info.voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.voice }, `${v.name}${v.lang ? '（' + v.lang + (v.gender ? ' · ' + v.gender : '') + '）' : ''}`)))
-      sel.onchange = () => this.setVoice(sel.value)
-      parts.push(sel)
+      if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+      parts.push(voiceSelect(info, this.code, this.voice, v => this.setVoice(v)))
     }
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
       h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
@@ -435,16 +517,19 @@ export class NativeNarrator {
     if (!unit) { this.stop(); toast('后面没有可以朗读的文字了'); return }
     this.lastKey = unit.key
     const info = this.shell.info || {}
+    this.code = bookCode(this.shell, unit.segs)
+    let voices = null
+    try { voices = await voiceInfo() } catch (e) {}
     call('tts', 'start', {
       book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
-      voice: this.prefs.voice || '', speed: this.speed, segments: this.pack(unit),
+      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), lang: this.code, speed: this.speed, segments: this.pack(unit),
     })
   }
 
   async onEvent(e) {
     if (!this.active && e.type !== 'state') return
     switch (e.type) {
-      case 'seg': return this.onSeg(e.id)
+      case 'seg': return this.onSeg(e.id, e)
       case 'need': return this.onNeed()
       case 'state':
         this.playing = !!e.playing
@@ -458,9 +543,19 @@ export class NativeNarrator {
     }
   }
 
-  async onSeg(id) {
+  async onSeg(id, e) {
     const seg = this.segs.get(id)
-    if (!seg) return
+    if (!seg) {
+      // 网页被冻结、回收期间后台从书库接着读的句子：记下位置，看着书时翻过去
+      if (e?.loc) {
+        this.shell.saveLocation(e.loc, e.pct)
+        if (document.visibilityState === 'visible' && e.loc !== this.lastFeedLoc) {
+          this.lastFeedLoc = e.loc
+          try { await this.shell.engine.goTo?.(e.loc) } catch (err) {}
+        }
+      }
+      return
+    }
     this.cur = seg
     this.shell.markActivity?.()
     const eng = this.shell.engine
@@ -514,8 +609,9 @@ export class NativeNarrator {
     toast(this.timerMin === 0 ? '已关闭定时' : this.timerMin === -1 ? '读完本章后停止' : `${this.timerMin} 分钟后停止`, { duration: 1500 })
   }
 
-  setVoice(v) {
-    this.prefs.voice = v
+  setVoice(v, device) {
+    if (device) this.prefs.voice = v // 手机自带语音：不分语言
+    else rememberVoice(this.prefs, this.code, v)
     save(PREFS_KEY, this.prefs)
     call('tts', 'voice', v)
   }
@@ -546,17 +642,15 @@ export class NativeNarrator {
       parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7, marginBottom: '6px' } }, '正在用手机自带语音。在“设置 → 手机 App”里可以换成书库的微软自然语音。'))
       if (voices.length) {
         const sel = h('select', { class: 'input', 'aria-label': '音色' }, voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.voice }, v.name)))
-        sel.onchange = () => this.setVoice(sel.value)
+        sel.onchange = () => this.setVoice(sel.value, true)
         parts.push(sel)
       }
     } else {
       try {
-        const r = await api('/api/tts/voices')
+        const r = await voiceInfo()
         if (r.voices?.length) {
-          const cur = this.prefs.voice || r.default
-          const sel = h('select', { class: 'input', 'aria-label': '音色' }, r.voices.map(v => h('option', { value: v.id, selected: v.id === cur }, `${v.name}${v.lang ? '（' + v.lang + (v.gender ? ' · ' + v.gender : '') + '）' : ''}`)))
-          sel.onchange = () => this.setVoice(sel.value)
-          parts.push(sel)
+          if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+          parts.push(voiceSelect(r, this.code, voiceFor(this.prefs, r, this.code), v => this.setVoice(v)))
         }
       } catch {
         if (net.route === 'offline') parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7 } }, '离线时用手机自带语音朗读。'))
