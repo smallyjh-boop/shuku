@@ -6,3 +6,4 @@ data/
 .claude/
 web/legacy/
 tools/legacy/node_modules/
+__pycache__/
