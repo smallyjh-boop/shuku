@@ -50,6 +50,7 @@ const P = {
   list: '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
   bookmark: '<path d="M6 3.5h12V21l-6-4.5L6 21z"/>',
   type: '<path d="M4 7V5h16v2M9 19h6M12 5v14"/>',
+  textsize: '<path d="M2.5 19L7 7l4.5 12M4.2 15h5.6M13.5 19l3.25-8 3.25 8M14.7 16.2h4.1"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',

@@ -505,6 +505,15 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .r-prog input[type=range] { flex: 1; accent-color: var(--r-acc); }
 .r-prog .chap { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .r-tools { display: flex; justify-content: space-around; margin-top: 6px; }
+/* 快速排版：三档字号（PDF 三档缩放），在底栏里展开一行；按钮上的字也是一档比一档大 */
+.r-quick { display: flex; justify-content: center; margin-top: 10px; }
+.r-quick .seg { border-color: var(--r-rule); }
+.r-quick .seg button { height: 38px; min-width: 76px; padding: 0 16px; color: var(--r-ui-fg); }
+.r-quick .seg button + button { border-left-color: var(--r-rule); }
+.r-quick .seg button:nth-child(1) { font-size: calc(13px * var(--ui-scale, 1)); }
+.r-quick .seg button:nth-child(2) { font-size: calc(15px * var(--ui-scale, 1)); }
+.r-quick .seg button:nth-child(3) { font-size: calc(17.5px * var(--ui-scale, 1)); }
+.r-quick .seg button.on { background: var(--r-rule); color: var(--r-acc); font-weight: 600; }
 .r-tools .icon-btn { width: auto; padding: 0 12px; gap: 6px; display: inline-flex; font-size: calc(12.5px * var(--ui-scale, 1)); color: var(--r-ui-fg); }
 
 /* 不显示工具栏时，底部一行淡淡的进度 */
@@ -1221,7 +1230,7 @@ html.eink .r-sheet, html.eink .r-end, html.eink .r-note, html.eink .r-pop, html.
 html.eink .input:focus { border-width: 2px; }
 html.eink .tip { border: 1px solid var(--bg); }
 html.eink .r-status { color: var(--r-fg); opacity: 1; }
-html.eink .r-sheet .seg button.on, html.eink .r-panel .ptabs button.on { background: var(--r-fg); color: var(--r-bg); }
+html.eink .r-sheet .seg button.on, html.eink .r-panel .ptabs button.on, html.eink .r-quick .seg button.on { background: var(--r-fg); color: var(--r-bg); }
 html.eink .swatches button.on { box-shadow: none; outline: 3px solid var(--r-acc); outline-offset: 2px; }
 html.eink .r-dim, html.eink .r-warm { display: none; }
 /* 墨水屏上 --r-rule 是纯黑：拿它当底色的地方（悬停、占位）换掉，不然点过的按钮成了一块黑（触屏点过以后“悬停”会一直留着） */

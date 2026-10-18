@@ -171,6 +171,9 @@ class Reader {
     if (!mod) return this.fail(`这个格式（${this.info.format.toUpperCase()}）暂时不能在线阅读，可以在详情里下载。`)
     this.engine = new mod.Engine(this)
     this.kind = this.engine.kind
+    // 漫画没有字号可调
+    this.quickTool.hidden = !(this.kind === 'flow' || this.kind === 'pdf')
+    this.quickTool.querySelector('span').textContent = this.kind === 'pdf' ? '缩放' : '字号'
     this.root.dataset.kind = this.kind
     // 进度：本机记的和服务器上的，用新的那个
     const local = this.localPos()
@@ -274,8 +277,11 @@ class Reader {
         tool('back', '上一页', () => this.engine?.prev()),
         tool('next', '下一页', () => this.engine?.next()),
         (this.ttsTool = tool('headphones', '听书', () => this.toggleNarration())),
-        tool('expand', '全屏', () => this.fullscreen()),
+        // 快速排版：三档字号（PDF 是三档缩放），点一下就换，不用进设置调细节。原来的“全屏”按钮用处不大，换成这个（F 键还能全屏）
+        (this.quickTool = tool('textsize', '字号', () => this.toggleQuick())),
         tool('type', '设置', () => this.toggleSheet())))
+    this.quick = h('div', { class: 'r-quick', role: 'group', 'aria-label': '快速排版', hidden: true })
+    bottom.insertBefore(this.quick, bottom.querySelector('.r-tools'))
     this.panelTitle = h('div', { class: 't' })
     this.panelAuthor = h('div', { class: 'a' })
     this.ptabs = h('div', { class: 'ptabs', role: 'tablist' })
@@ -455,7 +461,38 @@ class Reader {
   closeOverlays() {
     this.sheet.classList.remove('show')
     this.panel.classList.remove('show')
+    if (this.quick) { this.quick.hidden = true; this.quickTool.classList.remove('on') }
     this.syncOverlay()
+  }
+
+  // ---------- 快速排版：三档常用字号（PDF 是三档缩放） ----------
+  quickPresets() {
+    if (this.kind === 'pdf') return [['缩小', { pdfZoom: 0.85 }], ['适合', { pdfZoom: 1 }], ['放大', { pdfZoom: 1.3 }]]
+    // 标准字号：墨水屏按屏幕尺寸算，其他 19
+    const base = isEInk() ? einkFontSize() : DEFAULTS.fontSize
+    return [['小字', { fontSize: base - 2, lineHeight: 1.7, paraSpace: 0.4 }], ['标准', { fontSize: base, lineHeight: 1.85, paraSpace: 0.5 }],
+      ['大字', { fontSize: base + 4, lineHeight: 1.9, paraSpace: 0.6 }]]
+  }
+
+  toggleQuick() {
+    clearTimeout(this.uiTimer)
+    const show = this.quick.hidden
+    if (show) this.drawQuick()
+    this.quick.hidden = !show
+    this.quickTool.classList.toggle('on', show)
+  }
+
+  drawQuick() {
+    const key = this.kind === 'pdf' ? 'pdfZoom' : 'fontSize'
+    fill(this.quick, h('div', { class: 'seg' }, this.quickPresets().map(([label, v]) => h('button', {
+      type: 'button', class: Math.abs((this.prefs[key] || 0) - v[key]) < 0.01 ? 'on' : '',
+      onclick: () => {
+        for (const [k, x] of Object.entries(v)) this.setPrefQuiet(k, x)
+        this.applyPrefs()
+        this.drawQuick()
+        if (this.sheet.classList.contains('show')) this.drawSheet()
+      },
+    }, label))))
   }
 
   syncOverlay() {
