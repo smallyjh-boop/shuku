@@ -1233,6 +1233,7 @@ html.eink .pdfv .pg { box-shadow: none; border: 1px solid #000; }
 
 /* 设置里“界面字号”那一行：手机上选项放到下一行 */
 @media (max-width: 520px) {
-  .set-row.wrap-sm { flex-wrap: wrap; }
+  .set-row.wrap-sm { flex-wrap: wrap; row-gap: 8px; }
+  .set-row.wrap-sm > div:first-child { flex-basis: 100%; }
   .set-row.wrap-sm > .seg { margin-left: auto; }
 }
