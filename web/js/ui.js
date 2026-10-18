@@ -93,6 +93,7 @@ const P = {
   hdd: '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5 13l2.5-8h9L19 13M7 16.5h.01M10.5 16.5h.01"/>',
   tag: '<path d="M3.5 12.5V4.5a1 1 0 0 1 1-1h8l8 8-9 9z"/><circle cx="8.5" cy="8.5" r="1.5"/>',
   saved: '<path d="M6 3.5h12V21l-6-4.5L6 21z"/><path d="M9 9.5l2 2 4-4"/>',
+  translate: '<path d="M3.5 5.5h9M8 3.5v2M5.5 5.5c.7 3.2 2.7 5.6 5.5 6.8M10.5 5.5c-.8 3.6-3 6.4-6.2 7.9"/><path d="M12.5 20.5l4-10 4 10M14 17h5"/>',
 }
 
 export function icon(name, cls) {

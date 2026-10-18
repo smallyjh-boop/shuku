@@ -1136,3 +1136,33 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
 .off-cover .cv { width: 56px; }
 .off-book .t { font-family: var(--serif); font-weight: 600; font-size: 15px; }
 .off-book .m { font-size: 12.5px; color: var(--ink-3); margin: 2px 0 6px; }
+
+/* ---------- 翻译、文字识别 ---------- */
+/* PDF 的翻译对照面板：和阅读设置同一种面板，宽一点；手机上矮一点，上面还能看到书页 */
+.r-trsheet { width: 420px; max-height: calc(100vh - 210px); background: var(--r-bg); } /* 字多，底色不透明，看得清 */
+.r-trsheet .r-sheet-hd .tr-lang { width: auto; max-width: 132px; height: 30px; padding: 0 6px; font-size: calc(13px * var(--ui-scale, 1)); }
+.r-trsheet .tr-body { margin-top: 4px; }
+.r-trsheet .tr-note { margin: 6px 0; font-size: calc(13px * var(--ui-scale, 1)); }
+.tr-pair { padding: 9px 0; border-bottom: 1px solid var(--r-rule); }
+.tr-pair:last-child { border-bottom: 0; }
+.tr-pair .o { font-size: calc(13px * var(--ui-scale, 1)); line-height: 1.6; color: var(--r-dim); }
+.tr-pair .t { margin-top: 3px; font-size: calc(15px * var(--ui-scale, 1)); line-height: 1.7; }
+.tr-pair .t:empty { display: none; }
+.tr-pair .t.muted { font-size: calc(13px * var(--ui-scale, 1)); color: var(--r-dim); }
+.tr-err { margin: 6px 0 10px; font-size: calc(13px * var(--ui-scale, 1)); color: var(--danger); }
+.tr-err .btn { margin-left: 6px; background: transparent; border-color: var(--r-rule); color: inherit; }
+@media (max-width: 899px) {
+  .r-trsheet { width: auto; max-height: 48vh; }
+}
+/* 墨水屏：灰字看不清，原文也用黑色（小一号区分） */
+html.eink .tr-pair .o, html.eink .tr-pair .t.muted { color: #000; }
+html.eink .tr-pair { border-bottom-color: #000; }
+
+/* 扫描版 PDF：识别出的文字铺成透明文字层（每行一个 span，位置、宽度按识别结果） */
+.pdfv .pg .textLayer.ocr span { position: absolute; color: transparent; white-space: pre; line-height: 1; transform-origin: 0 0; cursor: text; }
+.pdfv .pg .textLayer.ocr br { position: absolute; }
+.pdfv .pg .ocr-busy {
+  position: absolute; right: 8px; top: 8px; z-index: 2; padding: 2px 9px; border-radius: 10px;
+  font-size: calc(12px * var(--ui-scale, 1)); line-height: 1.6; color: #fff; background: rgba(0, 0, 0, .55); pointer-events: none;
+}
+html.eink .pdfv .pg .ocr-busy { background: #000; }

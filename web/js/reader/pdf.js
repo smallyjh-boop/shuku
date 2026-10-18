@@ -2,7 +2,7 @@
 // 文字层：能选字（查字典、划线、复制）、书内搜索；划线用浏览器的 CSS 高亮画在文字层上
 
 import { loadPdfjs } from './pdfjs.js'
-import { h, clear, debounce } from '../ui.js'
+import { h, clear, debounce, toast } from '../ui.js'
 import { splitSentences } from './tts.js'
 import { api, auth, net } from '../api.js'
 import { around } from './dict.js'
@@ -11,6 +11,17 @@ let pdfjs = null // 第一次打开 PDF 时加载
 const lib = async () => pdfjs || (pdfjs = await loadPdfjs())
 const VENDOR = '/vendor/pdfjs/'
 const HL_COLORS = ['yellow', 'green', 'blue', 'pink']
+
+// 扫描版（每页都是图片）：pdf.js 读不出字的页，请书库识别（/api/files/{fid}/ocr/{页}），铺一层透明文字。
+// 书库没装文字识别（501）时这次打开书库不再请求，只提示一次
+let ocrMissing = false
+const OCR_MIN = 8 // 一页不到这么多个字（空白不算）就当是扫描的
+const hasText = c => {
+  let n = 0
+  for (const it of (c && c.items) || []) { n += (it.str || '').replace(/\s+/g, '').length; if (n >= OCR_MIN) return true }
+  return false
+}
+const isCJK = ch => /[぀-ヿ㐀-鿿豈-﫿＀-￯]/.test(ch || '')
 
 // PDF 的划线位置：p:页:页内位置:起-止（起止是这一页文字里的第几个字）
 const parseLoc = l => { const m = /^p:(\d+):([\d.]*):(\d+)-(\d+)$/.exec(String(l || '')); return m ? { page: +m[1], off: +m[2] || 0, start: +m[3], end: +m[4] } : null }
@@ -69,6 +80,8 @@ export class Engine {
   constructor(shell) {
     this.shell = shell
     this.texts = new Map() // 页 → Promise<文字内容>
+    this.ocr = new Map() // 页 → Promise<识别结果>（扫描版）
+    this.ocrFailed = new Map() // 页 → 识别失败的时间（一分钟内不再请求）
   }
 
   async open(info, saved) {
@@ -252,6 +265,7 @@ export class Engine {
     el.append(tl)
     const content = await this.textOf(n)
     if (this.rendered.get(n) !== entry) { tl.remove(); return }
+    if (!hasText(content) && this.canOcr()) { await this.renderOcr(n, entry, tl); return }
     entry.text = new pdfjs.TextLayer({ textContentSource: content, container: tl, viewport: page.getViewport({ scale: entry.scale }) })
     await entry.text.render()
     if (this.rendered.get(n) !== entry) return
@@ -271,10 +285,106 @@ export class Engine {
     return this.texts.get(n)
   }
 
-  // 一页的文字（行末补个空格，搜索结果里好看一点）
+  // 一页的文字（行末补个空格，搜索结果里好看一点）。扫描版用识别出的文字
   async pageText(n) {
-    const c = await this.textOf(n)
+    const c = await this.contentOf(n)
     return c.items.map(i => (i.str || '') + (i.hasEOL ? ' ' : '')).join('')
+  }
+
+  // ---------- 扫描版：识别出的文字 ----------
+  canOcr() { return !ocrMissing && !!this.info?.file_id }
+
+  ocrOf(n) {
+    if (!this.ocr.has(n)) {
+      const failed = this.ocrFailed.get(n)
+      if (failed && Date.now() - failed < 60000) return Promise.reject(new Error('识别失败'))
+      const p = api(`/api/files/${this.info.file_id}/ocr/${n}`)
+      p.catch(e => {
+        this.ocr.delete(n)
+        if (e?.status === 501) this.noOcr()
+        else this.ocrFailed.set(n, Date.now())
+      })
+      this.ocr.set(n, p)
+    }
+    return this.ocr.get(n)
+  }
+
+  noOcr() {
+    if (ocrMissing) return
+    ocrMissing = true
+    toast('这个书库没有安装文字识别，扫描版 PDF 选不了字（更新书库后就有）', { duration: 5000 })
+  }
+
+  // 一页的文字内容：pdf.js 读出来的；几乎没有字（扫描版）时用书库识别出的（每行一项）
+  async contentOf(n) {
+    const c = await this.textOf(n)
+    if (hasText(c) || !this.canOcr()) return c
+    const r = await this.ocrOf(n).catch(() => null)
+    if (!r?.lines?.length) return c
+    return { items: r.lines.map(l => ({ str: l.text, hasEOL: true })), ocr: true }
+  }
+
+  // 识别出的文字铺成透明的文字层：每行一个 span，按识别出的位置和宽度摆好（选字、划线、查字典、搜索都用它）
+  async renderOcr(n, entry, tl) {
+    const el = this.pageEls[n - 1]
+    const busy = h('div', { class: 'ocr-busy', role: 'status' }, '正在识别文字…')
+    const t = setTimeout(() => el.append(busy), 500) // 书库已经识别过的话很快，不闪一下
+    let r = null
+    try { r = await this.ocrOf(n) } catch (e) {} finally { clearTimeout(t); busy.remove() }
+    if (this.rendered.get(n) !== entry || !r?.lines?.length) return
+    tl.classList.add('ocr')
+    const H = el.clientHeight, W = el.clientWidth
+    const spans = []
+    for (const line of r.lines) {
+      const s = h('span', null, line.text)
+      s.style.left = (line.x * 100).toFixed(3) + '%'
+      s.style.top = (line.y * 100).toFixed(3) + '%'
+      s.style.fontSize = Math.max(4, line.h * H * 0.9).toFixed(1) + 'px'
+      tl.append(s, h('br', { role: 'presentation' }))
+      spans.push([s, line.w * W])
+    }
+    tl.append(h('div', { class: 'endOfContent' }))
+    // 字体和原书不一样：每行横向拉伸到识别出的宽度，选字的位置才对得上（先量完再改，免得来回排版）
+    const widths = spans.map(([s]) => s.getBoundingClientRect().width)
+    spans.forEach(([s, w], i) => { if (widths[i] > 0 && w > 0) s.style.transform = `scaleX(${(w / widths[i]).toFixed(4)})` })
+    tl.dataset.ready = '1'
+    this.paintHighlights()
+    this.paintSearch()
+    // 下一页也先识别着（扫描版通常整本都是）
+    if (n < this.count) this.textOf(n + 1).then(c => { if (!hasText(c) && this.canOcr()) this.ocrOf(n + 1).catch(() => {}) }).catch(() => {})
+  }
+
+  // ---------- 翻译本页：外壳的对照面板来要这一页的段落 ----------
+  translateKey() { return this.page }
+
+  async translateParas() {
+    const n = this.page
+    const paras = await this.pageParagraphs(n)
+    return { key: n, title: `第 ${n} 页`, paras, scanned: !paras.length && !ocrMissing }
+  }
+
+  // 一页的文字按行拼成段落：行末是句号、问号这类，或者这一行明显比别的行短，就是一段的结尾
+  async pageParagraphs(n) {
+    const c = await this.contentOf(n)
+    const lines = []
+    let cur = ''
+    for (const it of c.items || []) {
+      cur += it.str || ''
+      if (it.hasEOL) { lines.push(cur); cur = '' }
+    }
+    if (cur) lines.push(cur)
+    const clean = lines.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean)
+    const longest = clean.reduce((m, l) => Math.max(m, l.length), 0)
+    const paras = []
+    let p = ''
+    for (const l of clean) {
+      if (!p) p = l
+      else if (/[a-z]-$/i.test(p) && /^[a-z]/.test(l)) p = p.slice(0, -1) + l // 英文行末断开的词
+      else p += (isCJK(p.slice(-1)) && isCJK(l[0]) ? '' : ' ') + l
+      if (/[。！？.!?:：」』”"]$/.test(l) || l.length < longest * 0.6) { paras.push(p); p = '' }
+    }
+    if (p) paras.push(p)
+    return paras.slice(0, 200)
   }
 
   // 内存里最多保留 14 页画布
@@ -469,6 +579,8 @@ export class Engine {
       let found = 0
       for (let p = 1; p <= this.count && found < 300; p++) {
         if (my !== token) return
+        // 关掉了搜索面板：别再往下搜（扫描版要一页页识别文字，很费书库的 CPU）
+        if (!results.isConnected || !this.shell.panel.classList.contains('show')) return
         if (p % 10 === 0) status.textContent = `搜索中 ${Math.round(p / this.count * 100)}%`
         let text
         try { text = await this.pageText(p) } catch { continue }
@@ -507,7 +619,7 @@ export class Engine {
   }
 
   async pageSegments(n) {
-    const tc = await this.textOf(n)
+    const tc = await this.contentOf(n)
     let text = ''
     for (const it of tc.items) { text += it.str; if (it.hasEOL) text += /[。！？.!?：:]$/.test(it.str.trim()) ? '\n' : '' }
     return splitSentences(text).map(s => ({ text: s.text, page: n }))

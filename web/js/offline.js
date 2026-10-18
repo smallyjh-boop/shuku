@@ -91,7 +91,7 @@ async function ensureSW() {
 // 兼容旧系统的那一套网页（window.SHUKU_LEGACY，见 boot.js）：整个网页是一个脚本，PDF 另外两个
 const LEGACY = !!window.SHUKU_LEGACY
 const READER_FILES = LEGACY ? ['/legacy/polyfills.js', '/legacy/app.js', '/legacy/app.css']
-  : ['reader', 'pdfjs', 'flow', 'pdf', 'comic', 'dict', 'notes', 'sync', 'tts'].map(f => `/js/reader/${f}.js`)
+  : ['reader', 'pdfjs', 'flow', 'pdf', 'comic', 'dict', 'notes', 'sync', 'tts', 'translate'].map(f => `/js/reader/${f}.js`)
 const ENGINE_FILES = {
   foliate: LEGACY ? [] : ['view', 'epubcfi', 'progress', 'overlayer', 'text-walker', 'paginator', 'fixed-layout', 'epub', 'search', 'vendor/zip', 'vendor/fflate', 'mobi', 'fb2', 'comic-book']
     .map(f => `/vendor/foliate-js/${f}.js`),

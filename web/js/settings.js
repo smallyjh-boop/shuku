@@ -2,6 +2,7 @@ import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog
 import { api, apiUrl, auth, net } from './api.js'
 import { isNative, call, callJSON, onNative, refreshDownloads } from './native.js'
 import { downloadToPhone } from './library.js'
+import { LANGS } from './reader/translate.js'
 
 const AI_PRESETS = [
   ['', '选择服务商…', '', ''],
@@ -24,7 +25,7 @@ export async function renderSettings(main, ctx) {
   // 家人只看到自己用得上的：外观、账号、设备、手机 App、听书试听、其他阅读器、版本
   const list = ctx.isAdmin
     ? [['app', isNative && appSection(ctx)], ['look', appearance(ctx)], ['account', account(s, ctx)], ['family', family(ctx)], ['network', network(s)], ['devices', devices(s)],
-      ['libs', libraries(s)], ['trash', trashSec(ctx)], ['storage', storageSec(ctx)], ['backup', backupSec(ctx)], ['recognize', recognition(s, ctx)], ['meta', onlineMeta(s, ctx)],
+      ['libs', libraries(s)], ['trash', trashSec(ctx)], ['storage', storageSec(ctx)], ['backup', backupSec(ctx)], ['recognize', recognition(s, ctx)], ['translate', translation(s, ctx)], ['meta', onlineMeta(s, ctx)],
       ['tts', narration(s, ctx)], ['fulltext', fulltextSec(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)], ['about', about(s)]]
     : [['app', isNative && appSection(ctx)], ['look', appearance(ctx)], ['account', account(s, ctx)], ['devices', devices(s)],
       ['tts', narrationMember(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)]]
@@ -214,6 +215,32 @@ function recognition(s, ctx) {
       h('label', { class: 'field' }, h('span', null, '分类'), cats, h('small', null, '一级文件夹按这些分类建立，用顿号分隔。AI 只会从这里面选')),
       h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '定时扫描书库'), h('div', { class: 'h' }, '发现直接放进书库目录的新文件、清理已删除文件的记录')), scanMin),
       h('div', null, h('button', { class: 'btn primary', onclick: saveAll }, '保存'))))
+}
+
+// ---------- 翻译 ----------
+// 阅读器里“翻译本页”用哪个：微软翻译（免费，不用设置）或上面配置的 AI；默认译成哪种语言（各人在阅读器里还能另选）
+function translation(s, ctx) {
+  const t = s.translate || { engine: 'microsoft', to: 'zh-Hans' }
+  const engines = [['microsoft', '微软翻译'], ['ai', 'AI']]
+  let engine = t.engine === 'ai' ? 'ai' : 'microsoft'
+  const seg = h('div', { class: 'seg tr-engine' })
+  const drawSeg = () => fill(seg, ...engines.map(([v, l]) => h('button', { type: 'button', class: engine === v ? 'on' : '', 'aria-pressed': engine === v ? 'true' : 'false', onclick: () => { engine = v; drawSeg() } }, l)))
+  drawSeg()
+  const to = h('select', { class: 'input tr-default', style: { width: 'auto' } }, LANGS.map(([v, l]) => h('option', { value: v, selected: t.to === v }, l)))
+  async function saveIt() {
+    try {
+      const r = await putSettings({ translate: { engine, to: to.value } })
+      ctx.settings = r
+      toast('已保存')
+    } catch (e) { toastError(e) }
+  }
+  const aiOn = !!(s.ai && s.ai.enabled && s.ai.base_url && s.ai.model)
+  return sec('翻译', '阅读时点工具栏的“翻译”，把这一页译成另一种语言，译文和原文对照着看。翻过的段落书库会记下来，同一段不会再花一次翻译。',
+    h('div', { class: 'stack' },
+      h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '用哪个翻译'),
+        h('div', { class: 'h' }, '微软翻译免费、不用设置（书库要能访问微软的翻译服务）；AI 用上面“识别与整理”里配置的 AI，译得更顺，按 AI 的价格收费' + (aiOn ? '' : '。AI 还没配置好时会先用微软翻译'))), seg),
+      h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '默认译成'), h('div', { class: 'h' }, '家人在阅读器里可以另选')), to),
+      h('div', null, h('button', { class: 'btn primary', onclick: saveIt }, '保存'))))
 }
 
 // ---------- 账号 ----------
