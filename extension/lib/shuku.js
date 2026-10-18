@@ -1,5 +1,6 @@
 // 书库插件的公共部分：连接信息、内网 / Tailscale 自动切换、调用书库接口、文件格式判断。
-// 后台（background.js）、弹窗、设置页都用这一份。
+// 后台（background.js）、弹窗、设置页都用这一份；离屏页面（offscreen.js）只用里面的格式判断，
+// 那里只有 chrome.runtime，没有 chrome.storage。
 
 // ---------- 格式 ----------
 
@@ -89,13 +90,19 @@ export function isTailscaleURL(u) {
   } catch { return false }
 }
 
+/** 浏览器给的网络错误是英文（Failed to fetch），换成中文 */
+export function netMessage(e) {
+  const m = String(e?.message || '')
+  return !m || e?.name === 'TypeError' || /failed to fetch|network ?error|load failed/i.test(m) ? '网络不通' : m
+}
+
 export async function fetchT(url, opts = {}, timeout = 15000) {
   const ctl = new AbortController()
   const t = timeout > 0 ? setTimeout(() => ctl.abort(), timeout) : 0
   try {
     return await fetch(url, { cache: 'no-store', ...opts, signal: ctl.signal })
   } catch (e) {
-    throw new Error(e.name === 'AbortError' ? '超时' : (e.message || '网络错误'))
+    throw new Error(e.name === 'AbortError' ? '超时' : netMessage(e))
   } finally {
     clearTimeout(t)
   }
@@ -113,8 +120,8 @@ export async function ping(base, timeout) {
 // ---------- 线路：内网优先，不通走 Tailscale ----------
 
 let route = null // { base, kind: 'lan' | 'remote', at }
-// 设置页改了地址或登录：别的页面（后台、弹窗）也重新选线路
-chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.config) route = null })
+// 设置页改了地址或登录：别的页面（后台、弹窗）也重新选线路（离屏页面里没有 chrome.storage）
+chrome.storage?.onChanged.addListener((ch, area) => { if (area === 'local' && ch.config) route = null })
 
 export async function resolveRoute(force = false) {
   if (!force && route && Date.now() - route.at < 60000) return route
@@ -138,6 +145,17 @@ export async function resolveRoute(force = false) {
 export const routeLabel = r => !r ? '连不上' : r.kind === 'lan' ? '内网' : 'Tailscale'
 
 export class AuthError extends Error {}
+/** 连不上书库（内网和 Tailscale 都不通，或者请求半路断了）：过一会儿可能就好了 */
+export class NetError extends Error {}
+/** 书库拒绝（403）：往书库里加书只有管理员能做，家人账号配对的插件做不了。重试、换一种方式都没用 */
+export class AdminError extends Error {}
+export const ADMIN_ONLY = '只有管理员账号能往书库里加书，请用管理员账号配对插件'
+
+/** 书库说插件的令牌无效：清掉登录状态，让用户重新连接 */
+export async function loginExpired() {
+  await saveConfig({ token: '' })
+  return new AuthError('插件的登录已失效（可能在书库的设备列表里被移除了），请在插件设置里重新连接')
+}
 
 /** 调书库接口。网络出错时重选一次线路再试；令牌失效时清掉登录状态 */
 export async function api(path, { method = 'GET', body, headers = {}, timeout = 30000, json } = {}) {
@@ -150,7 +168,7 @@ export async function api(path, { method = 'GET', body, headers = {}, timeout = 
   let lastErr
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await resolveRoute(attempt > 0)
-    if (!r) throw new Error('连不上书库（内网和 Tailscale 都不通）')
+    if (!r) throw new NetError('连不上书库（内网和 Tailscale 都不通）')
     let res
     try {
       res = await fetchT(r.base + path, { method, body, headers: { Authorization: 'Bearer ' + c.token, ...headers } }, timeout)
@@ -159,17 +177,15 @@ export async function api(path, { method = 'GET', body, headers = {}, timeout = 
       lastErr = e
       continue
     }
-    if (res.status === 401) {
-      await saveConfig({ token: '' })
-      throw new AuthError('插件的登录已失效（可能在书库的设备列表里被移除了），请在插件设置里重新连接')
-    }
+    if (res.status === 401) throw await loginExpired()
+    if (res.status === 403) throw new AdminError(ADMIN_ONLY)
     const text = await res.text()
     let data = null
     try { data = text ? JSON.parse(text) : null } catch {}
-    if (!res.ok) throw new Error(data?.error || `书库返回错误（${res.status}）`)
+    if (!res.ok) throw Object.assign(new Error(data?.error || `书库返回错误（${res.status}）`), { status: res.status })
     return data
   }
-  throw new Error('连不上书库：' + (lastErr?.message || '网络错误'))
+  throw new NetError('连不上书库：' + (lastErr?.message || '网络不通'))
 }
 
 /**
@@ -183,15 +199,20 @@ export async function pair(address, code, password) {
   if (!info) throw new Error(`连不上 ${base}。请检查地址和端口，确认电脑和书库在同一个网络，或者已经打开 Tailscale`)
   const device = deviceName()
   const post = (path, payload) => fetchT(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, 15000)
-  const res = code ? await post('/api/pair/claim', { code: code.trim(), device }) : await post('/api/auth/login', { Password: password, Device: device })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `连接失败（${res.status}）`)
-  let srv = data
-  if (!('lan_url' in data)) {
-    // 密码登录只返回令牌，再取一次书库信息
-    const r2 = await fetchT(base + '/api/info', { headers: { Authorization: 'Bearer ' + data.token } }, 10000)
-    srv = { ...(await r2.json().catch(() => ({}))), token: data.token }
+  let res, data, srv
+  try {
+    res = code ? await post('/api/pair/claim', { code: code.trim(), device }) : await post('/api/auth/login', { Password: password, Device: device })
+    data = await res.json().catch(() => ({}))
+    if (res.ok && !('lan_url' in data)) {
+      // 密码登录只返回令牌，再取一次书库信息
+      const r2 = await fetchT(base + '/api/info', { headers: { Authorization: 'Bearer ' + data.token } }, 10000)
+      srv = { ...(await r2.json().catch(() => ({}))), token: data.token }
+    }
+  } catch (e) {
+    throw new Error(`连接 ${base} 失败：${e.message}`)
   }
+  if (!res.ok) throw new Error(data.error || `连接失败（${res.status}）`)
+  srv ||= data
   let lan = norm(srv.lan_url), remote = norm(srv.remote_url)
   // 书库没设置地址时，按用户填的地址归类
   if (base !== lan && base !== remote) {

@@ -280,8 +280,8 @@ function statusText(t) {
   switch (t.status) {
     case 'queued': return '排队中'
     case 'downloading': return '浏览器下载中' + pct
-    case 'uploading': return '正在传到书库'
-    case 'fetching': return '书库正在下载' + pct
+    case 'uploading': return '正在传到书库' + pct
+    case 'fetching': return (t.jobStatus === 'queued' ? '书库排队中' : '书库正在下载') + pct
     case 'done': return (t.mode === 'nas' ? '书库已下载' : '已传到书库') + '，正在整理入库'
     case 'error': return t.error || '失败'
   }
@@ -299,16 +299,21 @@ function renderTasks(list) {
     const name = t.name || t.title || decodeURIComponent((t.url.split('?')[0].split('/').pop() || t.url))
     const acts = h('span', { class: 't-acts' })
     if (active) acts.append(h('button', { class: 'link muted', type: 'button', onclick: () => chrome.runtime.sendMessage({ type: 'cancel', id: t.id }) }, '取消'))
-    if (t.status === 'error') {
+    if (t.status === 'error' && t.admin) {
+      // 家人账号配对的插件不能往书库里加书：重试没用，去设置里用管理员账号重新配对
+      acts.append(h('button', { class: 'link', type: 'button', onclick: () => chrome.runtime.openOptionsPage() }, '重新配对'))
+    } else if (t.status === 'error') {
       acts.append(h('button', { class: 'link', type: 'button', onclick: () => chrome.runtime.sendMessage({ type: 'retry', id: t.id }) }, '重试'))
       if (t.mode !== 'nas' && !t.url.startsWith('ia:')) acts.append(h('button', { class: 'link', type: 'button', title: '让书库自己去下载这个链接', onclick: () => chrome.runtime.sendMessage({ type: 'retry', id: t.id, mode: 'nas' }) }, '让书库下载'))
       else if (t.mode === 'nas' && !t.url.startsWith('ia:')) acts.append(h('button', { class: 'link', type: 'button', title: '用浏览器下载后传到书库', onclick: () => chrome.runtime.sendMessage({ type: 'retry', id: t.id, mode: 'browser' }) }, '用浏览器下载'))
     }
-    const li = h('li', { class: 'task ' + (active ? 'active' : t.status) },
+    // 进行中的任务后面加上说明：连不上书库正在等、改用了另一种方式
+    const extra = active ? [t.wait, t.note].filter(Boolean).join('；') : ''
+    const li = h('li', { class: 'task ' + (active ? 'active' : t.status) + (active && t.wait ? ' wait' : '') },
       h('div', { class: 't-name', title: t.url }, name),
-      h('div', { class: 't-line' }, h('span', { class: 's' }, statusText(t) + (t.note && active ? `（${t.note}）` : '')), acts))
+      h('div', { class: 't-line' }, h('span', { class: 's' }, statusText(t) + (extra ? `（${extra}）` : '')), acts))
     if (active) {
-      const known = t.total && (t.status === 'downloading' || t.status === 'fetching')
+      const known = t.total && t.status !== 'queued'
       const bar = h('div', { class: 't-bar' + (known ? '' : ' busy') }, h('i', { style: known ? `width:${Math.min(100, (t.bytes / t.total) * 100).toFixed(1)}%` : '' }))
       li.append(bar)
     }

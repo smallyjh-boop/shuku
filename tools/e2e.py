@@ -180,19 +180,66 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(404, "not found", "text/plain")
         self.send(404, {"error": "no route " + p})
 
+    def do_HEAD(self):
+        """浏览器插件用 HEAD 问文件大小（判断不用登录能不能下载）：照 GET 回应，只发响应头"""
+        real = self.wfile
+
+        class HeadersOnly:
+            sent = False
+
+            def write(self, b):
+                if not self.sent:  # 第一次写的是响应头，后面的正文丢掉
+                    self.sent = True
+                    return real.write(b)
+                return len(b)
+
+            def flush(self):
+                real.flush()
+
+        self.wfile = HeadersOnly()
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = real
+
     def ext_site(self, host, p, q):
         """浏览器插件测试用的网站：一个普通的电子书小站 + 几个公开书库的书页"""
-        EXT_LOG.append((host, p, self.headers.get("Referer", "")))
+        EXT_LOG.append((host, p, self.headers.get("Referer", ""), self.headers.get("Cookie", "")))
 
         def page(body, title=""):
             return self.send(200, f"<!doctype html><html><head><meta charset='utf-8'><title>{title}</title></head><body>{body}</body></html>", "text/html; charset=utf-8")
 
-        def epub(fname, title, author, ctype="application/epub+zip", cd=True):
+        def epub_file(fname, title, author, pad=0):
             f = os.path.join(T, "remote", "ext-" + fname)
             if not os.path.exists(f):
                 make_epub(f, title, author, [("第一章", [f"{title}的正文。" * 30])])
+                if pad:  # 大文件：塞一段随机数据（EPUB 里多一个文件不影响识别）
+                    with zipfile.ZipFile(f, "a") as z:
+                        z.writestr("pad.bin", os.urandom(pad))
+            return f
+
+        def epub(fname, title, author, ctype="application/epub+zip", cd=True, pad=0):
+            f = epub_file(fname, title, author, pad)
             hd = {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(fname)} if cd else {}
             return self.send(200, open(f, "rb").read(), ctype, hd)
+
+        def trickle(data, seconds, total=None, stop_after=None):
+            """慢慢发：分 40 段在 seconds 秒内发完；stop_after：发这么多字节后就不再发（模拟卡住的网站）"""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/epub+zip")
+            self.send_header("Content-Length", str(total or len(data)))
+            self.end_headers()
+            step = len(data) // 40 + 1
+            try:
+                for i in range(0, len(data), step):
+                    if stop_after is not None and i >= stop_after:
+                        time.sleep(seconds)
+                        return
+                    self.wfile.write(data[i:i + step])
+                    self.wfile.flush()
+                    time.sleep(seconds / 40)
+            except OSError:
+                pass
 
         if host == "www.gutenberg.org":
             if p == "/ebooks/1342":
@@ -254,6 +301,20 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, "<!doctype html><html><body>请先登录</body></html>", "text/html; charset=utf-8")
         if p == "/dl/disguised.epub":  # 类型写的是文件，内容其实是网页
             return self.send(200, "\n  <!DOCTYPE html><html><body>下载次数用完了</body></html>", "application/octet-stream")
+        # 大文件（插件测试里把“大”调成 1MB）：公开的、要登录（Cookie）的
+        if p == "/dl/big-public.epub":
+            return epub("big-public.epub", "公开的大部头", "无名氏", pad=1_500_000)
+        if p == "/protected/big-member.epub":
+            if "member=1" not in self.headers.get("Cookie", ""):
+                return self.send(403, "forbidden", "text/plain")
+            return epub("big-member.epub", "会员的大部头", "无名氏", pad=1_500_000)
+        # 慢慢下载的书（下载途中停掉插件后台、断开书库再连上）；下到一半就卡住的书
+        if p == "/dl/slow-book.epub":
+            return trickle(open(epub_file("slow-book.epub", "后台停了也能下完的书", "无名氏", pad=400_000), "rb").read(), 6)
+        if p == "/dl/slow-nas.epub":
+            return trickle(open(epub_file("slow-nas.epub", "断网后接着查的书", "无名氏", pad=400_000), "rb").read(), 6)
+        if p == "/dl/stuck.epub":
+            return trickle(os.urandom(400_000), 20, total=1_000_000, stop_after=10_000)
         return self.send(404, "not found", "text/plain")
 
     def opds(self, p, q):
@@ -1496,6 +1557,7 @@ def ext_tests():
             check("插件装好，后台启动", sw.url.endswith("/background.js"))
             ev = lambda js: sw.evaluate(js)
             tasks = lambda: ev("async () => (await chrome.storage.session.get('tasks')).tasks || []")
+            offscreens = lambda: ev("async () => (await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length")
 
             def watch(pg, label):
                 pg.on("pageerror", lambda e: errors.append(f"[{label}] {e}"))
@@ -1504,6 +1566,13 @@ def ext_tests():
                 # 探测不通的 Tailscale 地址（前面的测试设成了 nas.example.ts.net）是正常的
                 pg.on("requestfailed", lambda r: r.url.endswith("/api/ping") or errors.append(f"[{label}] 请求失败 {r.url} {r.failure}"))
                 return pg
+
+            # 插件装好时会自己打开设置页：等它开出来再往下走。不然它正好撞上下面打开的设置页，
+            # 浏览器会把那个标签页重新打开一次，正在加载的页面和脚本被中止（ERR_ABORTED）
+            try:
+                wait(lambda: any(pg.url.endswith("/options.html") for pg in ctx.pages), 5, 0.1, "插件自己打开设置页")
+            except TimeoutError:
+                pass
 
             # ---- 配对 ----
             opt = watch(ctx.new_page(), "options")
@@ -1570,6 +1639,7 @@ def ext_tests():
             pop.click("#add")
             pop.wait_for_selector("#add >> text=已开始加入 6 个文件", timeout=5000)
             ts = wait_tasks(6)
+            check("浏览器下载、上传在离屏页面里做（后台里不做长时间的请求）", offscreens() == 1)
             st = {(t.get("name") or t["url"].split("/")[-1]): (t["status"], t.get("error", "")) for t in ts}
             check("加入：浏览器下载后上传（带 Content-Disposition 的中文名）", st.get("海底两万里.epub", ("",))[0] == "done", st)
             check("加入：普通链接", st.get("alice.epub", ("",))[0] == "done", st)
@@ -1631,6 +1701,95 @@ def ext_tests():
             tab, pop = popup_for("about:blank", "blank")
             check("浏览器自带页面：提示读不到", "浏览器自带的页面" in pop.inner_text("#main"))
             pop.close(); tab.close()
+
+            # ---- 大文件、书库任务的时限、后台被停掉（插件里的时间用 globalThis.shukuTune 调短） ----
+            def add_items(*items):
+                return opt.evaluate("([items, page]) => chrome.runtime.sendMessage({ type: 'add', items, page })", [list(items), {"url": MOCK + "/shop/list.html", "title": "电子书小站"}])
+
+            def task_of(url, pred, timeout, what, read=None):
+                return wait(lambda: (lambda t: t if t and pred(t) else None)(next((x for x in (read or tasks)() if x["url"] == url), None)), timeout, 0.3, what)
+
+            def set_config(**patch):
+                ev(f"async () => {{ const {{ config }} = await chrome.storage.local.get('config'); await chrome.storage.local.set({{ config: {{ ...config, ...{json.dumps(patch)} }} }}) }}")
+
+            def tune(**kw):
+                ev(f"() => {{ globalThis.shukuTune = {json.dumps(kw)} }}")
+
+            ended = lambda t: t["status"] in ("done", "error")
+            tune(big=1024 * 1024, idle=1000)
+            big = MOCK + "/dl/big-public.epub"
+            add_items({"url": big, "fmt": "epub", "file": "big-public.epub", "title": "公开的大部头"})
+            t = task_of(big, ended, 60, "大文件交给书库")
+            check("大文件、不用登录也能下载：自动改让书库下载", t["status"] == "done" and t.get("mode") == "nas" and t.get("triedNas") and "改让书库直接下载" in t.get("note", ""), t)
+            check("大文件：书库里有插件交来的下载任务", any(x["url"] == big and x.get("source") == "浏览器插件" for x in j("GET", "/api/fetch")))
+            check("大文件：入库", wait(lambda: book_by_title("公开的大部头"), 40, 1, "大文件入库"))
+
+            ctx.add_cookies([{"name": "member", "value": "1", "url": MOCK}])
+            mem = MOCK + "/protected/big-member.epub"
+            add_items({"url": mem, "fmt": "epub", "file": "big-member.epub", "title": "会员的大部头"})
+            t = task_of(mem, ended, 60, "要登录的大文件")
+            check("大文件、要登录才能下载：还是浏览器下载（带着登录状态）后上传", t["status"] == "done" and t.get("mode") == "browser" and not t.get("triedNas"), t)
+            hits = [e for e in EXT_LOG if e[1] == "/protected/big-member.epub"]
+            check("要登录的大文件：不带登录状态试过一次，没有交给书库", any("member=1" in e[3] for e in hits) and any("member=1" not in e[3] for e in hits)
+                  and not any(x["url"] == mem for x in j("GET", "/api/fetch")), hits)
+            check("要登录的大文件：入库", wait(lambda: book_by_title("会员的大部头"), 40, 1, "要登录的大文件入库"))
+            check("离屏页面闲下来就关掉", wait(lambda: offscreens() == 0, 10, 0.3, "关掉离屏页面"))
+
+            set_config(mode="nas")
+            tune(stall=4000)
+            stuck = MOCK + "/dl/stuck.epub"
+            add_items({"url": stuck, "fmt": "epub", "file": "stuck.epub", "title": "卡住的书"})
+            t = task_of(stuck, ended, 40, "书库那边卡住的任务")
+            check("书库那边没有进展：插件不再等，说明原因", t["status"] == "error" and "没有进展" in t["error"] and "取消" in t["error"], t)
+            check("书库那边没有进展：书库里的任务也取消了", wait(lambda: not any(x["url"] == stuck for x in j("GET", "/api/fetch")), 10, 0.5, "取消书库任务"))
+            check("没有任务时不再定时叫醒后台", wait(lambda: ev("async () => !(await chrome.alarms.get('watch'))"), 5, 0.3, "定时器"))
+
+            tune(retry=[500, 500], stall=120000)
+            slow = MOCK + "/dl/slow-nas.epub"
+            add_items({"url": slow, "fmt": "epub", "file": "slow-nas.epub", "title": "断网后接着查的书"})
+            task_of(slow, lambda t: t["status"] == "fetching" and t.get("jobId"), 15, "交给书库")
+            cfg = ev("async () => (await chrome.storage.local.get('config')).config")
+            set_config(lan="http://127.0.0.1:9", remote="")
+            t = task_of(slow, lambda t: t.get("parked"), 30, "连不上书库时停下来")
+            check("连不上书库：隔几秒再查，还连不上就停下来、每分钟查一次", t["status"] == "fetching" and "连不上书库" in t.get("wait", ""), t)
+            check("连不上书库：有定时器叫醒后台", ev("async () => !!(await chrome.alarms.get('watch'))"))
+            wp = watch(ctx.new_page(), "wait-popup")
+            wp.set_viewport_size({"width": 380, "height": 600})
+            wp.goto(f"chrome-extension://{ext}/popup.html")
+            wp.wait_for_selector(".task.wait", timeout=5000)
+            check("弹窗：显示连不上书库、正在等", "连不上书库" in wp.inner_text(".task.wait"), wp.inner_text("#tasks"))
+            wp.screenshot(path=os.path.join(SHOTS, "34-ext-popup-waiting.png"))
+            wp.close()
+            set_config(lan=cfg["lan"], remote=cfg.get("remote", ""))
+            ev("() => chrome.alarms.create('watch', { when: Date.now() + 200, periodInMinutes: 1 })")  # 不等一分钟，马上叫醒
+            t = task_of(slow, ended, 40, "连上后接着查")
+            check("书库又能连上：接着查进度，下载完成", t["status"] == "done" and not t.get("wait"), t)
+            check("断网后接着查的书：入库", wait(lambda: book_by_title("断网后接着查的书"), 40, 1, "断网后接着查的书入库"))
+            set_config(mode="auto")
+            ev("() => { delete globalThis.shukuTune }")
+
+            # 后台（service worker）在下载途中被浏览器停掉：离屏页面接着下载、上传，后台被它的消息叫醒后接着记进度
+            slowb = MOCK + "/dl/slow-book.epub"
+            add_items({"url": slowb, "fmt": "epub", "file": "slow-book.epub", "title": "后台停了也能下完的书"})
+            task_of(slowb, lambda t: t["status"] == "downloading" and t.get("bytes", 0) > 0, 15, "开始下载")
+            si = ctx.new_page()
+            si.goto("chrome://serviceworker-internals/")
+            si.locator("button[data-command=stop]").first.click()
+            si.close()
+            stopped = False
+            for _ in range(50):
+                try:
+                    sw.evaluate("() => 1")
+                except Exception:
+                    stopped = True
+                    break
+                time.sleep(0.2)
+            # 后台重启后 Playwright 拿不到新的后台，之后从设置页读插件的状态
+            ev = lambda js: opt.evaluate(js)
+            mid = task_of(slowb, lambda t: True, 5, "后台停掉时的任务")
+            t = task_of(slowb, ended, 40, "后台停掉后下载完")
+            check("后台在下载途中被停掉：离屏页面接着下载、上传，后台醒来接着记进度", stopped and mid["status"] in ("downloading", "uploading") and t["status"] == "done" and t.get("mode") == "browser", (stopped, mid["status"], t))
+            check("后台被停掉的那本书：入库", wait(lambda: book_by_title("后台停了也能下完的书"), 40, 1, "后台被停掉的那本书入库"))
 
             # ---- 设置：加入方式、断开 ----
             opt.click("input[name=mode][value=nas]")

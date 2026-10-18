@@ -136,6 +136,7 @@ body.popup { width: 380px; min-height: 220px; max-height: 590px; display: flex; 
 .task .t-line .s { flex: 1; min-width: 0; }
 .task.done .t-line .s { color: var(--ok); }
 .task.error .t-line .s { color: var(--danger); word-break: break-word; }
+.task.wait .t-line .s { color: var(--warn); }
 .task .t-acts { display: inline-flex; gap: 10px; flex: none; }
 .task .t-bar { height: 3px; border-radius: 2px; background: var(--sunken); margin-top: 5px; overflow: hidden; }
 .task .t-bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
