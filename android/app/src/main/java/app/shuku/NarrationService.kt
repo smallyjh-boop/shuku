@@ -102,6 +102,13 @@ class NarrationService : Service() {
     private var feedGen = 0           // 换书、重新开始时作废还在取的
     private val needWatch = Runnable { if (needSent && playing && !ended && !feed) startFeed("网页没有回应") }
 
+    // 合成失败（熄屏后断网、网络受限）：先等一等再试，不马上改用手机语音、更不暂停
+    private var netFails = 0
+    private var deviceBroken = false  // 手机没有可用的语音引擎（墨水屏常见）：只能等网络
+    // 一句合成了 8 秒还没好：在通知栏、锁屏上说明（多半是熄屏后手机限制了联网）
+    private val slowTask = Runnable { if (playing && status == "合成中…") { status = "等待网络…"; publish() } }
+    private val retryTask = Runnable { if (playing) { synchronized(audioJobs) { queue.getOrNull(index)?.let { audioJobs.remove(it.id) } }; playCurrent() } }
+
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var utterance: String? = null
@@ -275,13 +282,14 @@ class NarrationService : Service() {
         askMore()
         if (useDevice) return speakDevice(seg)
         val job = audioFor(seg)
-        if (!job.isDone) { status = "合成中…"; publish() }
+        if (!job.isDone) { status = "合成中…"; publish(); handler.removeCallbacks(slowTask); handler.postDelayed(slowTask, 8000) }
         prefetch()
         pool.execute {
             val file = try { job.get() } catch (e: Exception) { null }
             handler.post {
                 if (queue.getOrNull(index)?.id != seg.id || !playing) return@post
-                if (file == null) fallback("书库语音合成失败") else startPlayer(seg, file)
+                handler.removeCallbacks(slowTask)
+                if (file == null) synthFailed() else { netFails = 0; startPlayer(seg, file) }
             }
         }
     }
@@ -324,18 +332,18 @@ class NarrationService : Service() {
         }
     }
 
-    // 预先合成后面两句，避免句子之间停顿
+    // 预先合成后面三十句（三五分钟）：句子之间不停顿；有的手机熄屏后限制后台联网，手上有存货就接得上，亮屏时再补
     private fun prefetch() {
-        for (k in 1..2) queue.getOrNull(index + k)?.let { audioFor(it) }
+        for (k in 1..PREFETCH) queue.getOrNull(index + k)?.let { audioFor(it) }
         synchronized(audioJobs) {
-            val keep = (index - 2..index + 3).mapNotNull { queue.getOrNull(it)?.id }.toSet()
+            val keep = (index - 2..index + PREFETCH + 1).mapNotNull { queue.getOrNull(it)?.id }.toSet()
             audioJobs.keys.filter { it !in keep }.forEach { audioJobs.remove(it)?.cancel(false) }
         }
     }
 
     /** 快读完手上的句子时向网页要下一段。网页没了（App 被划掉、网页重建过）就不要了，读完手上的就停 */
     private fun askMore() {
-        if (ended || queue.size - index > 6) return
+        if (ended || queue.size - index > PREFETCH + 6) return
         if (feed) { feedMore(); return }
         if (needSent || !webAlive()) return
         needSent = true
@@ -394,7 +402,7 @@ class NarrationService : Service() {
 
     /** 快读完了：取下一章 */
     private fun feedMore() {
-        if (feedBusy || ended || queue.size - index > 6) return
+        if (feedBusy || ended || queue.size - index > PREFETCH + 6) return
         if (feedNext < 0 || feedNext >= feedChapters.length()) { ended = true; if (waitingMore) stop("全书读完了"); return }
         val id = book.optInt("id")
         val i = feedNext
@@ -523,6 +531,7 @@ class NarrationService : Service() {
         tts?.stop()
         feedGen++
         handler.removeCallbacks(needWatch)
+        handler.removeCallbacks(retryTask)
         handler.removeCallbacks(timerTask)
         timerMin = 0
         session.isActive = false
@@ -543,8 +552,28 @@ class NarrationService : Service() {
         playerSeg = null
     }
 
+    /**
+     * 这一句没合成出来：多半是熄屏后网络断了一下（墨水屏关屏会关 WiFi、手机省电限制后台联网）。
+     * 先重新找一下书库的地址（内网 / Tailscale），隔几秒再试；试了一分半钟还不行才改用手机自带语音。
+     * 手机没有语音引擎时一直等网络（每 30 秒试一次），不暂停
+     */
+    private fun synthFailed() {
+        netFails++
+        if (netFails > RETRIES.size && !deviceBroken) { netFails = 0; fallback("连不上书库"); return }
+        // 等了十来分钟还是连不上：暂停（省电），网络好了点播放接着读
+        if (netFails > 25) { netFails = 0; pause(); status = "连不上书库，已暂停"; publish(); return }
+        status = "等待网络…"
+        publish()
+        acquireLocks()
+        val delay = RETRIES.getOrElse(netFails - 1) { 30_000L }
+        Thread { try { app.link.probe() } catch (e: Exception) {} }.start()
+        handler.removeCallbacks(retryTask)
+        handler.postDelayed(retryTask, delay)
+    }
+
     /** 书库语音不可用（NAS 连不上微软、断网）时改用手机自带语音 */
     private fun fallback(why: String) {
+        if (deviceBroken) { synthFailed(); return }
         if (useDevice) { pause(); return }
         useDevice = true
         Events.emit("tts", JSONObject().put("type", "error").put("message", "$why，已改用手机自带语音"))
@@ -624,8 +653,16 @@ class NarrationService : Service() {
                 handler.post {
                     ttsReady = st == TextToSpeech.SUCCESS
                     if (!ttsReady) {
-                        Events.emit("tts", JSONObject().put("type", "error").put("message", "手机没有可用的语音引擎，请在系统设置里安装“Google 文字转语音”等"))
-                        pause()
+                        tts = null
+                        if (app.config.str("tts_engine", "server") != "device") {
+                            // 是因为连不上书库才换过来的：没有手机语音就等网络，接着用书库语音
+                            deviceBroken = true
+                            useDevice = false
+                            synthFailed()
+                        } else {
+                            Events.emit("tts", JSONObject().put("type", "error").put("message", "手机没有可用的语音引擎，请在系统设置里安装“Google 文字转语音”等"))
+                            pause()
+                        }
                     } else {
                         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                             override fun onStart(id: String?) {}
@@ -849,6 +886,8 @@ class NarrationService : Service() {
         @Volatile var instance: NarrationService? = null
             private set
         private val pending = ConcurrentLinkedQueue<Pair<String, String>>()
+        private const val PREFETCH = 30
+        private val RETRIES = listOf(3_000L, 5_000L, 10_000L, 20_000L, 30_000L, 30_000L)
         private const val NOTIF_ID = 7
         private const val NOTIF_STOPPED = 8
         const val ACT_PLAY = "app.shuku.PLAY"

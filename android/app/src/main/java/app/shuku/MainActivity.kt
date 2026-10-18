@@ -431,7 +431,24 @@ class MainActivity : Activity() {
     fun askNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
+            return
         }
+        askIgnoreBatteryOnce()
+    }
+
+    /**
+     * 听书时请用户允许书库“不受电池优化限制”（只问一次）：不然熄屏一会儿系统就限制它联网、
+     * 有的手机还会把后台服务停掉，听着听着就没声了
+     */
+    private fun askIgnoreBatteryOnce() {
+        val pm = getSystemService(android.os.PowerManager::class.java) ?: return
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        val sp = getSharedPreferences("narration", MODE_PRIVATE)
+        if (sp.getBoolean("asked_battery", false)) return
+        sp.edit().putBoolean("asked_battery", true).apply()
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (e: Exception) {}
     }
 
     /** 列出手机自带语音的音色用（第一次调用时初始化，下一次才有结果） */
