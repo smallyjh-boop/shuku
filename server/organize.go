@@ -443,7 +443,8 @@ type OpBatch struct {
 }
 
 func listBatches(limit int) []OpBatch {
-	rows, err := db.Query(`SELECT batch,MAX(label),COUNT(*),MIN(undone),MAX(created_at),MAX(to_path) FROM ops GROUP BY batch ORDER BY MAX(id) DESC LIMIT ?`, limit)
+	// 只改了书目信息（没移动文件）的那一条是空路径，不算文件数
+	rows, err := db.Query(`SELECT batch,MAX(label),SUM(from_path<>''),MIN(undone),MAX(created_at),MAX(to_path) FROM ops GROUP BY batch ORDER BY MAX(id) DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}

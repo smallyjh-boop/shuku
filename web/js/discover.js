@@ -258,8 +258,15 @@ function jobPanel() {
       const st = j.status === 'done' ? '已下载，正在入库' : j.status === 'error' ? '失败' : j.status === 'queued' ? '排队中' : j.total > 0 ? Math.round(j.bytes / j.total * 100) + '%' : fmtBytes(j.bytes)
       let name = j.name
       if (!name) { try { name = decodeURIComponent(j.url.split('/').pop() || j.url) } catch { name = j.url } }
+      const active = j.status === 'queued' || j.status === 'downloading'
+      // 下载中、排队的能取消；完成、失败的点 × 从列表里去掉
+      const x = h('button', { class: 'icon-btn tiny', type: 'button', title: active ? '取消下载' : '从列表去掉', 'aria-label': (active ? '取消下载：' : '从列表去掉：') + name, onclick: async e => {
+        e.currentTarget.disabled = true
+        try { await api('/api/fetch/' + encodeURIComponent(j.id), { method: 'DELETE' }); if (active) toast('已取消下载：' + name) } catch (err) { toastError(err) }
+        poll(true)
+      } }, icon('close'))
       return h('li', { class: j.status === 'done' ? 'ok' : j.status === 'error' ? 'err' : '' },
-        h('div', { class: 'n' }, h('span', { title: j.url }, name), h('span', { class: 's' }, st)),
+        h('div', { class: 'n' }, h('span', { title: j.url }, name), h('span', { class: 's' }, st), x),
         j.status === 'error' ? h('div', { class: 'e' }, j.error) : null,
         j.status === 'downloading' && j.total > 0 ? h('div', { class: 'bar' }, h('i', { style: { width: Math.round(j.bytes / j.total * 100) + '%' } })) : null)
     }))

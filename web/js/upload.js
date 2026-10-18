@@ -14,7 +14,8 @@ export function initUploads(ctx) {
   const veil = h('div', { class: 'drop-veil' }, h('div', null, h('b', null, '松开即可加入书库'), h('span', null, '支持整个文件夹。书名、作者、分类会自动整理')))
   document.body.append(veil)
   let depth = 0
-  const inReader = () => !!document.querySelector('.reader')
+  // 家人不能往书库里加书：拖进来也不接
+  const inReader = () => !!document.querySelector('.reader') || ctxRef?.isAdmin === false
   const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files')
   addEventListener('dragenter', e => { if (!hasFiles(e) || inReader()) return; e.preventDefault(); depth++; veil.classList.add('show') })
   addEventListener('dragleave', e => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) veil.classList.remove('show') })

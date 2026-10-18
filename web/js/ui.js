@@ -81,6 +81,18 @@ const P = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>',
   offline: '<path d="M3 3l18 18"/><path d="M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 3.4-2.2M19 13a10 10 0 0 0-5-2.8"/><circle cx="12" cy="20" r="1"/>',
   stack: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.3 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z"/>',
+  star: '<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9-4.3-4.1 5.9-.8z"/>',
+  select: '<rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M8 12.5l3 3 5-6"/>',
+  notes: '<path d="M5 3.5h10l4 4V20.5H5z"/><path d="M15 3.5v4h4M8.5 12h7M8.5 16h5"/>',
+  users: '<circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/>',
+  database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v13c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-13M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"/>',
+  archive: '<rect x="3" y="4" width="18" height="4.5" rx="1"/><path d="M4.5 8.5V20h15V8.5M10 12.5h4"/>',
+  more: '<circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/>',
+  image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-5-5-8.5 8.5"/>',
+  hdd: '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M5 13l2.5-8h9L19 13M7 16.5h.01M10.5 16.5h.01"/>',
+  tag: '<path d="M3.5 12.5V4.5a1 1 0 0 1 1-1h8l8 8-9 9z"/><circle cx="8.5" cy="8.5" r="1.5"/>',
+  saved: '<path d="M6 3.5h12V21l-6-4.5L6 21z"/><path d="M9 9.5l2 2 4-4"/>',
 }
 
 export function icon(name, cls) {
@@ -135,6 +147,107 @@ export function confirmDialog({ title, message, ok = '确定', cancel = '取消'
     requestAnimationFrame(() => { scrim.classList.add('show'); dlg.classList.add('show'); okBtn.focus() })
   })
 }
+
+// 填几项再确定：fields = [{ key, label, type: 'text'|'number'|'password'|'select'|'checks', value, options: [[值, 文字]], placeholder, hint }]
+// 返回 { key: 值 }，取消时返回 null。checks 的值是选中的值数组
+export function formDialog({ title, message, fields = [], ok = '确定', cancel = '取消', danger, validate }) {
+  return new Promise(resolve => {
+    const scrim = h('div', { class: 'scrim', style: { zIndex: 70 } })
+    const inputs = {}
+    const err = h('p', { class: 'err', role: 'alert' })
+    const close = v => {
+      scrim.classList.remove('show'); dlg.classList.remove('show')
+      setTimeout(() => { scrim.remove(); dlg.remove() }, 200)
+      document.removeEventListener('keydown', onKey)
+      resolve(v)
+    }
+    const values = () => Object.fromEntries(Object.entries(inputs).map(([k, el]) =>
+      [k, Array.isArray(el) ? el.filter(c => c.checked).map(c => c.value) : el.value]))
+    const rows = fields.map(f => {
+      if (f.type === 'checks') {
+        inputs[f.key] = (f.options || []).map(([v, l]) => h('input', { type: 'checkbox', value: v, checked: (f.value || []).map(String).includes(String(v)) }))
+        return h('div', { class: 'field' }, h('span', null, f.label),
+          h('div', { class: 'checks' }, inputs[f.key].map((c, i) => h('label', { class: 'check' }, c, h('span', null, f.options[i][1])))),
+          f.hint ? h('small', null, f.hint) : null)
+      }
+      const el = f.type === 'select'
+        ? h('select', { class: 'input' }, (f.options || []).map(([v, l]) => h('option', { value: v, selected: String(v) === String(f.value ?? '') }, l)))
+        : h('input', { class: 'input', type: f.type || 'text', value: f.value ?? '', placeholder: f.placeholder || '', autocomplete: f.type === 'password' ? 'new-password' : 'off', step: f.type === 'number' ? 'any' : null, min: f.min ?? null })
+      inputs[f.key] = el
+      return h('label', { class: 'field' }, h('span', null, f.label), el, f.hint ? h('small', null, f.hint) : null)
+    })
+    const okBtn = h('button', { class: 'btn ' + (danger ? 'danger' : 'primary'), type: 'submit' }, ok)
+    const form = h('form', { class: 'stack', style: { gap: '14px' } }, rows, err,
+      h('div', { class: 'row' }, h('button', { class: 'btn quiet', type: 'button', onclick: () => close(null) }, cancel), okBtn))
+    form.onsubmit = e => {
+      e.preventDefault()
+      const v = values()
+      const msg = validate?.(v)
+      if (msg) { err.textContent = msg; return }
+      close(v)
+    }
+    const dlg = h('div', { class: 'dialog form-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('h3', null, title), message ? h('p', null, message) : null, form)
+    const onKey = e => { if (e.key === 'Escape') close(null) }
+    scrim.onclick = () => close(null)
+    document.addEventListener('keydown', onKey)
+    document.body.append(scrim, dlg)
+    requestAnimationFrame(() => {
+      scrim.classList.add('show'); dlg.classList.add('show')
+      const first = dlg.querySelector('input:not([type=checkbox]), select')
+      ;(first || okBtn).focus()
+    })
+  })
+}
+
+// ---------- 弹出菜单（右键、长按） ----------
+// items: [{ label, icon, run, danger, disabled }] 或 null（分隔线）或现成的元素。
+// 有鼠标时在点击的位置弹出；手机上从底部弹出
+let menuClose = null
+export function openMenu(items, { x, y, title, above } = {}) {
+  menuClose?.()
+  const sheet = matchMedia('(hover: none), (max-width: 599px)').matches || x == null
+  const scrim = h('div', { class: 'menu-scrim' + (sheet ? ' sheet' : '') })
+  const menu = h('div', { class: 'ctx-menu' + (sheet ? ' sheet' : ''), role: 'menu', 'aria-label': title || '菜单' })
+  if (title) menu.append(h('div', { class: 'ctx-title' }, title))
+  for (const it of items) {
+    if (!it) { menu.append(h('div', { class: 'ctx-sep', role: 'separator' })); continue }
+    if (it instanceof Node) { menu.append(it); continue }
+    menu.append(h('button', {
+      type: 'button', role: 'menuitem', class: it.danger ? 'danger' : null, disabled: it.disabled,
+      onclick: () => { close(); it.run?.() },
+    }, it.icon ? icon(it.icon) : null, h('span', null, it.label)))
+  }
+  const close = () => {
+    if (menuClose !== close) return
+    menuClose = null
+    document.removeEventListener('keydown', onKey, true)
+    removeEventListener('resize', close)
+    scrim.remove(); menu.remove()
+  }
+  const onKey = e => {
+    const btns = [...menu.querySelectorAll('button:not([disabled])')]
+    const i = btns.indexOf(document.activeElement)
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close() }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); btns[(i + 1) % btns.length]?.focus() }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); btns[(i - 1 + btns.length) % btns.length]?.focus() }
+    else if (e.key === 'Tab') { e.preventDefault(); btns[(i + (e.shiftKey ? -1 : 1) + btns.length) % btns.length]?.focus() }
+  }
+  scrim.onclick = close
+  scrim.oncontextmenu = e => { e.preventDefault(); close() }
+  document.addEventListener('keydown', onKey, true)
+  addEventListener('resize', close)
+  document.body.append(scrim, menu)
+  if (!sheet) {
+    const r = menu.getBoundingClientRect()
+    menu.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + 'px'
+    menu.style.top = Math.max(8, Math.min(above ? y - r.height : y, innerHeight - r.height - 8)) + 'px'
+  }
+  requestAnimationFrame(() => { menu.classList.add('show'); menu.querySelector('button:not([disabled])')?.focus({ preventScroll: true }) })
+  menuClose = close
+  return close
+}
+export const closeMenu = () => menuClose?.()
 
 // ---------- 抽屉 ----------
 
@@ -223,6 +336,19 @@ export function fmtTime(ts) {
 }
 
 export const pct = f => Math.round((f || 0) * 100) + '%'
+
+// 完整的日期时间：2026年10月18日 03:12
+export function fmtDateTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// 用登录令牌下载文件（备份、笔记导出）：带上令牌的链接，浏览器自己保存
+export function downloadLink(url, name) {
+  const a = h('a', { href: url, download: name || '' })
+  document.body.append(a); a.click(); a.remove()
+}
 
 export function debounce(fn, ms) {
   let t

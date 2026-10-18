@@ -1300,7 +1300,10 @@ func handleOps(w http.ResponseWriter, r *http.Request) {
 func handleUndo(w http.ResponseWriter, r *http.Request) {
 	n, err := undoBatch(r.PathValue("batch"))
 	invalidateSuggestions()
-	msg := fmt.Sprintf("已撤销 %d 个文件的移动", n)
+	msg := "已撤销"
+	if n > 0 {
+		msg = fmt.Sprintf("已撤销 %d 个文件的移动", n)
+	}
 	if err != nil {
 		msg += "；" + err.Error()
 	}

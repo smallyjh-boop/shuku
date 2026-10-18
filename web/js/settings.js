@@ -1,6 +1,7 @@
-import { h, clear, fill, add, icon, toast, toastError, confirmDialog, debounce, fmtTime, fmtBytes } from './ui.js'
-import { api, auth, net } from './api.js'
+import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog, debounce, fmtTime, fmtBytes, fmtDateTime, coverEl } from './ui.js'
+import { api, apiUrl, auth, net } from './api.js'
 import { isNative, call, callJSON, onNative, refreshDownloads } from './native.js'
+import { downloadToPhone } from './library.js'
 
 const AI_PRESETS = [
   ['', '选择服务商…', '', ''],
@@ -13,12 +14,24 @@ const AI_PRESETS = [
 ]
 
 export async function renderSettings(main, ctx) {
-  main.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, '设置'))))
+  const toc = h('nav', { class: 'set-toc', 'aria-label': '设置目录' })
+  const role = ctx.isAdmin ? '管理员' : '家人'
+  main.append(h('div', { class: 'page-head' }, h('div', null, h('h1', null, '设置'), ctx.user ? h('div', { class: 'sub' }, ctx.user.name === role ? role : `${ctx.user.name} · ${role}`) : null)), toc)
   const wrap = h('div', { class: 'settings' }, h('p', { class: 'muted' }, '加载中…'))
   main.append(wrap)
   let s
   try { s = await api('/api/settings'); ctx.settings = s } catch (e) { fill(wrap, h('p', null, e.message)); return }
-  fill(wrap, isNative ? appSection(ctx) : null, appearance(ctx), network(s), devices(s), await libraries(s), recognition(s, ctx), onlineMeta(s, ctx), narration(s, ctx), fulltextSec(s), opdsSec(s), account(s, ctx), updateSec(s), about(s))
+  // 家人只看到自己用得上的：外观、账号、设备、手机 App、听书试听、其他阅读器、版本
+  const list = ctx.isAdmin
+    ? [['app', isNative && appSection(ctx)], ['look', appearance(ctx)], ['account', account(s, ctx)], ['family', family(ctx)], ['network', network(s)], ['devices', devices(s)],
+      ['libs', libraries(s)], ['trash', trashSec(ctx)], ['storage', storageSec(ctx)], ['backup', backupSec(ctx)], ['recognize', recognition(s, ctx)], ['meta', onlineMeta(s, ctx)],
+      ['tts', narration(s, ctx)], ['fulltext', fulltextSec(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)], ['about', about(s)]]
+    : [['app', isNative && appSection(ctx)], ['look', appearance(ctx)], ['account', account(s, ctx)], ['devices', devices(s)],
+      ['tts', narrationMember(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)]]
+  const secs = (await Promise.all(list.map(async ([id, el]) => [id, await el]))).filter(([, el]) => el)
+  for (const [id, el] of secs) el.id = 'set-' + id
+  fill(wrap, secs.map(([, el]) => el))
+  fill(toc, secs.map(([id, el]) => h('button', { type: 'button', class: 'chip', onclick: () => document.getElementById('set-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, el.querySelector('h2')?.textContent || id)))
 }
 
 const sec = (title, desc, ...children) => h('section', { class: 'set-sec' }, h('h2', null, title), desc ? h('p', null, desc) : null, ...children)
@@ -111,7 +124,7 @@ async function libraries(s) {
     return h('div', { class: 'lib' },
       h('div', { class: 'head' }, h('b', null, l.name), h('span', { class: 'badge' }, `${l.count} 本`), l.exists ? null : h('span', { class: 'badge warn' }, '目录不存在'), h('span', { class: 'grow' }),
         h('button', { class: 'btn small quiet danger', onclick: async () => {
-          if (!await confirmDialog({ title: `移除书库“${l.name}”？`, message: '只是不再管理这个目录，里面的文件不会被删除。', ok: '移除', danger: true })) return
+          if (!await confirmDialog({ title: `移除书库“${l.name}”？`, message: '只是不再管理这个目录，里面的文件不会被删除。这个书库里的书会从书架上消失，大家在这些书上的阅读进度和笔记也会一起清掉（移除前会自动备份一次数据库）。', ok: '移除', danger: true })) return
           try { await api('/api/libraries/' + l.id, { method: 'DELETE' }); toast('已移除'); draw() } catch (e) { toastError(e) }
         } }, '移除')),
       h('div', { class: 'form-grid' },
@@ -143,20 +156,8 @@ async function libraries(s) {
   const sprev = h('div', { class: 'preview' })
   const sp = debounce(async () => { try { const r = await api('/api/preview-template?t=' + encodeURIComponent(series.value)); fill(sprev, '示例：', h('code', null, r.path)) } catch {} }, 250)
   series.addEventListener('input', sp); sp()
-  const trash = h('div', { class: 'set-row' })
-  const drawTrash = async () => {
-    try {
-      const t = await api('/api/trash')
-      fill(trash, h('div', null, h('div', { class: 'l' }, '回收站'), h('div', { class: 'h' }, t.files ? `删除的书先放在各书库的 _回收站 文件夹，现在有 ${t.files} 个文件，共 ${fmtBytes(t.size)}` : '删除的书先放在各书库的 _回收站 文件夹，现在是空的')),
-        t.files ? h('button', { class: 'btn small danger', onclick: async () => {
-          if (!await confirmDialog({ title: '清空回收站？', message: `会彻底删除 ${t.files} 个文件（${fmtBytes(t.size)}），不能撤销。`, ok: '彻底删除', danger: true })) return
-          try { const r = await api('/api/trash', { method: 'DELETE' }); toast(`已清空回收站（${r.count} 项）`); drawTrash() } catch (e) { toastError(e) }
-        } }, '清空回收站') : null)
-    } catch {}
-  }
-  drawTrash()
   return sec('书库目录', `书整理后放在这些目录里。投递目录是 ${s.inbox}，把书丢进去会自动入库。`,
-    box, trash,
+    box,
     h('div', { class: 'stack', style: { marginTop: '18px' } },
       h('label', { class: 'field' }, h('span', null, '系列图书的命名规则'), series, sprev,
         h('small', null, '可用：{分类} {作者} {书名} {原名} {系列} {序号:02} {年份} {译者}。花括号里可以带前后缀，比如 { (年份)}，没有年份时整段省略')),
@@ -215,28 +216,266 @@ function recognition(s, ctx) {
       h('div', null, h('button', { class: 'btn primary', onclick: saveAll }, '保存'))))
 }
 
-// ---------- 账户 ----------
+// ---------- 账号 ----------
 function account(s, ctx) {
-  const name = h('input', { class: 'input', value: s.server_name })
+  const admin = ctx.isAdmin
+  const min = admin ? 6 : 4
+  const name = h('input', { class: 'input', value: s.server_name, 'aria-label': '书库名称' })
   const old = h('input', { class: 'input', type: 'password', autocomplete: 'current-password' })
-  const nw = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '至少 6 位' })
-  return sec('账户', null,
+  const nw = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: `至少 ${min} 位` })
+  const pwBtn = h('button', { class: 'btn', type: 'button' }, '修改密码')
+  pwBtn.onclick = async () => {
+    if (nw.value.length < min) { toast(`新密码至少 ${min} 位`, { error: true }); nw.focus(); return }
+    pwBtn.disabled = true
+    try { await api('/api/auth/password', { method: 'POST', body: { Old: old.value, New: nw.value } }); old.value = nw.value = ''; toast('密码已修改，你在其他设备上的登录需要重新输入密码') } catch (e) { toastError(e) }
+    pwBtn.disabled = false
+  }
+  const me = ctx.user
+  const logoutBtn = h('button', { class: 'btn quiet', type: 'button', onclick: () => ctx.logout() }, icon('logout'), '退出登录')
+  return sec('账号', admin ? '你是管理员：管理书和设置，在“家人账号”里给家人各开一个账号。' : '书架、进度、笔记和阅读统计都是你自己的。书目和设置由管理员管理。',
     h('div', { class: 'stack' },
-      h('label', { class: 'field' }, h('span', null, '书库名称'), h('div', { class: 'row' }, name, h('button', { class: 'btn', onclick: async () => {
+      me ? h('div', { class: 'dev-row me-row' }, h('span', { class: 'av', 'aria-hidden': 'true' }, [...me.name][0]),
+        h('div', { class: 'grow' }, h('div', null, me.name, h('span', { class: 'badge' + (admin ? ' accent' : ''), style: { marginLeft: '8px' } }, admin ? '管理员' : '家人')),
+          h('small', null, admin || !(me.libraries || []).length ? '能看全部书库' : '只能看管理员允许的书库')),
+        logoutBtn) : null,
+      admin ? h('label', { class: 'field' }, h('span', null, '书库名称'), h('div', { class: 'row' }, name, h('button', { class: 'btn', type: 'button', onclick: async () => {
         try { await putSettings({ server_name: name.value }); ctx.server.name = name.value; toast('已保存') } catch (e) { toastError(e) }
-      } }, '保存'))),
+      } }, '保存'))) : null,
       h('div', { class: 'form-grid' },
         h('label', { class: 'field' }, h('span', null, '当前密码'), old),
         h('label', { class: 'field' }, h('span', null, '新密码'), nw)),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn', onclick: async () => {
-          try { await api('/api/auth/password', { method: 'POST', body: { Old: old.value, New: nw.value } }); old.value = nw.value = ''; toast('密码已修改，其他设备需要重新登录') } catch (e) { toastError(e) }
-        } }, '修改密码'),
-        h('span', { class: 'grow' }),
-        h('button', { class: 'btn quiet', onclick: async () => {
-          await api('/api/auth/logout', { method: 'POST' }).catch(() => {})
-          auth.set(''); location.hash = ''; location.reload()
-        } }, icon('logout'), '退出登录'))))
+      h('div', { class: 'row' }, pwBtn, me ? null : h('span', { class: 'grow' }), me ? null : logoutBtn)))
+}
+
+// ---------- 家人账号（管理员） ----------
+const libNames = (ids, libs) => !ids?.length ? '全部书库' : ids.map(id => libs.find(l => l.id === id)?.name || '已移除的书库').join('、')
+
+async function family(ctx) {
+  const box = h('div', { class: 'stack', style: { gap: '8px' } })
+  let libs = []
+  const libOpts = () => libs.map(l => [l.id, `${l.name}（${l.kind === 'comic' ? '漫画' : '图书'}）`])
+  async function draw() {
+    let users
+    try { [users, libs] = await Promise.all([api('/api/users'), api('/api/libraries')]) } catch (e) { fill(box, h('p', { class: 'muted' }, e.message)); return }
+    fill(box, users.map(row), h('div', null, h('button', { class: 'btn', type: 'button', onclick: add }, icon('plus'), '添加家人')))
+  }
+  function row(u) {
+    const self = u.id === ctx.user?.id
+    return h('div', { class: 'dev-row user-row', dataset: { user: u.name } },
+      h('span', { class: 'av', 'aria-hidden': 'true' }, [...u.name][0]),
+      h('div', { class: 'grow' },
+        h('div', null, u.name, self ? h('span', { class: 'muted small-text' }, '（你）') : null,
+          h('span', { class: 'badge' + (u.role === 'admin' ? ' accent' : ''), style: { marginLeft: '8px' } }, u.role === 'admin' ? '管理员' : '家人')),
+        h('small', null, [u.role === 'admin' ? '管理书和设置' : '能看：' + libNames(u.libraries, libs), `${u.devices} 台设备`, u.last_seen ? '最近使用 ' + fmtTime(u.last_seen) : '还没登录过', u.books ? `读过 ${u.books} 本` : ''].filter(Boolean).join(' · '))),
+      h('button', { class: 'btn small', type: 'button', onclick: () => edit(u) }, '修改'),
+      self ? null : h('button', { class: 'btn small quiet danger', type: 'button', onclick: () => remove(u) }, '删除'))
+  }
+  async function add() {
+    const v = await formDialog({
+      title: '添加家人', message: '他用自己的名字和密码登录（手机、手表也可以扫配对码），进度、笔记、读完状态都各算各的。',
+      fields: [
+        { key: 'name', label: '名字', placeholder: '比如：小明' },
+        { key: 'password', label: '密码', type: 'password', placeholder: '至少 4 位' },
+        { key: 'role', label: '身份', type: 'select', value: 'member', options: [['member', '家人：只能读书'], ['admin', '管理员：能管理书和设置']] },
+        libs.length > 1 ? { key: 'libs', label: '能看的书库', type: 'checks', options: libOpts(), value: [], hint: '都不勾 = 能看全部书库' } : null,
+      ].filter(Boolean),
+      ok: '添加',
+      validate: v => !v.name.trim() ? '请填写名字' : v.password.length < 4 ? '密码至少 4 位' : '',
+    })
+    if (!v) return
+    try {
+      await api('/api/users', { method: 'POST', body: { name: v.name.trim(), password: v.password, role: v.role, libraries: (v.libs || []).map(Number) } })
+      toast(`已添加“${v.name.trim()}”。在他的设备上打开书库，选他的名字、输入密码就能登录`)
+      draw()
+    } catch (e) { toastError(e) }
+  }
+  async function edit(u) {
+    const v = await formDialog({
+      title: `修改“${u.name}”`,
+      fields: [
+        { key: 'name', label: '名字', value: u.name },
+        { key: 'password', label: '新密码', type: 'password', placeholder: '不改就留空', hint: '改了密码，他在其他设备上的登录要重新输入' },
+        { key: 'role', label: '身份', type: 'select', value: u.role, options: [['member', '家人：只能读书'], ['admin', '管理员：能管理书和设置']] },
+        libs.length > 1 ? { key: 'libs', label: '能看的书库（家人）', type: 'checks', options: libOpts(), value: u.libraries || [], hint: '都不勾 = 能看全部书库。管理员总是能看全部' } : null,
+      ].filter(Boolean),
+      ok: '保存',
+      validate: v => !v.name.trim() ? '名字不能为空' : v.password && v.password.length < 4 ? '密码至少 4 位' : '',
+    })
+    if (!v) return
+    const body = {}
+    if (v.name.trim() !== u.name) body.name = v.name.trim()
+    if (v.password) body.password = v.password
+    if (v.role !== u.role) body.role = v.role
+    if (v.libs) {
+      const next = v.libs.map(Number).sort((a, b) => a - b), cur = [...(u.libraries || [])].sort((a, b) => a - b)
+      if (next.join() !== cur.join()) body.libraries = next
+    }
+    if (!Object.keys(body).length) return
+    try {
+      await api('/api/users/' + u.id, { method: 'PATCH', body })
+      toast('已保存')
+      if (u.id === ctx.user?.id && (body.name || body.role)) { location.reload(); return }
+      draw()
+    } catch (e) { toastError(e) }
+  }
+  async function remove(u) {
+    if (!await confirmDialog({ title: `删除“${u.name}”的账号？`, message: '他在所有设备上的登录都会退出，他的阅读进度、书签笔记和阅读统计也会删掉。删除前书库会自动备份一次数据库。', ok: '删除', danger: true })) return
+    try { await api('/api/users/' + u.id, { method: 'DELETE' }); toast(`已删除“${u.name}”`); draw() } catch (e) { toastError(e) }
+  }
+  await draw()
+  return sec('家人账号', '家里每个人用自己的名字和密码登录：阅读进度、书签笔记、读完状态、评分、阅读统计各算各的。家人只能读书，不能改书目、删书和改设置；可以只让他看某几个书库（比如孩子只看“童书”）。', box)
+}
+
+// ---------- 回收站（管理员） ----------
+async function trashSec(ctx) {
+  const box = h('div', { class: 'stack', style: { gap: '8px' } })
+  async function draw() {
+    let t
+    try { t = await api('/api/trash') } catch (e) { fill(box, h('p', { class: 'muted' }, e.message)); return }
+    const days = at => Math.max(0, Math.ceil(((at || 0) - Date.now() / 1000) / 86400))
+    fill(box,
+      t.books.length ? t.books.map(b => h('div', { class: 'dev-row trash-row', dataset: { id: b.id } },
+        h('div', { class: 'mini-cv' }, coverEl({ ...b, formats: '' }, apiUrl, { flags: false })),
+        h('div', { class: 'grow' }, h('div', null, b.title), h('small', null, [b.author, `${fmtTime(b.deleted_at)} 删除`, `${days(b.expires_at)} 天后彻底删除`].filter(Boolean).join(' · '))),
+        h('button', { class: 'btn small', type: 'button', onclick: async e => {
+          const btn = e.currentTarget
+          btn.disabled = true
+          try { const r = await api(`/api/books/${b.id}/restore`, { method: 'POST' }); toast(`《${b.title}》${r.message}`); ctx.refreshFacets(); draw() } catch (err) { toastError(err); btn.disabled = false }
+        } }, icon('undo'), '恢复'))) : h('p', { class: 'muted small-text', style: { margin: 0 } }, '回收站是空的。'),
+      t.books.length || t.files ? h('div', { class: 'row wrap', style: { marginTop: '6px' } },
+        h('span', { class: 'muted small-text grow' }, `回收站文件夹里共 ${t.files} 个文件，占 ${fmtBytes(t.size)}`),
+        h('button', { class: 'btn small danger', type: 'button', onclick: async () => {
+          if (!await confirmDialog({ title: '清空回收站？', message: `${t.books.length} 本书和回收站文件夹里的 ${t.files} 个文件（${fmtBytes(t.size)}）会彻底删除，大家在这些书上的进度和笔记也一起删掉，不能撤销。`, ok: '彻底删除', danger: true })) return
+          try { const r = await api('/api/trash', { method: 'DELETE' }); toast(`已清空回收站（${r.books} 本书，${r.count} 项）`); ctx.refreshFacets(); draw() } catch (e) { toastError(e) }
+        } }, '清空回收站')) : null)
+  }
+  await draw()
+  return sec('回收站', '删除的书先放进各书库的 _回收站 文件夹，30 天后自动彻底删除。恢复时文件搬回原来的位置，大家的阅读进度和笔记都还在。', box)
+}
+
+// ---------- 存储与状态（管理员） ----------
+const KIND_NAME = { arc: '漫画解压', pages: '漫画页面', conv: '格式转换', covers: '封面小图', text: '提取的正文' }
+const LIMITS = [[1024, '1 GB'], [2048, '2 GB'], [5120, '5 GB'], [10240, '10 GB'], [20480, '20 GB'], [51200, '50 GB']]
+
+async function storageSec(ctx) {
+  const box = h('div', { class: 'stack storage' })
+  const usageBar = (used, total) => h('div', { class: 'bar big', role: 'img', 'aria-label': total ? `已用 ${Math.round(used / total * 100)}%` : '' }, h('i', { style: { width: total ? Math.min(100, used / total * 100).toFixed(1) + '%' : '0' } }))
+  async function clean(kind, btn) {
+    if (btn) btn.disabled = true
+    try { const r = await api('/api/storage/clean', { method: 'POST', body: { kind } }); toast(`已清理 ${fmtBytes(r.freed)}`); draw() } catch (e) { toastError(e); if (btn) btn.disabled = false }
+  }
+  async function draw() {
+    let st
+    try { st = await api('/api/storage') } catch (e) { fill(box, h('p', { class: 'muted' }, e.message)); return }
+    const limit = st.cache_limit_mb * 1048576
+    const limitSel = h('select', { class: 'input', 'aria-label': '缓存上限', style: { width: 'auto' } },
+      [...new Set([...LIMITS.map(x => x[0]), st.cache_limit_mb])].sort((a, b) => a - b).map(v => h('option', { value: v, selected: v === st.cache_limit_mb }, LIMITS.find(x => x[0] === v)?.[1] || `${Math.round(v / 1024 * 10) / 10} GB`)))
+    limitSel.onchange = async () => { try { await api('/api/storage/clean', { method: 'POST', body: { limit_mb: +limitSel.value } }); toast('缓存上限已改好，超出的部分会自动清理'); draw() } catch (e) { toastError(e) } }
+    const up = st.update || {}
+    const used = st.data_total ? st.data_total - st.data_free : 0
+    const cleanBtn = (key, size) => size ? h('button', { class: 'btn small quiet', type: 'button', onclick: e => clean(key, e.currentTarget) }, '清理') : h('span', { class: 'spacer' })
+    fill(box,
+      h('div', { class: 'st-block' },
+        h('div', { class: 'st-head' }, icon('hdd'), h('b', null, '数据目录'), h('code', null, st.data_dir), h('span', { class: 'grow' }), h('span', { class: 'muted small-text' }, st.data_total ? `剩余 ${fmtBytes(st.data_free)} / 共 ${fmtBytes(st.data_total)}` : '')),
+        st.data_total ? usageBar(used, st.data_total) : null,
+        st.data_total && st.data_free < 2 * 1073741824 ? h('div', { class: 'notice bad' }, h('div', null, h('b', null, '剩余空间不多了'), '。可以清理下面的缓存，或者把缓存上限调小。')) : null,
+        h('div', { class: 'st-list' },
+          [['数据库（进度、笔记、书目）', st.db], ['全文索引', st.fulltext], ['封面', st.covers], ['备份', st.backups]].map(([l, v]) => h('div', null, h('span', null, l), h('b', null, fmtBytes(v)), h('span', { class: 'spacer' }))))),
+      h('div', { class: 'st-block' },
+        h('div', { class: 'st-head' }, icon('folder'), h('b', null, '书库目录')),
+        h('div', { class: 'st-list' }, st.libraries.map(l => h('div', null,
+          h('span', null, l.name, h('code', null, l.path)),
+          l.exists ? h('b', null, l.total ? `剩余 ${fmtBytes(l.free)}` : '') : h('span', { class: 'badge warn' }, '目录不存在'), h('span', { class: 'spacer' }))))),
+      h('div', { class: 'st-block' },
+        h('div', { class: 'st-head' }, icon('archive'), h('b', null, '缓存'), h('span', { class: 'grow' }), h('span', { class: 'muted small-text' }, `${fmtBytes(st.cache_total)} / 上限 ${fmtBytes(limit)}`)),
+        usageBar(st.cache_total, limit),
+        h('div', { class: 'st-list' },
+          st.caches.map(c => h('div', { dataset: { cache: c.key } }, h('span', null, KIND_NAME[c.key] || c.name), h('b', null, fmtBytes(c.size)), cleanBtn(c.key, c.size))),
+          h('div', { dataset: { cache: 'tts' } }, h('span', null, '听书语音（单独限 400 MB）'), h('b', null, fmtBytes(st.tts)), cleanBtn('tts', st.tts))),
+        h('div', { class: 'row wrap' }, h('span', { class: 'muted small-text' }, '缓存上限'), limitSel, h('span', { class: 'grow' }),
+          h('button', { class: 'btn small', type: 'button', onclick: async e => { const btn = e.currentTarget; if (await confirmDialog({ title: '清理全部缓存？', message: '漫画解压、转换好的格式、封面小图、提取的正文和听书语音都会删掉。不影响书和进度，之后用到时会重新生成（第一次打开会慢一点）。', ok: '清理' })) clean('all', btn) } }, '全部清理'))),
+      h('div', { class: 'st-block' },
+        h('div', { class: 'st-head' }, icon('activity'), h('b', null, '状态')),
+        h('div', { class: 'st-list' },
+          h('div', null, h('span', null, '回收站'), h('b', null, `${st.trash_books} 本书`), st.trash_books ? h('button', { class: 'btn small quiet', type: 'button', onclick: () => document.getElementById('set-trash')?.scrollIntoView({ behavior: 'smooth' }) }, '查看') : h('span', { class: 'spacer' })),
+          h('div', null, h('span', null, '找不到文件的书'), h('b', { class: st.missing_books ? 'warnish' : '' }, `${st.missing_books} 本`), st.missing_books ? h('a', { class: 'btn small quiet', href: '#/all?missing=1' }, '查看') : h('span', { class: 'spacer' })),
+          h('div', null, h('span', null, '自动升级服务'), h('b', { class: up.configured && !up.reachable ? 'warnish' : '' }, !up.configured ? '没有配置' : up.reachable ? '正常' : '连不上'), h('span', { class: 'spacer' }))),
+        up.configured && !up.reachable ? h('p', { class: 'muted small-text' }, `连不上 ${up.url}：在 Container Station 里确认 taihaoshuo-updater 在运行。`) : null),
+      h('div', { class: 'st-block' },
+        h('div', { class: 'st-head' }, icon('sparkle'), h('b', null, '最近的问题'), h('span', { class: 'grow' }), h('a', { class: 'btn small quiet', href: '#/organize?tab=events' }, '全部动态')),
+        st.recent_problems.length ? h('ul', { class: 'events compact' }, st.recent_problems.map(e => h('li', { class: e.level }, h('time', null, fmtTime(e.created_at)), h('span', null, e.message))))
+          : h('p', { class: 'muted small-text', style: { margin: 0 } }, '最近没有错误和警告。')),
+      h('div', null, h('button', { class: 'btn small quiet', type: 'button', onclick: draw }, icon('refresh'), '刷新')))
+  }
+  await draw()
+  return sec('存储与状态', '书库在 NAS 上占了多少地方、各种缓存有多大、最近有没有出错。缓存（漫画解压、格式转换、封面小图等）超过上限时，最久没用的会自动删掉。', box)
+}
+
+// ---------- 备份（管理员） ----------
+const BACKUP_KIND = { daily: '每日', upgrade: '升级前', manual: '手动', restore: '恢复前' }
+
+async function backupSec(ctx) {
+  const box = h('div', { class: 'stack', style: { gap: '8px' } })
+  const where = h('small', { class: 'muted' })
+  const file = h('input', { type: 'file', accept: '.db,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream', hidden: true })
+  file.onchange = async () => {
+    const f = file.files[0]
+    file.value = ''
+    if (!f) return
+    if (!await confirmDialog({ title: `用“${f.name}”恢复？`, message: '书库会换成这个文件里的数据：阅读进度、笔记、书目、账号和设置都回到备份时的样子。现在的数据库会先另存一份“恢复前”的备份。书的文件不受影响。恢复后书库自动重启。', ok: '恢复', danger: true })) return
+    restore(() => api('/api/backups/restore', { method: 'POST', body: f }))
+  }
+  const nowBtn = h('button', { class: 'btn', type: 'button' }, icon('archive'), '立即备份')
+  nowBtn.onclick = async () => {
+    nowBtn.disabled = true
+    try { const r = await api('/api/backups', { method: 'POST' }); toast('已备份：' + r.name); draw() } catch (e) { toastError(e) }
+    nowBtn.disabled = false
+  }
+  async function draw() {
+    let r
+    try { r = await api('/api/backups') } catch (e) { fill(box, h('p', { class: 'muted' }, e.message)); return }
+    where.textContent = `备份放在 ${r.dir}。只备份数据库（进度、笔记、书目、账号、设置）：书的文件不在里面；全文索引能重建，也不备份。`
+    fill(box, r.backups.length ? r.backups.map(b => h('div', { class: 'dev-row backup-row', dataset: { name: b.name } },
+      icon('database'),
+      h('div', { class: 'grow' }, h('div', null, fmtDateTime(b.created_at), h('span', { class: 'badge', style: { marginLeft: '8px' } }, BACKUP_KIND[b.kind] || b.kind)),
+        h('small', null, fmtBytes(b.size))),
+      h('a', { class: 'icon-btn', href: apiUrl('/api/backups/' + encodeURIComponent(b.name)), download: b.name, title: '下载', 'aria-label': '下载这个备份' }, icon('download')),
+      h('button', { class: 'btn small', type: 'button', onclick: async () => {
+        if (!await confirmDialog({ title: '从这个备份恢复？', message: `书库会回到 ${fmtDateTime(b.created_at)} 的样子：之后的阅读进度、笔记、新登记的书和设置改动都会丢失（书的文件不受影响，下次扫描会重新登记）。现在的数据库会先另存一份“恢复前”的备份。恢复后书库自动重启，大约半分钟。`, ok: '恢复', danger: true })) return
+        restore(() => api('/api/backups/restore?name=' + encodeURIComponent(b.name), { method: 'POST' }))
+      } }, '恢复'),
+      h('button', { class: 'icon-btn', type: 'button', title: '删除', 'aria-label': '删除这个备份', onclick: async () => {
+        if (!await confirmDialog({ title: '删除这个备份？', message: `${fmtDateTime(b.created_at)}（${BACKUP_KIND[b.kind] || b.kind}）`, ok: '删除', danger: true })) return
+        try { await api('/api/backups/' + encodeURIComponent(b.name), { method: 'DELETE' }); draw() } catch (e) { toastError(e) }
+      } }, icon('trash')))) : h('p', { class: 'muted small-text', style: { margin: 0 } }, '还没有备份。书库里有书以后，每天会自动备份一次。'))
+  }
+  await draw()
+  return sec('备份', '每天自动备份一次数据库，留最近 7 份；升级前也会自动备份一份。恢复以后书库会自动重启。',
+    h('div', { class: 'row wrap', style: { marginBottom: '12px' } }, nowBtn, h('button', { class: 'btn quiet', type: 'button', onclick: () => file.click() }, icon('upload'), '用备份文件恢复…'), file),
+    box, h('div', { style: { marginTop: '10px' } }, where))
+}
+
+// 恢复：服务器检查好文件后重启，这里等它回来再刷新页面
+async function restore(send) {
+  let r
+  try { r = await send() } catch (e) { toastError(e); return }
+  if (!r.restart) { toast('已准备好恢复：在 Container Station 里重启书库后生效', { duration: 10000 }); return }
+  const msg = h('p', null, '正在换上备份的数据，书库重启中……')
+  const veil = h('div', { class: 'restart-veil', role: 'alertdialog', 'aria-live': 'assertive' }, h('div', null, h('h3', null, '书库正在重启'), msg))
+  document.body.append(veil)
+  const t0 = Date.now()
+  let wentDown = false
+  while (Date.now() - t0 < 180000) {
+    await new Promise(res => setTimeout(res, 1500))
+    try {
+      const ctl = new AbortController()
+      const tm = setTimeout(() => ctl.abort(), 2500)
+      const res = await fetch((net.base || '') + '/api/ping', { cache: 'no-store', signal: ctl.signal })
+      clearTimeout(tm)
+      if (res.ok && (wentDown || Date.now() - t0 > 8000)) { msg.textContent = '已恢复，正在刷新……'; setTimeout(() => location.reload(), 600); return }
+    } catch { wentDown = true }
+  }
+  msg.textContent = '书库很久没有回来：在 Container Station 里看看书库的应用程序是不是在运行（restart 要设成 unless-stopped）。'
 }
 
 // ---------- 关于 ----------
@@ -248,7 +487,7 @@ const newer = (a, b) => {
   return false
 }
 
-function updateSec(s) {
+function updateSec(s, ctx) {
   const box = h('div', { class: 'stack', style: { gap: '8px' } }, h('p', { class: 'muted small-text', style: { margin: 0 } }, '正在读取版本信息…'))
   const row = (ic, label, sub, ...actions) => h('div', { class: 'dev-row' }, icon(ic), h('div', { class: 'grow' }, h('div', null, label), sub ? h('small', null, sub) : null), ...actions)
   const link = (item, text) => h('a', { class: 'btn small quiet', href: (net.base || '') + item.url, download: '' }, icon('download'), text)
@@ -259,9 +498,9 @@ function updateSec(s) {
     const msg = h('div', { class: 'muted small-text' }, info.updater
       ? 'NAS 上的更新服务每分钟检查一次，发布新版本后自动升级。'
       : '还没开启自动升级：按说明用新的 compose（带更新服务的地址和令牌）重建一次书库。')
-    const btn = h('button', { class: 'btn small' }, icon('refresh'), '检查更新')
-    btn.onclick = () => checkServer(btn, msg, info.version)
-    const rows = [row('stack', `书库服务器 ${info.version}`, null, btn), msg]
+    const btn = ctx.isAdmin ? h('button', { class: 'btn small' }, icon('refresh'), '检查更新') : null
+    if (btn) btn.onclick = () => checkServer(btn, msg, info.version)
+    const rows = [row('stack', `书库服务器 ${info.version}`, null, btn), ctx.isAdmin ? msg : null].filter(Boolean)
     const app = isNative ? callJSON('appInfo') : null
     // 加上在线升级之前的 App 没有 appInfo，也不会自己更新：交给手机浏览器下载新版，装一次以后就能自动更新
     const oldApp = isNative && !app
@@ -421,6 +660,32 @@ function narration(s, ctx) {
       h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => saveIt() }, '保存'), h('button', { class: 'btn', onclick: e => listen(e.currentTarget) }, icon('play'), '试听'), status)))
 }
 
+// ---------- 听书（家人）：引擎由管理员设置，这里只能试听 ----------
+function narrationMember(s) {
+  const t = s.tts || {}
+  const status = h('span', { class: 'muted small-text' })
+  let audio
+  const engine = { edge: '微软自然语音', openai: '自定义语音接口', browser: '设备自带语音' }[t.engine] || '微软自然语音'
+  const btn = h('button', { class: 'btn', type: 'button' }, icon('play'), '试听')
+  btn.onclick = async () => {
+    btn.disabled = true
+    status.textContent = '正在合成…'
+    try {
+      if (t.engine === 'browser') {
+        const u = new SpeechSynthesisUtterance('夜色渐深，城市的灯一盏一盏亮了起来。')
+        u.lang = 'zh-CN'; speechSynthesis.cancel(); speechSynthesis.speak(u)
+      } else {
+        const res = await api('/api/tts', { method: 'POST', raw: true, body: { text: '夜色渐深，城市的灯一盏一盏亮了起来。他合上书，听见窗外的雨声。' } })
+        audio?.pause(); audio = new Audio(URL.createObjectURL(await res.blob())); audio.play()
+      }
+      status.textContent = ''
+    } catch (err) { status.textContent = err.message }
+    btn.disabled = false
+  }
+  return sec('听书', `阅读器里点耳机图标开始朗读，音色和语速可以在阅读器里换。现在用的语音：${engine}（由管理员设置）。`,
+    h('div', { class: 'row' }, btn, status))
+}
+
 // ---------- 书内搜索 ----------
 function fulltextSec(s) {
   const ft = s.fulltext || {}
@@ -440,11 +705,11 @@ function fulltextSec(s) {
 }
 
 // ---------- OPDS ----------
-function opdsSec(s) {
+function opdsSec(s, ctx) {
   const urls = [location.origin + '/opds']
   const remote = s.network?.remote_url
   if (remote && !remote.startsWith(location.origin)) urls.push(remote.replace(/\/$/, '') + '/opds')
-  return sec('用其他阅读器访问（OPDS）', '在 KOReader、静读天下、Librera、Panels、Yomu 等支持 OPDS 的阅读器里添加书库，就能直接浏览、搜索和下载。用户名随便填，密码是书库密码。',
+  return sec('用其他阅读器访问（OPDS）', `在 KOReader、静读天下、Librera、Panels、Yomu 等支持 OPDS 的阅读器里添加书库，就能直接浏览、搜索和下载。用户名填你在书库里的名字（${ctx.user?.name || '管理员'}），密码是你的书库密码。`,
     h('div', { class: 'stack', style: { gap: '8px' } },
       urls.map(u => h('div', { class: 'row' }, h('code', { class: 'code-block grow' }, u), h('button', { class: 'btn small', onclick: () => { navigator.clipboard?.writeText(u).then(() => toast('已复制'), () => toast(u)) } }, '复制'))),
       h('small', { class: 'muted' }, 'KOReader：菜单 → 搜索 → OPDS 目录 → 添加，填上面的地址。')))
@@ -513,6 +778,16 @@ function syncWatch(btn) {
   call('syncWatch')
 }
 
+// 下载到手机的书：新版 App 有 downloadInfo（总占用、上限），旧版只有 downloads
+function phoneDownloads() {
+  const info = callJSON('downloadInfo')
+  if (info && Array.isArray(info.items)) return info
+  const items = callJSON('downloads') || []
+  return { items, total_size: items.reduce((a, d) => a + (d.size || 0), 0), limit_mb: (callJSON('prefs') || {}).download_limit_mb || 0 }
+}
+
+const DL_LIMITS = [[0, '不限'], [512, '512 MB'], [1024, '1 GB'], [2048, '2 GB'], [5120, '5 GB'], [10240, '10 GB'], [20480, '20 GB']]
+
 function appSection(ctx) {
   const prefs = callJSON('prefs') || {}
   const sw = (key, label, hint) => {
@@ -523,14 +798,33 @@ function appSection(ctx) {
   const ttsSel = h('select', { class: 'input', style: { width: 'auto' } },
     [['server', '书库的语音（微软自然语音等）'], ['device', '手机自带语音（不联网也能用）']].map(([v, l]) => h('option', { value: v, selected: (prefs.tts_engine || 'server') === v }, l)))
   ttsSel.onchange = () => call('setPref', 'tts_engine', ttsSel.value)
+  const limitMb = +(prefs.download_limit_mb || 0)
+  const limitOpts = [...new Map([...DL_LIMITS, [limitMb, `${limitMb} MB`]])].sort((a, b) => a[0] - b[0])
+  const limitSel = h('select', { class: 'input', style: { width: 'auto' }, 'aria-label': '下载到手机最多占用' },
+    limitOpts.map(([v, l]) => h('option', { value: v, selected: v === limitMb }, l)))
+  limitSel.onchange = () => {
+    call('setPref', 'download_limit_mb', String(limitSel.value))
+    draw()
+    toast(+limitSel.value ? '超过上限时，先删最早下载、已经读完的书' : '不限制下载占用的空间')
+  }
   const dl = h('div', { class: 'stack', style: { gap: '6px' } })
   const draw = () => {
-    const list = refreshDownloads()
-    const used = list.reduce((a, d) => a + (d.size || 0), 0)
-    fill(dl, list.length ? list.map(d => h('div', { class: 'dev-row' }, icon('book'),
-      h('div', { class: 'grow' }, h('div', null, d.title), h('small', null, d.state === 'done' ? `${(d.format || '').toUpperCase()} · ${fmtBytes(d.size)}` : d.state === 'error' ? '下载失败：' + (d.error || '') : `下载中 ${Math.round((d.progress || 0) * 100)}%`)),
-      h('button', { class: 'btn small quiet danger', onclick: () => { call('removeDownload', d.id); draw() } }, '删除'))) : h('p', { class: 'muted small-text', style: { margin: 0 } }, '还没有下载到手机的书。在书的详情里点“下载到手机”，没网的时候也能读。'),
-    list.length ? h('div', { class: 'muted small-text' }, `共占用 ${fmtBytes(used)}`) : null)
+    refreshDownloads()
+    const info = phoneDownloads()
+    const list = info.items || []
+    const limit = +(info.limit_mb ?? limitSel.value) || 0
+    fill(dl, list.length ? list.map(d => h('div', { class: 'dev-row' + (d.state === 'error' ? ' err' : '') }, icon('book'),
+      h('div', { class: 'grow' }, h('div', null, d.title),
+        h('small', null, d.state === 'done' ? `${(d.format || '').toUpperCase()} · ${fmtBytes(d.size)}` : d.state === 'error' ? '下载失败：' + (d.error || '原因不明') : `下载中 ${Math.round((d.progress || 0) * 100)}%`)),
+      d.state === 'error' ? h('button', { class: 'btn small', type: 'button', onclick: async e => {
+        e.currentTarget.disabled = true
+        // 和书的详情里“下载到手机”一样的参数；连不上书库时用下载记录里的信息（已经下好的部分会跳过）
+        if (net.route === 'offline') call('download', d.id, { id: d.id, title: d.title, author: d.author || '' })
+        else await downloadToPhone(d.id)
+        setTimeout(draw, 300)
+      } }, '重试') : null,
+      h('button', { class: 'btn small quiet danger', type: 'button', onclick: () => { call('removeDownload', d.id); draw() } }, '删除'))) : h('p', { class: 'muted small-text', style: { margin: 0 } }, '还没有下载到手机的书。在书的详情里点“下载到手机”，没网的时候也能读。'),
+    list.length || limit ? h('div', { class: 'muted small-text' }, `共占用 ${fmtBytes(info.total_size || 0)}${limit ? `，上限 ${fmtBytes(limit * 1048576)}` : ''}`) : null)
   }
   draw()
   const off = onNative('download', draw)
@@ -540,6 +834,8 @@ function appSection(ctx) {
       sw('volume_keys', '音量键翻页', '阅读时按音量键上一页、下一页'),
       sw('keep_screen_on', '阅读时屏幕常亮'),
       sw('auto_download', '自动下载在读的书', '连着内网时，把“在读”里的书下载到手机'),
+      sw('auto_clean_finished', '读完的书自动从手机删掉', '只删下载以后才读完的书（打开 App、连上书库时检查）；以前就读完、专门下回来重温的书不会删'),
+      h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '下载到手机最多占用'), h('div', { class: 'h' }, '超过时先删最早下载、已经读完的书')), limitSel),
       h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '听书的声音'), h('div', { class: 'h' }, '锁屏、切到别的 App 也会继续读')), ttsSel),
       h('div', { class: 'row wrap', style: { margin: '8px 0 14px' } },
         h('button', { class: 'btn', onclick: e => syncWatch(e.currentTarget) }, icon('watch'), '连接手表'),

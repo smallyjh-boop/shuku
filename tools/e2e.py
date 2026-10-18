@@ -168,6 +168,19 @@ class Mock(BaseHTTPRequestHandler):
             f = os.path.join(T, "remote", "xyj.epub")
             make_epub(f, "西游记", "吴承恩", [("第一回", ["灵根育孕源流出，心性修持大道生。" * 20])])
             return self.send(200, open(f, "rb").read(), "application/epub+zip")
+        if p.startswith("/slow/"):  # 1.0.0.7：慢慢下载，测“取消下载”
+            self.send_response(200)
+            self.send_header("Content-Type", "application/epub+zip")
+            self.send_header("Content-Length", str(8 << 20))
+            self.end_headers()
+            try:
+                for _ in range(500):
+                    self.wfile.write(b"\0" * 16384)
+                    self.wfile.flush()
+                    time.sleep(0.15)
+            except Exception:
+                pass
+            return
         host = (self.headers.get("Host") or "").split(":")[0]
         if host in EXT_SITES or p.startswith(("/shop/", "/dl/", "/protected/")) or p in ("/get", "/fake.epub"):
             return self.ext_site(host, p, q)
@@ -446,7 +459,8 @@ server_proc = None
 def setup(fresh=True):
     global server_proc
     print(f"测试目录：{T}")
-    subprocess.run(["pkill", "-f", "shuku-e2e-server"], check=False)
+    # 只停这个测试目录的服务器（别的目录可能同时在跑另一组测试）
+    subprocess.run(["pkill", "-f", os.path.join(T, "shuku-e2e-server")], check=False)
     time.sleep(0.3)
     if fresh:
         shutil.rmtree(T, ignore_errors=True)
@@ -470,7 +484,8 @@ def setup(fresh=True):
                SHUKU_LAN_URL=BASE, SHUKU_REMOTE_URL="",
                SHUKU_CATALOG_GUTENBERG=MOCK + "/opds/root.xml", SHUKU_CATALOG_IA=MOCK + "/ia",
                SHUKU_WIKISOURCE_API=MOCK + "/ws/%s/api.php", SHUKU_WIKISOURCE_EXPORT=MOCK + "/ws/export",
-               SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN, SHUKU_DICT=dict_db)
+               SHUKU_CLIENTS=os.path.join(T, "clients"), SHUKU_UPDATE_URL=MOCK + "/watchtower", SHUKU_UPDATE_TOKEN=WT_TOKEN, SHUKU_DICT=dict_db,
+               SHUKU_NO_RESTART="1")
     log = open(os.path.join(T, "server.log"), "w")
     server_proc = subprocess.Popen([os.path.join(T, "shuku-e2e-server")], cwd=T, env=env, stdout=log, stderr=subprocess.STDOUT)
     wait(lambda: requests.get(BASE + "/api/ping", timeout=2).ok, 20, what="服务器启动")
@@ -656,7 +671,8 @@ def test_reading():
     check("阅读统计：今天 7 分钟", st["today"] == 420, st["today"])
     check("今年读完 1 本", st["finished_year"] >= 1)
     check("近 30 天每天数据", len(st["days"]) >= 30)
-    check("单次上报超过 10 分钟按 10 分钟算", (j("PUT", f"/api/books/{pid}/progress", json={"percent": 0.43, "seconds": 5000}) and j("GET", "/api/stats")["today"] == 1020), j("GET", "/api/stats")["today"])
+    # 1.0.0.7：离线攒下的阅读时长联网后一次补报，单次最多算 4 小时
+    check("单次上报最多算 4 小时", (j("PUT", f"/api/books/{pid}/progress", json={"percent": 0.43, "seconds": 99999}) and j("GET", "/api/stats")["today"] == 420 + 14400), j("GET", "/api/stats")["today"])
     bm = j("POST", f"/api/books/{pid}/bookmarks", json={"location": "epubcfi(/6/4!/4)", "label": "上部 · 10%", "text": "那是一个晴朗的早晨"})
     check("添加书签", bm["id"] > 0)
     check("书签列表", len(j("GET", f"/api/books/{pid}/bookmarks")) == 1)
@@ -880,7 +896,7 @@ def test_update():
     n = len(WT_LOG)
     r = j("POST", "/api/update/check")
     check("检查更新：带着令牌通知更新服务", WT_LOG[n:] == ["Bearer " + WT_TOKEN], WT_LOG[n:])
-    check("检查更新：书库没被换掉就是最新版本", r["ok"] and "最新" in r["reason"], r)
+    check("检查更新：书库没被换掉，如实说没有换新版本", r["ok"] and "没有换新版本" in r["reason"], r)
     s = j("GET", "/api/status")
     check("状态里有版本号（网页靠它发现书库升级了）", s.get("version") == c["server"], s.get("version"))
 
@@ -972,6 +988,295 @@ def test_fetch_discover():
     check("互联网档案馆下载（自动选 EPUB）", b and b["files"][0]["format"] == "epub")
 
 
+# ---- 1.0.0.7 书架和设置 ----
+# 家人账号、书架多选和右键菜单、想读评分、系列、标签、回收站、存储、备份、笔记页、取消下载、返回书架时保留位置
+
+CSP_ERRORS = []
+
+
+def test_v7_family_api():
+    global TOKEN
+    section("家人账号（接口）")
+    libs = j("GET", "/api/libraries")
+    lib_book = next(l["id"] for l in libs if l["kind"] == "book")
+    u = j("POST", "/api/users", json={"name": "临时", "password": "4321", "role": "member", "libraries": [lib_book]})
+    st = j("GET", "/api/auth/state")
+    check("有两个人时登录页列出名字", len(st.get("users") or []) == 2 and {x["name"] for x in st["users"]} >= {"临时"}, st.get("users"))
+    saved, TOKEN = TOKEN, ""
+    check("家人密码错误 401", api("POST", "/api/auth/login", 401, json={"user_id": u["id"], "password": "nope"}).status_code == 401)
+    TOKEN = j("POST", "/api/auth/login", json={"user_id": u["id"], "password": "4321", "Device": "e2e-家人"})["token"]
+    me = j("GET", "/api/me")
+    check("家人登录后是家人身份", me["name"] == "临时" and me["role"] == "member", me)
+    kinds = {b["kind"] for b in all_books()}
+    check("只限图书书库的家人看不到漫画", "comic" not in kinds and "book" in kinds, kinds)
+    for m, p in [("GET", "/api/users"), ("GET", "/api/storage"), ("GET", "/api/backups"), ("GET", "/api/trash"), ("POST", "/api/scan"), ("GET", "/api/events")]:
+        check(f"家人不能 {m} {p}", api(m, p, 403).status_code == 403)
+    s = j("GET", "/api/settings")
+    check("家人拿到的设置里没有 AI、路径", "ai" not in s and "inbox" not in s and "tts" in s, sorted(s))
+    TOKEN = saved
+    j("DELETE", f"/api/users/{u['id']}")
+    check("删除家人账号", "临时" not in [x["name"] for x in j("GET", "/api/users")])
+    ser = j("GET", "/api/series")
+    sant = next((x for x in ser if x["name"] == "三体"), None)
+    check("系列列表（三体 2 本）", sant and sant["count"] == 2 and sant["cover_id"], ser)
+
+
+def ui_v7_shelf(browser, context, attach, shot, reader_ready):
+    section("网页：1.0.0.7 书架、详情、系列、多选")
+    books = {b["title"]: b for b in all_books()}
+    qiu = books["球状闪电"]
+    j("POST", "/api/books/batch", json={"ids": [qiu["id"]], "tags_add": ["七号标签"]})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-shelf")
+    pg.goto(BASE + "/")
+    pg.wait_for_selector(".book")
+    # 右键菜单
+    pg.locator(".book", has_text="球状闪电").first.click(button="right")
+    pg.wait_for_selector(".ctx-menu.show")
+    items = pg.locator(".ctx-menu button").all_inner_texts()
+    check("右键菜单：打开、详情、读完、想读、删除", all(any(k in t for t in items) for k in ("详情", "想读", "删除")) and ("标为读完" in items or "标为未读" in items), items)
+    shot(pg, "v7-01-menu")
+    pg.click(".ctx-menu button >> text='想读'")
+    wait(lambda: book_by_title("球状闪电")["want"], 5, 0.2, "菜单里加入想读")
+    check("菜单里加入想读", True)
+    # 详情：评分、读完、标签
+    pg.locator(".book", has_text="球状闪电").first.click(button="right")
+    pg.click(".ctx-menu button:has-text('详情')")
+    pg.wait_for_selector(".drawer .mine .stars button")
+    check("详情里显示想读", "on" in pg.get_attribute(".drawer .btn.want", "class"))
+    pg.locator(".drawer .stars button").nth(3).click()
+    pg.wait_for_function("() => document.querySelectorAll('.drawer .stars button.on').length === 4")
+    check("详情里评 4 星", book_by_title("球状闪电")["rating"] == 4)
+    pg.click(".drawer .mine .seg button:has-text('读完')")
+    wait(lambda: book_by_title("球状闪电")["read_state"] == "done", 5, 0.2, "标为读完")
+    check("详情里标为读完", True)
+    shot(pg, "v7-02-detail")
+    pg.click(".drawer .tag.link:has-text('七号标签')")
+    pg.wait_for_selector(".filters .chip.on:has-text('七号标签')")
+    pg.wait_for_function("() => document.querySelectorAll('.grid .book').length === 1")
+    check("点标签筛选出带这个标签的书", pg.locator(".grid .book .t").first.inner_text() == "球状闪电")
+    # 想读、评分排序
+    pg.goto(BASE + "/#/want")
+    pg.wait_for_selector(".grid .book")
+    check("“想读”页", pg.locator(".grid .book .t").all_inner_texts() == ["球状闪电"], pg.locator(".grid .book .t").all_inner_texts())
+    # 系列
+    pg.goto(BASE + "/#/series")
+    pg.wait_for_selector(".series-card")
+    names = [pg.locator(".series-card .t").nth(i).inner_text() for i in range(pg.locator(".series-card").count())]
+    check("系列列表", "三体" in names and "进击的巨人" in names, names)
+    shot(pg, "v7-03-series")
+    pg.locator(".series-card", has_text="三体").click()
+    pg.wait_for_selector(".page-head .crumb")
+    pg.wait_for_function("() => document.querySelectorAll('.grid .book').length === 2")
+    check("系列里按序号排", pg.locator(".grid .book .t").all_inner_texts() == ["三体", "三体Ⅱ·黑暗森林"], pg.locator(".grid .book .t").all_inner_texts())
+    pg.goto(BASE + "/#/books")
+    pg.wait_for_selector(".grid .book")
+    pg.click(".filters .chip:has-text('按系列')")
+    pg.wait_for_selector(".series-card[data-series='三体']")
+    check("书架按系列折叠", pg.locator(".series-card[data-series='三体']").count() == 1 and pg.locator(".grid .book[data-id] .t", has_text="三体Ⅱ").count() == 0)
+    pg.click(".filters .chip:has-text('按系列')")
+    pg.wait_for_selector(".grid .book[data-id] >> text=三体Ⅱ·黑暗森林")
+    # 多选：标记想读、设成系列、删除进回收站、在设置里恢复
+    huo, liu = books["活着"], books["流浪地球"]
+    pg.goto(BASE + "/#/all")
+    pg.wait_for_selector(".grid .book")
+    pg.click(".page-head button:has-text('选择')")
+    pg.locator(f".grid .book[data-id='{huo['id']}']").click()
+    pg.locator(f".grid .book[data-id='{liu['id']}']").click()
+    check("多选：已选 2 本", pg.inner_text(".sel-bar b") == "已选 2 本", pg.inner_text(".sel-bar b"))
+    shot(pg, "v7-04-select")
+    pg.click(".sel-bar button:has-text('标记')")
+    pg.click(".ctx-menu button >> text='想读'")
+    pg.wait_for_selector(".sel-bar", state="detached")
+    check("多选后一起标为想读（退出多选）", book_by_title("活着")["want"] and book_by_title("流浪地球")["want"])
+    pg.click(".page-head button:has-text('选择')")
+    pg.locator(f".grid .book[data-id='{liu['id']}']").click()
+    pg.click(".sel-bar button:has-text('整理')")
+    pg.click(".ctx-menu button:has-text('系列')")
+    pg.fill(".form-dialog input >> nth=0", "测试系列")
+    pg.fill(".form-dialog input >> nth=1", "3")
+    pg.click(".form-dialog button[type=submit]")
+    pg.wait_for_selector(".sel-bar", state="detached")
+    b3 = book_by_title("流浪地球")
+    check("多选改系列（带起始序号）", b3["series"] == "测试系列" and b3["series_index"] == 3, (b3["series"], b3["series_index"]))
+    pg.wait_for_selector(".grid .book")
+    pg.click(".page-head button:has-text('选择')")
+    pg.locator(f".grid .book[data-id='{liu['id']}']").click()
+    pg.click(".sel-bar button:has-text('删除')")
+    pg.click(".dialog .btn.danger")
+    pg.wait_for_selector(".sel-bar", state="detached")
+    check("多选删除（进回收站）", book_by_title("流浪地球") is None)
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-trash .trash-row")
+    check("回收站列出删掉的书", pg.locator("#set-trash .trash-row", has_text="流浪地球").count() == 1)
+    pg.locator("#set-trash .trash-row", has_text="流浪地球").locator("button:has-text('恢复')").click()
+    wait(lambda: book_by_title("流浪地球") is not None, 10, 0.3, "从回收站恢复")
+    check("回收站里恢复（想读状态还在）", book_by_title("流浪地球")["want"])
+    # 设置：目录、存储、备份、家人账号
+    check("设置页目录", pg.locator(".set-toc .chip").count() >= 12, pg.locator(".set-toc .chip").count())
+    st = pg.locator("#set-storage")
+    st.locator(".st-block >> nth=4").wait_for()
+    check("存储与状态", st.locator(".st-block").count() >= 5 and "数据目录" in st.inner_text() and "缓存" in st.inner_text())
+    st.locator("button:has-text('全部清理')").click()
+    pg.click(".dialog .btn.primary")
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('已清理'))")
+    check("清理缓存", True)
+    bk = pg.locator("#set-backup")
+    first = pg.evaluate("() => document.querySelector('#set-backup .backup-row')?.dataset.name || ''")
+    bk.locator("button:has-text('立即备份')").click()
+    pg.wait_for_function("(f) => (document.querySelector('#set-backup .backup-row')?.dataset.name || '') > f", arg=first)
+    check("立即备份", "manual" in bk.locator(".backup-row >> nth=0").get_attribute("data-name"))
+    bk.locator(".backup-row >> nth=0").locator("button:has-text('恢复')").click()
+    pg.click(".dialog .btn.danger")
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('已准备好恢复'))")
+    check("从备份恢复（测试时不重启，提示重启后生效）", os.path.exists(os.path.join(T, "data", "restore.db")))
+    os.remove(os.path.join(T, "data", "restore.db"))
+    shot(pg, "v7-05-settings")
+    fam = pg.locator("#set-family")
+    fam.locator("button:has-text('添加家人')").click()
+    pg.fill(".form-dialog input >> nth=0", "小明")
+    pg.fill(".form-dialog input[type=password]", "1234")
+    pg.locator(".form-dialog .check", has_text="图书").locator("input").check()
+    pg.click(".form-dialog button[type=submit]")
+    fam.locator(".user-row[data-user='小明']").wait_for()
+    xm = next(x for x in j("GET", "/api/users") if x["name"] == "小明")
+    check("添加家人（限定书库）", xm["role"] == "member" and len(xm["libraries"]) == 1, xm)
+    ctx.close()
+
+    # 笔记页
+    section("网页：笔记")
+    s1 = books["三体"]
+    hl = j("POST", f"/api/books/{s1['id']}/bookmarks", json={"kind": "highlight", "location": "epubcfi(/6/4!/4/2/1:0)", "label": "第一章 科学边界", "text": "宇宙很大，生活更大", "note": "想想", "color": "yellow"})
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-notes")
+    pg.goto(BASE + "/#/notes")
+    pg.wait_for_selector(".note-item")
+    check("笔记页列出划线笔记", pg.locator(".note-item blockquote", has_text="宇宙很大").count() == 1)
+    pg.fill(".page-head .search input", "生活更大")
+    pg.wait_for_function("() => document.querySelectorAll('.note-item').length === 1")
+    item = pg.locator(".note-item", has_text="宇宙很大")
+    item.locator("button:has-text('改笔记')").click()
+    item.locator("textarea").fill("改过的笔记")
+    item.locator("button:has-text('保存')").click()
+    pg.wait_for_function("() => [...document.querySelectorAll('.note-item .n-note')].some(e => e.textContent === '改过的笔记')")
+    check("在笔记页改笔记", any(b["note"] == "改过的笔记" for b in j("GET", f"/api/books/{s1['id']}/bookmarks")))
+    md = api("GET", "/api/notes.md").text
+    check("导出全部笔记（Markdown）", "宇宙很大" in md and "改过的笔记" in md, md[:200])
+    shot(pg, "v7-06-notes")
+    item.locator(".n-body").click()
+    pg.wait_for_function("() => location.hash.startsWith('#/read/') && location.hash.includes('at=')")
+    check("点笔记回到书里那个位置", True)
+    ctx.close()
+
+    # 发现：取消下载
+    ctx = context()
+    pg = ctx.new_page(); attach(pg, "v7-cancel")
+    pg.goto(BASE + "/#/discover")
+    pg.fill(".link-add input", MOCK + "/slow/慢慢下载.epub")
+    pg.click(".link-add button[type=submit]")
+    pg.wait_for_selector(".uploads.jobs li button[aria-label^='取消下载']")
+    pg.click(".uploads.jobs li button[aria-label^='取消下载']")
+    wait(lambda: not [x for x in j("GET", "/api/fetch") if "slow" in x["url"]], 10, 0.3, "取消下载")
+    check("发现页能取消下载", True)
+    ctx.close()
+
+    # 从阅读器回到书架：搜索词、滚动位置都在
+    ctx = context(700, 420)
+    pg = ctx.new_page(); attach(pg, "v7-restore")
+    pg.goto(BASE + "/#/all")
+    pg.wait_for_selector(".grid .book")
+    pg.wait_for_timeout(500)
+    pg.mouse.wheel(0, 900)
+    pg.wait_for_timeout(500)
+    y0 = pg.evaluate("() => scrollY")
+    last = pg.locator(".grid .book[data-id]").last
+    last.click()
+    reader_ready(pg)
+    pg.keyboard.press("Escape")
+    pg.wait_for_selector(".grid .book")
+    pg.wait_for_timeout(700)
+    y1 = pg.evaluate("() => scrollY")
+    check("从阅读器回到书架，滚动位置还在", y0 > 100 and abs(y1 - y0) < 80, (y0, y1))
+    pg.fill(".page-head .search input", "刘慈欣")
+    pg.wait_for_timeout(600)
+    pg.locator(".grid .book[data-id]").first.click()
+    reader_ready(pg)
+    pg.keyboard.press("Escape")
+    pg.wait_for_selector(".grid .book")
+    check("从阅读器回到书架，搜索词还在", pg.input_value(".page-head .search input") == "刘慈欣")
+    ctx.close()
+
+    # 家人登录：选名字、只看到允许的书库、没有管理功能
+    section("网页：家人账号")
+    ctx = context(token=False)
+    pg = ctx.new_page(); attach(pg, "v7-member")
+    pg.goto(BASE + "/")
+    pg.wait_for_selector(".who-btn")
+    check("登录页先选人", pg.locator(".who-btn").count() == 2)
+    shot(pg, "v7-07-who")
+    pg.locator(".who-btn", has_text="小明").click()
+    pg.fill(".auth input[type=password]", "1234")
+    pg.click(".auth button[type=submit]")
+    pg.wait_for_selector(".grid .book")
+    titles = pg.locator(".grid .book .t").all_inner_texts()
+    check("家人只看到允许的书库", "活着" in titles and not any("进击的巨人" in t for t in titles), titles)
+    nav = pg.inner_text(".side .nav")
+    check("家人没有整理、发现、添加书", "整理" not in nav and "发现" not in nav and pg.locator(".page-head button:has-text('添加书')").count() == 0, nav)
+    pg.locator(".book", has_text="镜花缘").first.click(button="right")
+    pg.wait_for_selector(".ctx-menu.show")
+    check("家人的菜单里没有删除", pg.locator(".ctx-menu button:has-text('删除')").count() == 0)
+    pg.click(".ctx-menu button:has-text('详情')")
+    pg.wait_for_selector(".drawer .mine")
+    check("家人看详情：没有编辑、删除", pg.locator(".drawer .form-grid").count() == 0 and pg.locator(".drawer footer").count() == 0)
+    pg.click(".drawer .mine .seg button:has-text('读完')")
+    pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('已标为读完'))")
+    check("家人标为读完，不影响管理员", book_by_title("镜花缘")["read_state"] != "done")
+    pg.keyboard.press("Escape")
+    pg.goto(BASE + "/#/organize")
+    pg.wait_for_function("() => location.hash === '#/'")
+    check("家人打不开整理页", True)
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-account")
+    check("家人的设置页：没有家人账号、存储、备份", pg.locator("#set-family, #set-storage, #set-backup, #set-libs").count() == 0 and "小明" in pg.inner_text("#set-account"))
+    shot(pg, "v7-08-member-settings")
+    pg.locator("#set-account button:has-text('退出登录')").click()
+    pg.wait_for_selector(".auth .hello")
+    check("退出后登录页记得上次选的人", "小明" in pg.inner_text(".auth .hello"))
+    ctx.close()
+
+    # 手机 App 里的下载设置（模拟原生桥）
+    section("网页：手机 App 的下载设置")
+    fake = """
+      window.__calls = []; window.__store = { 'shuku.token': %s }
+      window.ShukuNative = {
+        storageGet: k => (k in __store ? __store[k] : null), storageSet: (k, v) => { __store[k] = v }, storageRemove: k => { delete __store[k] },
+        storageKeys: () => JSON.stringify(Object.keys(__store)), version: () => '1.0-test', deviceName: () => '测试手机',
+        setRoute: j => 0, setNetwork: j => 0, setToken: t => 0, setThemeColor: () => 0, setReaderMode: () => 0,
+        prefs: () => JSON.stringify({ download_limit_mb: 0, auto_clean_finished: false }), setPref: (k, v) => __calls.push(['setPref', k, v]),
+        downloads: () => '[]',
+        downloadInfo: () => JSON.stringify({ items: [{ id: %d, title: '活着', state: 'error', error: '网络断了', size: 0 }, { id: 99999, title: '下好的书', state: 'done', size: 3145728, format: 'epub' }], total_size: 3145728, limit_mb: 0 }),
+        download: (id, json) => __calls.push(['download', id, json]), removeDownload: id => __calls.push(['removeDownload', id]),
+      }""" % (json.dumps(TOKEN), huo["id"])
+    ctx = browser.new_context(viewport={"width": 412, "height": 900}, device_scale_factor=2, has_touch=True, is_mobile=True, locale="zh-CN")
+    ctx.add_init_script(fake)
+    pg = ctx.new_page(); attach(pg, "v7-native")
+    pg.goto(BASE + "/#/settings")
+    pg.wait_for_selector("#set-app")
+    app = pg.locator("#set-app")
+    check("显示下载占用", "共占用 3.0 MB" in app.inner_text(), app.inner_text())
+    app.locator("select[aria-label='下载到手机最多占用']").select_option("1024")
+    app.locator(".set-row", has_text="读完的书自动从手机删掉").locator("input").check()
+    calls = pg.evaluate("() => __calls.filter(c => c[0] === 'setPref')")
+    check("下载上限、读完自动删除交给原生", ["setPref", "download_limit_mb", "1024"] in calls and ["setPref", "auto_clean_finished", "true"] in calls, calls)
+    check("下载失败显示原因", "网络断了" in app.inner_text())
+    app.locator(".dev-row", has_text="活着").locator("button:has-text('重试')").click()
+    pg.wait_for_function("() => __calls.some(c => c[0] === 'download')")
+    d = pg.evaluate("() => __calls.find(c => c[0] === 'download')")
+    check("下载失败可以重试（参数和详情里一样）", d[1] == huo["id"] and json.loads(d[2])["title"] == "活着", d)
+    shot(pg, "v7-09-native")
+    ctx.close()
+
+
 # ---------------------------------------------------------------- 网页检查
 
 def ui_tests():
@@ -980,6 +1285,7 @@ def ui_tests():
     errors = []
 
     def attach(pg, label):
+        pg.on("console", lambda m: "Content Security Policy" in m.text and CSP_ERRORS.append(f"[{label}] {m.text[:240]}"))
         pg.on("pageerror", lambda e: errors.append(f"[{label}] PAGEERROR {e}"))
         pg.on("console", lambda m: m.type == "error" and "favicon" not in m.text and "Failed to load resource" not in m.text and errors.append(f"[{label}] console.error {m.text}"))
 
@@ -1039,11 +1345,15 @@ def ui_tests():
         check("点书中内容跳到原文", True)
         shot(pg, "03-jump")
         pg.keyboard.press("Escape")
-        pg.wait_for_selector(".book")
+        # 1.0.0.7：从阅读器回来，搜索词和书中内容的结果都还在
+        pg.wait_for_selector(".ft-sec .ft-hit")
+        check("从阅读器回到书架，搜索结果还在", pg.input_value(".search input") == "游手好闲", pg.input_value(".search input"))
         pg.fill(".search input", "")
+        pg.wait_for_selector(".book")
         pg.wait_for_timeout(500)
         card = pg.locator(".book", has_text="活着").first
         card.click(button="right")
+        pg.click(".ctx-menu button:has-text('详情')")
         pg.wait_for_selector(".drawer.show h2")
         pg.wait_for_selector(".drawer .detail-top h2")
         check("右键打开书籍详情", pg.inner_text(".drawer .detail-top h2") == "活着", pg.inner_text(".drawer .detail-top h2"))
@@ -1081,16 +1391,16 @@ def ui_tests():
         pg.click("button:has-text('检测两个地址')")
         pg.wait_for_function("() => [...document.querySelectorAll('.status-line')].some(e => e.textContent.includes('可以连接'))")
         check("检测内网地址", True)
-        pg.locator(".set-sec", has_text="听书").locator("button:has-text('试听')").click()
+        pg.locator("#set-tts").locator("button:has-text('试听')").click()
         pg.wait_for_timeout(1500)
-        status = pg.locator(".set-sec", has_text="听书").locator(".muted.small-text").first.inner_text()
+        status = pg.locator("#set-tts").locator(".muted.small-text").first.inner_text()
         check("设置里试听（自定义语音接口）", status == "", status)
-        up = pg.locator(".set-sec", has_text="版本与升级")
+        up = pg.locator("#set-update")
         up.locator("text=书库服务器").wait_for()
         check("设置里有“版本与升级”", up.locator("a[href$='/dl/shuku-android.apk']").count() == 1 and up.locator("a[href$='/dl/shuku-wear.apk']").count() == 1 and up.locator("a[href$='/dl/shuku-extension.zip']").count() == 1, up.inner_text())
         n = len(WT_LOG)
         up.locator("button:has-text('检查更新')").click()
-        up.locator("text=已经是最新版本").wait_for(timeout=10000)
+        up.locator("text=没有换新版本").wait_for(timeout=10000)
         check("网页上点“检查更新”", len(WT_LOG) == n + 1 and up.locator("button:has-text('检查更新')").is_enabled())
         pg.set_viewport_size({"width": 1366, "height": 3000})
         shot(pg, "06-settings")
@@ -1454,6 +1764,7 @@ def ui_tests():
         check("状态栏颜色交给原生", len(calls("setThemeColor")) >= 1)
         check("App 里不注册 Service Worker", pg.evaluate("() => navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(r => r.length) : 0") == 0)
         pg.locator(".book", has_text="活着").first.click(button="right")
+        pg.click(".ctx-menu button:has-text('详情')")
         pg.wait_for_selector(".drawer.show .read-row button:has-text('下载到手机')")
         pg.click(".drawer .read-row button:has-text('下载到手机')")
         pg.wait_for_selector(".drawer .read-row button:has-text('已下载')")
@@ -1469,7 +1780,7 @@ def ui_tests():
         check("连接手表：后台进行，按钮先禁用", pg.locator(".set-sec button:has-text('连接手表')").is_disabled() and len(calls("syncWatch")) == 1)
         pg.wait_for_selector(".toast >> text=已把连接信息发给 1 块手表")
         check("连接手表：结果用事件回来", pg.locator(".set-sec button:has-text('连接手表')").is_enabled())
-        up = pg.locator(".set-sec", has_text="版本与升级")
+        up = pg.locator("#set-update")
         up.locator("text=本机 1.0.0.5").wait_for()
         check("App 里显示本机版本和最新版本", f"最新 {NEW}" in up.inner_text(), up.inner_text())
         up.locator("button:text-is('更新')").click()
@@ -1479,7 +1790,7 @@ def ui_tests():
         pg.evaluate("() => { delete ShukuNative.appInfo; delete ShukuNative.updateApp; delete ShukuNative.updateWatchApp; location.hash = '#/stats' }")
         pg.wait_for_selector(".tiles .tile")
         pg.evaluate("() => { location.hash = '#/settings' }")
-        up = pg.locator(".set-sec", has_text="版本与升级")
+        up = pg.locator("#set-update")
         up.locator("button:has-text('下载新版')").click()
         ext_calls = calls("openExternal")
         check("旧版 App：用手机浏览器下载新版", ext_calls and ext_calls[-1][1] == BASE + "/dl/shuku-android.apk" and "还不会自己更新" in up.inner_text(), ext_calls)
@@ -1517,6 +1828,8 @@ def ui_tests():
         check("首页按返回键交给 App（退到后台）", pg.evaluate("() => { location.hash = '#/'; return new Promise(r => setTimeout(() => r(window.shukuBack()), 300)) }") is False)
         ctx.close()
 
+        ui_v7_shelf(browser, context, attach, shot, reader_ready)
+
         # ---- 上传 ----
         section("网页：上传")
         p = os.path.join(T, "remote", "上传测试《夜航船》张岱.epub")
@@ -1537,6 +1850,7 @@ def ui_tests():
 
     section("网页：脚本错误")
     check("没有脚本错误", not errors, "\n      ".join(errors[:20]))
+    check("没有违反内容安全策略（CSP）", not CSP_ERRORS, "\n      ".join(CSP_ERRORS[:10]))
 
 
 def ext_tests():
@@ -1819,7 +2133,7 @@ def main():
             time.sleep(3600)
     try:
         setup()
-        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_dict, test_fetch_discover]:
+        for t in [test_auth, test_ingest, test_search, test_fulltext, test_reading, test_organize, test_upload_ai_delete, test_online, test_tts, test_opds, test_settings_libs, test_clients, test_update, test_dict, test_fetch_discover, test_v7_family_api]:
             try:
                 t()
             except Exception as e:
