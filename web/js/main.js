@@ -285,6 +285,40 @@ addEventListener('hashchange', route)
 
 let lastEvent = 0
 let lastRefresh = 0, refreshPending = false, wasBusy = false, upgradeNoticed = false
+// 入库、整理的动态都放在同一条提示里（key: 'import'）：只来一条时照原样显示（能点“查看”）；
+// 连着来好几条（一次放进很多本书）时合成一条会更新的汇总——“已入库 N 本，M 本识别把握不大放进了待确认”，点“去整理”。
+// 以前每条单独弹一个、每 6 秒弹一轮，每条停 7 秒，手机上提示条堆满屏幕
+let importRun = null // 这一轮（60 秒内连着来的）动态的统计
+function showEvents(evs) {
+  if (!evs.length) return
+  const now = Date.now()
+  if (!importRun || now - importRun.at > 60000) importRun = { n: 0, ok: 0, review: 0, err: 0, other: 0 }
+  const r = importRun
+  r.at = now
+  for (const e of evs) {
+    r.n++
+    if (/^已入库/.test(e.message)) r.ok++
+    else if (/待确认/.test(e.message)) r.review++
+    else if (e.level === 'error') r.err++
+    else if (!/^已下载/.test(e.message)) r.other++ // “已下载，正在入库”后面跟着“已入库”，不单算
+  }
+  const latest = evs[0] // 新的在前
+  if (r.n === 1) {
+    toast(latest.message, { key: 'import', error: latest.level === 'error', ...(latest.book_id ? { action: { label: '查看', run: () => ctx.openBook(latest.book_id) } } : {}) })
+    return
+  }
+  const parts = []
+  if (r.ok) parts.push(`已入库 ${r.ok} 本`)
+  if (r.review) parts.push(`${r.review} 本识别把握不大，放进了待确认`)
+  if (r.err) parts.push(`${r.err} 个出错`)
+  if (r.other) parts.push(`另有 ${r.other} 条动态`)
+  const t = /《[^》]+》/.exec(latest.message)
+  let msg = parts.join('，') || latest.message
+  if (t) msg += `（最近：${t[0]}）`
+  const go = r.review || r.err ? { label: '去整理', run: () => ctx.navigate('#/organize') } : { label: '看书架', run: () => ctx.navigate('#/all') }
+  toast(msg, { key: 'import', error: r.err > 0 && !r.ok && !r.review, action: go, duration: 10000 })
+}
+
 async function pollStatus() {
   if (!ctx.user) return
   try {
@@ -299,13 +333,7 @@ async function pollStatus() {
     }
     if (lastEvent && s.last_event > lastEvent) {
       // 入库动态只有管理员看得到；家人只刷新书架
-      if (ctx.isAdmin) {
-        const evs = await api('/api/events?since=' + lastEvent)
-        // 一次放进很多书时，只提示最新的几条，其余的合成一条，不刷屏
-        const show = evs.length > 4 ? evs.slice(0, 3) : evs
-        for (const e of show.slice().reverse()) toast(e.message, e.book_id ? { action: { label: '查看', run: () => ctx.openBook(e.book_id) } } : {})
-        if (evs.length > show.length) toast(`另外还处理好了 ${evs.length - show.length} 个文件`)
-      }
+      if (ctx.isAdmin) showEvents(await api('/api/events?since=' + lastEvent))
       await ctx.refreshFacets()
       refreshPending = true
     }

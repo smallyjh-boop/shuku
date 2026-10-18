@@ -115,12 +115,24 @@ export function iconBtn(name, title, onclick, extra = {}) {
 
 // ---------- 提示 ----------
 
+// 提示条：最多同时显示 3 条（多了先关掉最早的）。
+// opts.key：同一类提示只留一条，已经有了就更新文字、重新计时（比如入库进度），不再一条条往上叠
+const MAX_TOASTS = 3
 export function toast(msg, opts = {}) {
   const box = document.getElementById('toasts')
-  const el = h('div', { class: 'toast' + (opts.error ? ' err' : ''), role: 'status' }, h('span', null, msg))
-  if (opts.action) el.append(h('button', { onclick: () => { opts.action.run(); el.remove() } }, opts.action.label))
-  box.append(el)
-  setTimeout(() => el.remove(), opts.duration || (opts.action ? 7000 : 3200))
+  if (!box) return
+  let el = opts.key ? [...box.children].find(x => x.dataset.key === opts.key) : null
+  if (el) clearTimeout(el._timer)
+  else {
+    el = h('div', { role: 'status' })
+    if (opts.key) el.dataset.key = opts.key
+    box.append(el)
+    while (box.children.length > MAX_TOASTS) box.firstElementChild.remove()
+  }
+  el.className = 'toast' + (opts.error ? ' err' : '')
+  fill(el, h('span', null, msg),
+    opts.action ? h('button', { onclick: () => { opts.action.run(); el.remove() } }, opts.action.label) : null)
+  el._timer = setTimeout(() => el.remove(), opts.duration || (opts.action ? 7000 : 3200))
 }
 export const toastError = (e) => toast(e?.message || String(e), { error: true, duration: 5000 })
 

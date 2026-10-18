@@ -1846,7 +1846,25 @@ def ui_tests():
         check("上传面板显示完成", True)
         pg.wait_for_function("() => [...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('夜航船'))", timeout=40000)
         check("入库后有提示", True)
+        # 一次放进很多本书（一本本陆续入库）：入库动态合成一条会更新的提示，提示条不会堆满屏幕（手机尺寸）
+        pg.set_viewport_size({"width": 390, "height": 844})
+        pg.wait_for_timeout(7000)
+        most = 0
+        for i in range(8):
+            body = (f"第一章 连续入库{i}\n" + f"连续入库测试第{i}本的正文。" * 120).encode()
+            api("POST", "/api/upload?path=" + urllib.parse.quote(f"[www.xx.com]连续入库测试{i}_精校版.txt"), data=body)
+            pg.wait_for_timeout(1500)
+            most = max(most, pg.locator("#toasts .toast").count())
+        pg.wait_for_timeout(7000)
+        most = max(most, pg.locator("#toasts .toast").count())
+        texts = pg.evaluate("() => [...document.querySelectorAll('#toasts .toast')].map(t => t.innerText)")
+        check("连续入库好几本：提示合成一条、不堆满屏幕", most <= 2 and any(("本" in t and ("待确认" in t or "已入库" in t)) for t in texts), f"{most} {texts}")
+        shot(pg, "52-import-toast")
         ctx.close()
+        # 这几本测试书删掉（进回收站），不影响后面的检查
+        for b in all_books():
+            if "连续入库测试" in b["title"]:
+                api("DELETE", f"/api/books/{b['id']}")
         ui_reader_v7(browser, context, attach, reader_ready, shot)
         browser.close()
 

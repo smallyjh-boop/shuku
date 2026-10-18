@@ -329,7 +329,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .dialog p { margin: 0 0 18px; color: var(--ink-2); font-size: 14px; }
 .dialog .row { justify-content: flex-end; }
 
-#toasts { position: fixed; left: 50%; bottom: calc(24px + var(--safe-b)); transform: translateX(-50%); z-index: 100; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
+#toasts { position: fixed; left: 50%; bottom: calc(24px + var(--safe-b)); transform: translateX(-50%); width: min(560px, calc(100vw - 32px)); z-index: 100; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
 .toast { padding: 10px 16px; border-radius: 8px; background: var(--ink); color: var(--bg); font-size: 14px; box-shadow: var(--shadow-pop); max-width: min(560px, calc(100vw - 32px)); animation: toast-in .2s ease; pointer-events: auto; display: flex; gap: 12px; align-items: center; }
 .toast button { border: 0; background: none; color: var(--accent); font-weight: 600; cursor: pointer; padding: 0; }
 :root[data-theme="dark"] .toast button { color: #2F6F8F; }
@@ -450,6 +450,8 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   .filters { flex-wrap: nowrap; overflow-x: auto; margin: -4px -16px 18px; padding: 0 16px; }
   .filters .total { display: none; }
   .uploads { left: 12px; right: 12px; width: auto; bottom: calc(76px + var(--safe-b)); }
+  body:has(.tabbar) #toasts { bottom: calc(76px + var(--safe-b)); } /* 手机上提示条放在底部标签栏上面，不挡标签 */
+  .toast button { white-space: nowrap; }
   .detail-top { grid-template-columns: 104px 1fr; gap: 16px; }
   .detail-top h2 { font-size: 19px; }
   .drawer .body { padding: 18px 16px; }
