@@ -1009,7 +1009,7 @@ def test_fetch_discover():
     j("POST", "/api/fetch", json={"url": "ia:rulinwaishi00wu", "catalog": "ia"})
     b = wait(lambda: book_by_title("儒林外史"), 40, 1, "档案馆入库")
     check("互联网档案馆下载（自动选 EPUB）", b and b["files"][0]["format"] == "epub")
-    # 1.0.0.8：书源里的书目信息（主题、简介）跟着下载走，入库识别时用上（AI 也看得到；没配置 AI 时按主题分类）
+    # 1.0.0.9：书源里的书目信息（主题、简介）跟着下载走，入库识别时用上（AI 也看得到；没配置 AI 时按主题分类）
     make_epub(os.path.join(T, "remote", "hint-test.epub"), "", "", [("第一回", ["书源信息测试。" * 40])])
     n0 = len(AI_LOG)
     j("POST", "/api/fetch", json={"url": MOCK + "/files/hint-test.epub", "name": "书源信息测试 - 测试作者", "catalog": "gutenberg", "title": "书源信息测试", "author": "测试作者",
@@ -1978,7 +1978,7 @@ has_toast = lambda pg, text: pg.evaluate("(t) => [...document.querySelectorAll('
 
 
 def ui_v8_eink_legacy(browser, context, attach, reader_ready, shot):
-    section("网页：墨水屏模式、兼容旧系统的网页、打不开时的诊断（1.0.0.8）")
+    section("网页：墨水屏模式、兼容旧系统的网页、打不开时的诊断（1.0.0.9）")
     books = all_books()
     epub = next((b for b in books if "epub" in str(b.get("formats"))), None)
     pdf = next((b for b in books if "pdf" in str(b.get("formats"))), None)
@@ -2332,7 +2332,7 @@ def ui_reader_v7(browser, context, attach, reader_ready, shot):
     check("网页自己的脚本、样式没有违反内容安全策略", not own_csp, own_csp[:5])
 
 
-# ---- 1.0.0.8：翻译本页、扫描版 PDF 识别文字 ----
+# ---- 1.0.0.9：翻译本页、扫描版 PDF 识别文字 ----
 
 # 这一页开头的位置记在 window.__start 上；之后检查它还在这一页上（翻译加了译文以后，读到的地方不能跑掉）
 MARK_START_JS = "() => { const r = document.querySelector('foliate-view').lastLocation.range; window.__start = [r.startContainer, r.startOffset]; return true }"
@@ -2348,7 +2348,7 @@ TR_ON_PAGE_JS = """() => { const r = document.querySelector('foliate-view').last
 
 
 def ui_translate_ocr(browser, context, attach, reader_ready, shot):
-    section("网页：翻译本页、扫描版 PDF 识别文字（1.0.0.8）")
+    section("网页：翻译本页、扫描版 PDF 识别文字（1.0.0.9）")
     tr_reqs = []
     ai_before = j("GET", "/api/settings")["ai"]
 

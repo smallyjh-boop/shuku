@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04  # 固定系统版本：ubuntu-latest 2026-10-19 起换成 Ubuntu 26，避免打包环境突然变化
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 版本号
         env:
@@ -84,7 +84,7 @@ jobs:
 
       # ---------- 手机、手表 App 和浏览器插件 ----------
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -240,7 +240,7 @@ jobs:
             echo "::warning::取不到上一版镜像，这次不测升级"
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22' # 构建兼容旧系统的网页；旧浏览器检查要用 Node 22 自带的 WebSocket
 
@@ -403,7 +403,7 @@ jobs:
           sed -i 's/^          //' "$RUNNER_TEMP/req.py"
           # 上一版：设密码、放一本书、记进度和笔记、标成读完
           start shuku-old shuku-prev:latest
-          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF'
+          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF' 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           import json, sys, time, urllib.parse
           from req import req
           tok = req("POST", "/api/auth/setup", {"Password": "upgrade-test-1", "Device": "ci"})["token"]
@@ -425,8 +425,10 @@ jobs:
           docker stop -t 20 shuku-old > /dev/null && docker rm shuku-old > /dev/null
           # 这一版：同一个数据目录启动，自动升级数据库
           start shuku-new "$IMAGE:latest"
-          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF'
-          import json, sys
+          # 这一版改了数据库结构才会升级、才有“升级前的备份”（没改结构的版本没有）
+          if docker logs shuku-new 2>&1 | grep -q "数据库已升级到第"; then export MIGRATED=1; else export MIGRATED=0; fi
+          PYTHONPATH="$RUNNER_TEMP" python3 - "$U" <<'EOF' 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          import json, os, sys
           from req import req
           st = json.load(open(sys.argv[1] + "/state.json"))
           tok, bid = st["tok"], st["id"]
@@ -441,8 +443,9 @@ jobs:
           assert req("GET", "/api/me", tok=tok)["role"] == "admin"
           assert req("POST", "/api/auth/login", {"Password": "upgrade-test-1", "Device": "ci2"})["token"]
           bk = req("GET", "/api/backups", tok=tok)["backups"]
-          assert any(x["kind"] == "upgrade" for x in bk), bk
-          print("从上一版升级：书、进度、笔记、读完状态、登录都在；升级前的备份：", [x["name"] for x in bk if x["kind"] == "upgrade"])
+          if os.environ.get("MIGRATED") == "1":
+              assert any(x["kind"] == "upgrade" for x in bk), bk
+          print("从上一版升级：书、进度、笔记、读完状态、登录都在；" + ("升级前的备份：" + str([x["name"] for x in bk if x["kind"] == "upgrade"]) if os.environ.get("MIGRATED") == "1" else "这一版没有改数据库结构"))
           EOF
           docker logs shuku-new 2>&1 | grep -E "数据库|备份|启动|全文索引" | tail -n 20
           docker rm -f shuku-new > /dev/null

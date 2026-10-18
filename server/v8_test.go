@@ -1,6 +1,6 @@
 package main
 
-// 1.0.0.8：翻译、扫描版 PDF 识别文字
+// 1.0.0.9：翻译、扫描版 PDF 识别文字
 
 import (
 	"encoding/json"
