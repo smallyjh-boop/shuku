@@ -703,6 +703,20 @@ def test_remote_reading():
     check("书内搜索：用全文索引找出在哪几章", r.get("indexed") and r["hits"] and all("sec" in h and "晴朗" in h["snippet"] for h in r["hits"]), r)
     r = j("GET", f"/api/files/{fid}/search?q=" + urllib.parse.quote("的"))
     check("书内搜索：一个字的让阅读器自己搜", r.get("indexed") is False)
+    # PDF：墨水屏上由书库画页面（server/pdfpages.go；这里有 mutool 用 mutool，没有用 poppler）
+    pdf = [b for b in all_books() if "深度学习" in b["title"]][0]
+    pfid = j("GET", f"/api/books/{pdf['id']}/read")["file_id"]
+    inf = j("GET", f"/api/files/{pfid}/pdf/info")
+    check("PDF 页数、每页大小", inf["pages"] >= 1 and len(inf["sizes"]) == inf["pages"] and inf["sizes"][0][0] > 100, {k: inf[k] for k in ("pages", "outline")})
+    r = api("GET", f"/api/files/{pfid}/pdf/page/1?w=600&g=1")
+    im = Image.open(io.BytesIO(r.content))
+    check("墨水屏的页面：按要的宽度画成 16 级灰度的 PNG", r.headers.get("Content-Type") == "image/png" and im.width == 600 and im.mode == "P" and len(im.getpalette() or []) <= 16 * 3 and im.getextrema() != (0, 0), (im.size, im.mode))
+    r = api("GET", f"/api/files/{pfid}/pdf/page/1?w=600")
+    check("彩色的页面：JPEG", r.headers.get("Content-Type") == "image/jpeg" and Image.open(io.BytesIO(r.content)).width == 600)
+    t = j("GET", f"/api/files/{pfid}/pdf/text/1")
+    txt = "".join(l["text"] for l in t["lines"])
+    check("一页的文字：每行的文字和位置", "Neural" in txt and all(0 <= l["x"] <= 1 and 0 <= l["y"] <= 1 and l["w"] > 0 for l in t["lines"]), t["lines"][:3])
+    check("页码超出范围：404", api("GET", f"/api/files/{pfid}/pdf/page/{inf['pages'] + 1}?w=600", 404).status_code == 404)
 
 
 def test_reading():
@@ -1653,6 +1667,27 @@ def ui_tests():
         s1 = cfi()
         pg.touchscreen.tap(30, 420); pg.wait_for_timeout(900)
         check("手机点左侧往回翻", cfi() != s1)
+        s2 = cfi()
+        pg.touchscreen.tap(250, 150); pg.wait_for_timeout(900)
+        check("手机点中间偏上（正中间那一块外面）也往后翻", cfi() != s2 and "ui" not in (pg.get_attribute(".reader", "class") or ""), (s2, cfi()))
+        # 轻轻一划（50 像素）就翻一页，不用滑过半页。翻页手势按 screenX 算（CDP 模拟的触摸没有 screenX），所以在书页里直接发触摸事件
+        SWIPE = """([x0, x1]) => new Promise(done => {
+          const target = document.querySelector('foliate-view').renderer.getContents()[0].doc.body
+          const fire = (type, x) => { const t = new Touch({ identifier: 1, target, screenX: x, screenY: 420, clientX: x, clientY: 420 })
+            target.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, touches: type === 'touchend' ? [] : [t], changedTouches: [t] })) }
+          fire('touchstart', x0)
+          let k = 0
+          const step = () => { k++; if (k <= 5) { fire('touchmove', x0 + (x1 - x0) * k / 5); setTimeout(step, 30) } else { fire('touchend', x1); setTimeout(done, 900) } }
+          setTimeout(step, 30)
+        })"""
+        swipe = lambda x0, x1: pg.evaluate(SWIPE, [x0, x1])
+        s3 = cfi()
+        swipe(300, 250)
+        s4 = cfi()
+        check("手机轻轻往左一划翻到下一页", s4 != s3, (s3, s4))
+        swipe(150, 200)
+        check("往右一划翻回来", cfi() == s3, (s3, cfi()))
+        check("划完停在整页上（不停在两页中间）", pg.evaluate("() => { const r = document.querySelector('foliate-view').renderer; return Math.abs(r.start / r.size - Math.round(r.start / r.size)) < 0.01 }"))
         pg.touchscreen.tap(195, 420); pg.wait_for_timeout(400)
         check("手机点中间显示工具栏", "ui" in pg.get_attribute(".reader", "class"))
         shot(pg, "15-mobile-reader")
@@ -2032,7 +2067,7 @@ def ui_v8_eink_legacy(browser, context, attach, reader_ready, shot):
     section("网页：墨水屏模式、兼容旧系统的网页、打不开时的诊断（1.0.0.9）")
     books = all_books()
     epub = next((b for b in books if "epub" in str(b.get("formats"))), None)
-    pdf = next((b for b in books if "pdf" in str(b.get("formats"))), None)
+    pdf = next((b for b in books if "深度学习" in b["title"] and "pdf" in str(b.get("formats"))), None) or next((b for b in books if "pdf" in str(b.get("formats"))), None)
     comic = next((b for b in books if b.get("kind") == "comic"), None)
 
     # ---- 新浏览器默认用新的那一套；设置里打开墨水屏模式 ----
@@ -2093,8 +2128,12 @@ def ui_v8_eink_legacy(browser, context, attach, reader_ready, shot):
     if pdf:
         pg.goto(BASE + f"/#/read/{pdf['id']}")
         reader_ready(pg)
-        pg.wait_for_function("() => [...document.querySelectorAll('.pdfv canvas')].some(c => c.width > 50)", timeout=30000)
+        pg.wait_for_selector(".pdfv .pg.cur img.pgimg", timeout=30000)
         check("墨水屏：PDF 按页翻（不滚动，这本书在别处选过滚动也一样）", pg.evaluate("() => !!document.querySelector('.pdfv.paged')"))
+        check("墨水屏：PDF 由书库画成灰度图（不下载整本、不用 pdf.js）", pg.evaluate("() => { const i = document.querySelector('.pdfv .pg.cur img.pgimg'); return !!i && /\\/pdf\\/page\\/\\d+\\?w=\\d+&g=1/.test(i.src) && !document.querySelector('.pdfv canvas') }"))
+        pg.wait_for_selector(".pdfv .pg.cur .textLayer[data-ready]", timeout=20000)
+        check("墨水屏：PDF 文字层（书库取出的文字）", "Neural" in pg.inner_text(".pdfv .pg.cur .textLayer") if pg.locator(".pdfv .pg.cur .textLayer").count() else False)
+        check("墨水屏：页面里只放当前页和前后一页", pg.evaluate("() => document.querySelectorAll('.pdfv .pages > .pg').length <= 3"))
         shot(pg, "72-eink-pdf")
     # 关掉
     pg.goto(BASE + "/#/settings")
@@ -2121,12 +2160,22 @@ def ui_v8_eink_legacy(browser, context, attach, reader_ready, shot):
             check("兼容旧系统的那一套：EPUB 能读", n > 20, n)
             pg.keyboard.press("ArrowRight"); pg.wait_for_timeout(500)
         if pdf:
+            # 旧浏览器在线时由书库画页面；断网时（离线下载过的书）还是 pdf.js：用 shuku.pdfLocal 强制走 pdf.js，检查普通脚本的 worker
+            pg.evaluate("() => localStorage.setItem('shuku.pdfLocal', '1')")
             pg.goto(BASE + f"/?legacy=1#/read/{pdf['id']}")
             reader_ready(pg)
             pg.wait_for_function("() => [...document.querySelectorAll('.pdfv canvas')].some(c => c.width > 50)", timeout=30000)
             pg.wait_for_function("() => [...document.querySelectorAll('.pdfv .textLayer')].some(t => t.textContent.length > 5)", timeout=30000)
             check("兼容旧系统的那一套：PDF 画出来、有文字层（普通脚本的 worker）", True)
             shot(pg, "73-legacy-pdf")
+            pg.evaluate("() => localStorage.removeItem('shuku.pdfLocal')")
+            pg.goto(BASE + "/?legacy=1#/all")
+            pg.wait_for_selector(".book")
+            pg.goto(BASE + f"/?legacy=1#/read/{pdf['id']}")
+            reader_ready(pg)
+            pg.wait_for_selector(".pdfv .pg img.pgimg", state="attached", timeout=30000)
+            pg.wait_for_function("() => [...document.querySelectorAll('.pdfv .textLayer')].some(t => t.textContent.length > 5)", timeout=30000)
+            check("兼容旧系统的那一套：在线时 PDF 由书库画（彩色 JPEG）、有文字层", pg.evaluate("() => { const i = document.querySelector('.pdfv img.pgimg'); return !!i && i.src.indexOf('/pdf/page/') > 0 && i.src.indexOf('g=1') < 0 }"))
         if comic:
             pg.goto(BASE + f"/?legacy=1#/read/{comic['id']}")
             reader_ready(pg)

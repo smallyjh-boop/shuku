@@ -123,7 +123,8 @@ if (samples) await addSamples()
 const books = (await api('/api/books?limit=200&sort=title')).items || []
 // 放了测试书时优先用刚放进去的（书库里原有的书可能是扫描版 PDF 之类，没有文字层）
 const fmtOf = b => [].concat(b.formats || []).join(',')
-const pick = (re, ok = () => true) => (samples && books.find(b => re.test(fmtOf(b)) && ok(b) && b.created_at >= t0)) || books.find(b => re.test(fmtOf(b)) && ok(b))
+// 有几本都对得上时用最新的（测试书重传时书库去重，不会再新建）
+const pick = (re, ok = () => true) => books.filter(b => re.test(fmtOf(b)) && ok(b)).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0]
 console.log(`书库里有 ${books.length} 本书`)
 
 async function step(name, fn) {
@@ -196,12 +197,32 @@ await openReader('epub', epub, async () => {
   await key('PageDown', 34); await sleep(1500); await shot('epub-3')
 })
 await openReader('txt', pick(/txt/i), async () => { await key('ArrowRight', 39); await sleep(1500); await shot('txt-2') })
-await openReader('pdf', pick(/pdf/i), async () => {
-  await waitFor("[...document.querySelectorAll('.reader canvas')].some(c => c.width > 50)", 30000, 'PDF 画出来')
+await openReader('pdf', pick(/pdf/i, b => !samples || /深度学习/.test(b.title)), async () => {
+  // 书库装了 mutool（或 poppler）时由书库画页面（img.pgimg），否则 pdf.js 画在 canvas 上
+  await waitFor("[...document.querySelectorAll('.reader canvas')].some(c => c.width > 50) || [...document.querySelectorAll('.reader img.pgimg')].some(i => i.complete && i.naturalWidth > 50)", 30000, 'PDF 画出来')
   await sleep(1500)
   await shot('pdf-2')
-  const t = await evaluate("[...document.querySelectorAll('.reader .textLayer')].map(x => x.textContent).join('').length")
+  const t = await evaluate("[...document.querySelectorAll('.reader .pg.cur .textLayer, .reader .pdfv:not(.paged) .textLayer')].map(x => x.textContent).join('').length")
   if (!(t > 5)) throw new Error('PDF 文字层是空的')
+  // 书库画的页面：没嵌入字体的中文那一行也要画出来（数那一条里的黑点）、文字层里有这几个字
+  const cjk = await evaluate(`(() => {
+    const img = document.querySelector('.reader .pg.cur img.pgimg')
+    if (!img) return 'canvas'
+    const tl = document.querySelector('.reader .pg.cur .textLayer')
+    if (!/书库旧浏览器测试中文/.test(tl ? tl.textContent : '')) return '文字层里没有中文：' + (tl ? tl.textContent.slice(0, 80) : '')
+    const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0)
+    const y0 = Math.floor(c.height * (842 - 652 - 30) / 842), y1 = Math.ceil(c.height * (842 - 652 + 8) / 842)
+    const d = g.getImageData(0, y0, c.width, y1 - y0).data
+    let dark = 0
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 128) dark++
+    return dark > 300 ? 'ok' : '中文那一行几乎是空白（' + dark + ' 个黑点）'
+  })()`)
+  if (cjk !== 'ok' && cjk !== 'canvas') throw new Error(cjk)
+  // 翻到下一页：换成第 2 页、画出来
+  await key('ArrowRight', 39)
+  await waitFor("(() => { const c = document.querySelector('.reader .pg.cur'); return !c || (c.dataset.n === '2' && !!c.querySelector('canvas, img.pgimg')) })()", 30000, 'PDF 翻到第 2 页')
+  await shot('pdf-3')
 })
 await openReader('comic', pick(/cbz|cbr|zip/i), async () => { await key('ArrowLeft', 37); await sleep(1500); await shot('comic-2') })
 // 整本写在一个文件里的大章节：书库拆成几段（server/zipsplit.go），只取要看的那一段；跳到后面的段也能显示
@@ -258,7 +279,7 @@ async function addSamples() {
   const files = {
     '旧浏览器测试-红楼梦.epub': makeEpub('旧浏览器测试红楼梦', '曹雪芹', [['第一回', '甄士隐梦幻识通灵，贾雨村风尘怀闺秀。'.repeat(40)], ['第二回', '贾夫人仙逝扬州城，冷子兴演说荣国府。'.repeat(40)]]),
     '旧浏览器测试-活着.txt': Buffer.from(['第一章', '我比现在年轻十岁的时候，获得了一个游手好闲的职业。'.repeat(30), '第二章', '那天傍晚，我走到了一棵大树下。'.repeat(30)].join('\n'), 'utf8'),
-    '旧浏览器测试-深度学习.pdf': makePdf(['Shuku legacy test page one', 'Neural networks learn representations', 'from data, layer by layer.'], 3),
+    '旧浏览器测试-深度学习.pdf': makePdf(['Shuku legacy test page one', 'Neural networks learn representations', 'from data, layer by layer.'], 3, '书库旧浏览器测试中文宋体'),
     '旧浏览器测试-漫画 第1卷.cbz': makeZip([1, 2, 3].map(n => [`${String(n).padStart(3, '0')}.png`, makePng(300, 450, n)])),
     // 整本写在一个文件里（100 多 KB 的一节）：墨水屏上由书库拆开
     '旧浏览器测试-整本一个文件.epub': makeEpub('旧浏览器测试整本一个文件', '佚名', [['全书', Array.from({ length: 360 }, (_, i) => `第${i + 1}段：` + '天下大势，分久必合，合久必分。'.repeat(8))]]),
@@ -333,19 +354,29 @@ function makeEpub(title, author, chapters) {
   ])
 }
 
-function makePdf(lines, pages) {
+// cjk：再加一行中文，用没有嵌入的宋体（STSong-Light，很多中文 PDF 就是这样）：检查书库画页面时中文画得出来、取得到字
+function makePdf(lines, pages, cjk) {
   const objs = []
   const kids = []
   objs[1] = '<< /Type /Catalog /Pages 2 0 R >>'
   objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+  const fonts = cjk ? '/F1 3 0 R /F2 ' + (4 + pages * 2) + ' 0 R' : '/F1 3 0 R'
+  const hex = s => Array.from(s).map(c => c.charCodeAt(0).toString(16).padStart(4, '0')).join('')
   for (let p = 0; p < pages; p++) {
     const page = 4 + p * 2, content = page + 1
     kids.push(`${page} 0 R`)
-    const text = lines.map((l, i) => `BT /F1 22 Tf 72 ${760 - i * 34} Td (${l}${i === 0 ? ' ' + (p + 1) : ''}) Tj ET`).join('\n')
-    objs[page] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`
+    let text = lines.map((l, i) => `BT /F1 22 Tf 72 ${760 - i * 34} Td (${l}${i === 0 ? ' ' + (p + 1) : ''}) Tj ET`).join('\n')
+    if (cjk) text += `\nBT /F2 26 Tf 72 ${760 - lines.length * 34 - 10} Td <${hex(cjk)}> Tj ET`
+    objs[page] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`
     objs[content] = `<< /Length ${Buffer.byteLength(text)} >>\nstream\n${text}\nendstream`
   }
   objs[2] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${pages} >>`
+  if (cjk) {
+    const f = 4 + pages * 2
+    objs[f] = `<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [${f + 1} 0 R] >>`
+    objs[f + 1] = `<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /FontDescriptor ${f + 2} 0 R /DW 1000 >>`
+    objs[f + 2] = '<< /Type /FontDescriptor /FontName /STSong-Light /Flags 6 /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 93 >>'
+  }
   let out = '%PDF-1.4\n'
   const offs = []
   for (let i = 1; i < objs.length; i++) { offs[i] = Buffer.byteLength(out); out += `${i} 0 obj\n${objs[i]}\nendobj\n` }

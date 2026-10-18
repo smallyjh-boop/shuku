@@ -1,6 +1,6 @@
 // 漫画：单页 / 双页（自动识别跨页大图）/ 条漫，支持日漫从右到左，按网络线路选择图片质量
 
-import { h, clear, fill, add } from '../ui.js'
+import { h, clear, fill, add, isEInk } from '../ui.js'
 import { api, apiUrl, net } from '../api.js'
 
 export class Engine {
@@ -42,7 +42,10 @@ export class Engine {
   url(n, thumb) {
     const q = this.shell.prefs.comicQuality
     let w = 0
+    // 墨水屏、旧的网页组件：一律按屏幕宽度要缩小的图（扫描的原图几千像素，解开要几十 MB 内存，墨水屏上会卡死）
+    const small = (isEInk() || window.SHUKU_LEGACY) && q !== 'original'
     if (thumb) w = 240
+    else if (small) w = Math.min(1600, Math.ceil(innerWidth * Math.min(devicePixelRatio || 1, 2) / (this.shell.prefs.comicMode === 'double' && innerWidth > innerHeight * 0.9 ? 2 : 1)))
     else if (q === 'saver') w = Math.min(1200, Math.ceil(innerWidth * Math.min(devicePixelRatio, 2)))
     else if (q === 'auto' && net.route !== 'lan') w = Math.min(2000, Math.ceil(innerWidth * Math.min(devicePixelRatio, 2) / (this.shell.prefs.comicMode === 'double' ? 2 : 1)))
     return apiUrl(`/api/files/${this.info.file_id}/pages/${n}${w ? '?w=' + w : ''}`)
@@ -75,7 +78,7 @@ export class Engine {
       pages.map(n => h('img', { class: 'pg', src: this.url(n), alt: `第 ${n + 1} 页`, draggable: 'false', decoding: 'async' })))
     fill(this.box, spread)
     this.box.scrollTop = 0
-    this.preload(pages[pages.length - 1] + 1, 3)
+    this.preload(pages[pages.length - 1] + 1, isEInk() || window.SHUKU_LEGACY ? 1 : 3) // 墨水屏内存小，只先取下一页
     this.report()
   }
 

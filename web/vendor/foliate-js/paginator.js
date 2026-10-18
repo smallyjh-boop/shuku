@@ -822,6 +822,12 @@ export class Paginator extends HTMLElement {
             Math.max(min, Math.min(max, (start + end) / 2
                 + (isNaN(d) ? 0 : d))) / size)
 
+        this.#snapToPage(page)
+    }
+    // 书库：停在第 page 页；到了章节两头（占位的空白页）就进上一章 / 下一章
+    #snapToPage(page) {
+        const { pages } = this
+        page = Math.max(0, Math.min(pages - 1, page))
         this.#scrollToPage(page, 'snap').then(() => {
             const dir = page <= 0 ? -1 : page >= pages - 1 ? 1 : null
             if (dir) return this.#goTo({
@@ -836,12 +842,14 @@ export class Paginator extends HTMLElement {
             x: touch?.screenX, y: touch?.screenY,
             t: e.timeStamp,
             vx: 0, xy: 0,
+            // 书库：记下起点和这时在第几页，抬手时按滑了多远决定翻不翻（轻轻一划就翻一页）
+            x0: touch?.screenX, y0: touch?.screenY, page0: this.scrolled ? 0 : this.page,
         }
     }
     #onTouchMove(e) {
         const state = this.#touchState
         if (state.pinched) return
-        state.pinched = globalThis.visualViewport.scale > 1
+        state.pinched = (globalThis.visualViewport?.scale || 1) > 1 // 书库：旧浏览器没有 visualViewport
         if (this.scrolled || state.pinched) return
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
@@ -857,18 +865,35 @@ export class Paginator extends HTMLElement {
         state.t = e.timeStamp
         state.vx = dx / dt
         state.vy = dy / dt
+        // 书库：没有翻页动画（墨水屏）时页面不跟着手指动，抬手时直接换页（跟着动在墨水屏上是一片残影，还会停在两页中间）
+        if (!this.hasAttribute('animated')) return
         this.#touchScrolled = true
         this.scrollBy(dx, dy)
     }
-    #onTouchEnd() {
+    #onTouchEnd(e) {
+        const scrolled = this.#touchScrolled
         this.#touchScrolled = false
         if (this.scrolled) return
+        // 书库：滑过一小段（屏幕宽的 6%，至少 30 像素）就翻一页，不用滑过半页；往回滑同理
+        const state = this.#touchState
+        const touch = e?.changedTouches?.[0]
+        if (state && touch && state.x0 != null && !state.pinched) {
+            const dx = state.x0 - touch.screenX, dy = state.y0 - touch.screenY
+            const along = this.#vertical ? dy : dx, across = this.#vertical ? dx : dy
+            if (Math.abs(along) > Math.max(30, this.size * 0.06) && Math.abs(along) > Math.abs(across) * 1.2) {
+                if (e.cancelable) e.preventDefault() // 不再当成点了一下
+                const dir = Math.sign(along) * (this.#rtl ? -1 : 1)
+                this.#snapToPage(state.page0 + dir)
+                return
+            }
+            if (!scrolled) return // 只是点了一下：交给点击处理
+        }
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
         // anything that doesn't work
         requestAnimationFrame(() => {
-            if (globalThis.visualViewport.scale === 1)
+            if ((globalThis.visualViewport?.scale || 1) === 1)
                 this.snap(this.#touchState.vx, this.#touchState.vy)
         })
     }

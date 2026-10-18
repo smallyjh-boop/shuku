@@ -2,9 +2,9 @@
 // 文字层：能选字（查字典、划线、复制）、书内搜索；划线用浏览器的 CSS 高亮画在文字层上
 
 import { loadPdfjs } from './pdfjs.js'
-import { h, clear, debounce, toast } from '../ui.js'
+import { h, clear, debounce, toast, isEInk } from '../ui.js'
 import { splitSentences } from './tts.js'
-import { api, auth, net } from '../api.js'
+import { api, apiUrl, auth, net } from '../api.js'
 import { around } from './dict.js'
 
 let pdfjs = null // 第一次打开 PDF 时加载
@@ -86,6 +86,17 @@ export class Engine {
 
   async open(info, saved) {
     this.info = info
+    // 墨水屏、旧的网页组件在线时：每一页由书库画成图、文字另外取（server/pdfpages.go），不下载整本、不用 pdf.js。
+    // 大 PDF 在设备上解析又慢又占内存（墨水屏上会卡死），旧的网页组件画某些字体还会丢字
+    let local = false // 测试用：shuku.pdfLocal=1 时还是用 pdf.js
+    try { local = localStorage.getItem('shuku.pdfLocal') === '1' } catch (e) {}
+    if ((isEInk() || window.SHUKU_LEGACY) && net.route !== 'offline' && info.file_id && !local) {
+      try {
+        const r = await api(`/api/files/${info.file_id}/pdf/info`)
+        if (r?.pages > 0) this.remote = r
+      } catch (e) {}
+    }
+    if (this.remote) return this.openRemote(saved)
     await lib()
     const headers = auth.token ? { Authorization: 'Bearer ' + auth.token } : {}
     const task = pdfjs.getDocument({
@@ -101,16 +112,23 @@ export class Engine {
     this.base = first.getViewport({ scale: 1 })
     this.sizes = new Array(this.count).fill(null)
     this.sizes[0] = [this.base.width, this.base.height]
+    this.build(saved)
+    this.loadOutline()
+    if (!this.info.has_cover) this.makeCover(first)
+  }
 
+  // 页面框架：每页一个占位，滚动到 / 翻到时再画
+  build(saved) {
     this.wrap = h('div', { class: 'pdfv' })
     this.pagesEl = h('div', { class: 'pages' })
     this.wrap.append(this.pagesEl)
     this.shell.stage.append(this.wrap)
     this.pageEls = []
+    // 按页翻时只把当前页和前后一页放进页面（几千页的 PDF 全放进去，墨水屏上光算样式就要好几秒）；滚动时全放
     for (let i = 1; i <= this.count; i++) {
       const el = h('div', { class: 'pg', dataset: { n: i } }, h('span', { class: 'no' }, i))
       this.pageEls.push(el)
-      this.pagesEl.append(el)
+      if (this.shell.prefs.pdfMode !== 'page') this.pagesEl.append(el)
     }
     this.rendered = new Map() // n -> {scale, task}
     this.io = new IntersectionObserver(es => {
@@ -137,14 +155,41 @@ export class Engine {
     document.addEventListener('selectionchange', this.onSelChange)
     this.ro = new ResizeObserver(() => this.layout())
     this.ro.observe(this.wrap)
-    this.loadOutline()
 
     this.layout()
     let start = 1, off = 0
     if (saved?.location?.startsWith?.('p:')) { const [, n, o] = saved.location.split(':'); start = +n || 1; off = +o || 0 }
     else if (saved?.percent) start = Math.max(1, Math.round(saved.percent * this.count))
     this.goToPage(start, off)
-    if (!info.has_cover) this.makeCover(first)
+  }
+
+  // 书库画页面的方式打开：页数、每页大小、目录都是书库给的
+  openRemote(saved) {
+    const r = this.remote
+    this.count = r.pages
+    this.sizes = Array.from({ length: this.count }, (_, i) => { const s = r.sizes?.[i]; return s && s[0] > 0 && s[1] > 0 ? [s[0], s[1]] : null })
+    const first = this.sizes.find(Boolean) || [595, 842]
+    this.base = { width: first[0], height: first[1] }
+    this.gray = isEInk() // 墨水屏只要 16 级灰度，图小一半多
+    this.toc = this.outlineToc(r.outline || [])
+    this.build(saved)
+  }
+
+  // 书库给的目录（每项带层级）→ 阅读器的目录树
+  outlineToc(items) {
+    const root = [], stack = [{ level: -1, subitems: root }]
+    this.tocFlat = []
+    for (const it of items) {
+      const node = { label: it.title, href: it.page > 0 ? 'p:' + it.page : null, subitems: null }
+      while (stack.length > 1 && stack[stack.length - 1].level >= it.level) stack.pop()
+      const parent = stack[stack.length - 1]
+      if (parent.node) (parent.node.subitems || (parent.node.subitems = [])).push(node)
+      else root.push(node)
+      stack.push({ level: it.level, node })
+      if (it.page > 0) this.tocFlat.push([it.page, it.title])
+    }
+    this.tocFlat.sort((a, b) => a[0] - b[0])
+    return root
   }
 
   async loadOutline() {
@@ -186,10 +231,9 @@ export class Engine {
     } catch {}
   }
 
-  scaleFor(n) {
+  scaleFor(n, W = this.wrap.clientWidth, H = this.wrap.clientHeight) {
     const [w, h0] = this.sizes[n - 1] || [this.base.width, this.base.height]
     const p = this.shell.prefs
-    const W = this.wrap.clientWidth, H = this.wrap.clientHeight
     if (p.pdfMode === 'page') return Math.min((W - 24) / w, (H - 24) / h0) * p.pdfZoom
     return Math.min(W - 24, 980) / w * p.pdfZoom
   }
@@ -199,15 +243,18 @@ export class Engine {
     const keep = this.page, keepOff = this.offsetInPage()
     const paged = this.shell.prefs.pdfMode === 'page'
     this.wrap.classList.toggle('paged', paged)
+    const W = this.wrap.clientWidth, H = this.wrap.clientHeight // 先量一次（每页都量的话，几千页要反复排版）
     for (let n = 1; n <= this.count; n++) {
       const [w, h0] = this.sizes[n - 1] || [this.base.width, this.base.height]
-      const s = this.scaleFor(n)
+      const s = this.scaleFor(n, W, H)
       const el = this.pageEls[n - 1]
       el.style.width = Math.floor(w * s) + 'px'
       el.style.height = Math.floor(h0 * s) + 'px'
       const r = this.rendered.get(n)
       if (r && Math.abs(r.scale - s) > 0.01) { this.drop(n) }
     }
+    this.page = keep
+    this.attachPages()
     if (paged) this.showPage(keep)
     else this.scrollToPage(keep, keepOff)
     this.render(keep)
@@ -219,7 +266,7 @@ export class Engine {
     r?.task?.cancel?.(); r?.text?.cancel?.()
     this.rendered.delete(n)
     const el = this.pageEls[n - 1]
-    el.querySelector('canvas')?.remove()
+    el.querySelector('canvas, img.pgimg')?.remove()
     el.querySelector('.textLayer')?.remove()
   }
 
@@ -229,6 +276,7 @@ export class Engine {
     if (this.rendered.has(n)) return
     const entry = { scale: s }
     this.rendered.set(n, entry)
+    if (this.remote) return this.renderRemote(n, entry)
     try {
       const page = await this.pdf.getPage(n)
       const vp1 = page.getViewport({ scale: 1 })
@@ -256,6 +304,40 @@ export class Engine {
     }
   }
 
+  // 书库画好的一页：按这一页在屏幕上的宽度要图（墨水屏要 16 级灰度）
+  async renderRemote(n, entry) {
+    const el = this.pageEls[n - 1]
+    const dpr = Math.min(devicePixelRatio || 1, 2)
+    const w = Math.max(200, Math.min(2400, Math.ceil((parseFloat(el.style.width) || this.wrap.clientWidth) * dpr / 8) * 8))
+    const img = new Image()
+    img.className = 'pgimg'
+    img.alt = ''
+    img.draggable = false
+    entry.task = { cancel: () => { img.onload = img.onerror = null; img.removeAttribute('src') } }
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = resolve
+        img.onerror = () => reject(new Error('这一页没有取到'))
+        img.src = apiUrl(`/api/files/${this.info.file_id}/pdf/page/${n}?w=${w}${this.gray ? '&g=1' : ''}`)
+      })
+    } catch (e) {
+      if (this.rendered.get(n) === entry) this.rendered.delete(n) // 下次翻到时再试
+      return
+    }
+    if (this.rendered.get(n) !== entry) return
+    // 书库读不出这一页的大小时，按图的比例补上
+    if (!this.sizes[n - 1] && img.naturalWidth) {
+      this.sizes[n - 1] = [this.base.width, this.base.width * img.naturalHeight / img.naturalWidth]
+      const s2 = this.scaleFor(n)
+      el.style.width = Math.floor(this.sizes[n - 1][0] * s2) + 'px'; el.style.height = Math.floor(this.sizes[n - 1][1] * s2) + 'px'
+      entry.scale = s2
+    }
+    el.querySelector('canvas, img.pgimg')?.remove()
+    el.prepend(img)
+    this.evict(n)
+    await this.renderText(n, null, entry)
+  }
+
   // 文字层：透明的文字叠在画布上，能选、能搜、能划线
   async renderText(n, page, entry) {
     const el = this.pageEls[n - 1]
@@ -266,6 +348,7 @@ export class Engine {
     const content = await this.textOf(n)
     if (this.rendered.get(n) !== entry) { tl.remove(); return }
     if (!hasText(content) && this.canOcr()) { await this.renderOcr(n, entry, tl); return }
+    if (this.remote) { this.layLines(n, tl, content.lines || []); return }
     entry.text = new pdfjs.TextLayer({ textContentSource: content, container: tl, viewport: page.getViewport({ scale: entry.scale }) })
     await entry.text.render()
     if (this.rendered.get(n) !== entry) return
@@ -277,7 +360,9 @@ export class Engine {
 
   textOf(n) {
     if (!this.texts.has(n)) {
-      const p = this.pdf.getPage(n).then(pg => pg.getTextContent())
+      const p = this.remote
+        ? api(`/api/files/${this.info.file_id}/pdf/text/${n}`).then(r => ({ items: (r.lines || []).map(l => ({ str: l.text, hasEOL: true })), lines: r.lines || [] }))
+        : this.pdf.getPage(n).then(pg => pg.getTextContent())
       p.catch(() => this.texts.delete(n))
       this.texts.set(n, p)
       if (this.texts.size > 400) this.texts.delete(this.texts.keys().next().value)
@@ -332,10 +417,18 @@ export class Engine {
     let r = null
     try { r = await this.ocrOf(n) } catch (e) {} finally { clearTimeout(t); busy.remove() }
     if (this.rendered.get(n) !== entry || !r?.lines?.length) return
+    this.layLines(n, tl, r.lines)
+    // 下一页也先识别着（扫描版通常整本都是）
+    if (n < this.count) this.textOf(n + 1).then(c => { if (!hasText(c) && this.canOcr()) this.ocrOf(n + 1).catch(() => {}) }).catch(() => {})
+  }
+
+  // 一行一个透明的 span，按位置（0～1）和宽度摆好：识别出的文字、书库从 PDF 里取出的文字都这样铺
+  layLines(n, tl, lines) {
+    const el = this.pageEls[n - 1]
     tl.classList.add('ocr')
-    const H = el.clientHeight, W = el.clientWidth
+    const H = parseFloat(el.style.height) || el.clientHeight, W = parseFloat(el.style.width) || el.clientWidth
     const spans = []
-    for (const line of r.lines) {
+    for (const line of lines) {
       const s = h('span', null, line.text)
       s.style.left = (line.x * 100).toFixed(3) + '%'
       s.style.top = (line.y * 100).toFixed(3) + '%'
@@ -344,14 +437,37 @@ export class Engine {
       spans.push([s, line.w * W])
     }
     tl.append(h('div', { class: 'endOfContent' }))
-    // 字体和原书不一样：每行横向拉伸到识别出的宽度，选字的位置才对得上（先量完再改，免得来回排版）
-    const widths = spans.map(([s]) => s.getBoundingClientRect().width)
-    spans.forEach(([s, w], i) => { if (widths[i] > 0 && w > 0) s.style.transform = `scaleX(${(w / widths[i]).toFixed(4)})` })
+    tl._fit = spans
+    if (el.getClientRects().length) this.fitLines(tl) // 还没显示出来的页（下一页）等翻到时再量
     tl.dataset.ready = '1'
     this.paintHighlights()
     this.paintSearch()
-    // 下一页也先识别着（扫描版通常整本都是）
-    if (n < this.count) this.textOf(n + 1).then(c => { if (!hasText(c) && this.canOcr()) this.ocrOf(n + 1).catch(() => {}) }).catch(() => {})
+  }
+
+  // 字体和原书不一样：每行横向拉伸到识别出的宽度，选字的位置才对得上（先量完再改，免得来回排版）
+  fitLines(tl) {
+    const spans = tl._fit
+    if (!spans) return
+    tl._fit = null
+    const widths = spans.map(([s]) => s.getBoundingClientRect().width)
+    spans.forEach(([s, w], i) => { if (widths[i] > 0 && w > 0) s.style.transform = `scaleX(${(w / widths[i]).toFixed(4)})` })
+  }
+
+  // 按页翻：页面里只放当前页和前后一页；滚动：全部按顺序放好
+  attachPages() {
+    if (!this.paged()) {
+      if (this.pagesEl.childElementCount !== this.count) this.pageEls.forEach(el => this.pagesEl.append(el))
+      return
+    }
+    const want = new Set([this.page - 1, this.page, this.page + 1].filter(n => n >= 1 && n <= this.count))
+    for (const el of Array.from(this.pagesEl.children)) if (!want.has(+el.dataset.n)) el.remove()
+    for (const n of [...want].sort((a, b) => a - b)) {
+      const el = this.pageEls[n - 1]
+      if (el.parentNode !== this.pagesEl) {
+        const after = Array.from(this.pagesEl.children).find(c => +c.dataset.n > n)
+        this.pagesEl.insertBefore(el, after || null)
+      }
+    }
   }
 
   // ---------- 翻译本页：外壳的对照面板来要这一页的段落 ----------
@@ -387,11 +503,12 @@ export class Engine {
     return paras.slice(0, 200)
   }
 
-  // 内存里最多保留 14 页画布
+  // 内存里最多保留 14 页画布（书库画的图：墨水屏内存小，留 4 页）
   evict(center) {
-    if (this.rendered.size <= 14) return
+    const keep = this.remote ? 4 : 14
+    if (this.rendered.size <= keep) return
     const far = [...this.rendered.keys()].sort((a, b) => Math.abs(b - center) - Math.abs(a - center))
-    for (const n of far.slice(0, this.rendered.size - 14)) this.drop(n)
+    for (const n of far.slice(0, this.rendered.size - keep)) this.drop(n)
   }
 
   offsetInPage() {
@@ -428,7 +545,13 @@ export class Engine {
   }
 
   showPage(n) {
-    this.pageEls.forEach((el, i) => el.classList.toggle('cur', i === n - 1))
+    this.page = n
+    this.attachPages()
+    this.cur?.classList.remove('cur')
+    this.cur = this.pageEls[n - 1]
+    this.cur?.classList.add('cur')
+    const tl = this.cur?.querySelector('.textLayer')
+    if (tl?._fit) this.fitLines(tl)
     this.render(n); this.render(n + 1)
   }
 
@@ -575,6 +698,23 @@ export class Engine {
       if (!q) return
       const status = h('p', { class: 'muted', style: { padding: '8px 18px', fontSize: '12.5px' } }, '搜索中…')
       results.append(status)
+      // 书库画页面时：用全文索引一次找出在哪几页（一页页取文字太慢）
+      if (this.remote) {
+        const r = await api(`/api/files/${this.info.file_id}/search?q=${encodeURIComponent(q)}`).catch(() => null)
+        if (my !== token) return
+        if (r?.indexed) {
+          for (const hit of r.hits || []) {
+            const page = hit.sec
+            const go = () => { this.shell.markJump(); this.searchQ = q; this.goToPage(page); this.paintSearch(); this.shell.closeOverlays(); this.shell.showUI(false) }
+            const sn = hit.snippet || '', i = hit.match ? sn.indexOf(hit.match) : -1
+            results.append(h('div', { class: 'hit', tabindex: 0, role: 'button', onclick: go, onkeydown: e => { if (e.key === 'Enter') go() } },
+              h('div', { style: { fontSize: '12px', opacity: .6 } }, `第 ${page} 页`),
+              ...(i >= 0 ? [sn.slice(0, i), h('mark', null, hit.match), sn.slice(i + hit.match.length)] : [sn])))
+          }
+          status.textContent = r.hits?.length ? `在 ${r.hits.length} 页里找到` : '没有找到'
+          return
+        }
+      }
       const lq = q.toLowerCase()
       let found = 0
       for (let p = 1; p <= this.count && found < 300; p++) {

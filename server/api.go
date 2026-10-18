@@ -85,6 +85,9 @@ func routes() http.Handler {
 	mux.HandleFunc("GET /api/files/{fid}/pdf", a(handleConvertedPDF))
 	mux.HandleFunc("GET /api/files/{fid}/pages", a(handlePages))
 	mux.HandleFunc("GET /api/files/{fid}/pages/{n}", a(handlePage))
+	mux.HandleFunc("GET /api/files/{fid}/pdf/info", a(handlePDFInfo))
+	mux.HandleFunc("GET /api/files/{fid}/pdf/page/{n}", a(handlePDFPage))
+	mux.HandleFunc("GET /api/files/{fid}/pdf/text/{n}", a(handlePDFText))
 	mux.HandleFunc("GET /api/files/{fid}/ocr/{page}", a(handleOCR))
 	mux.HandleFunc("POST /api/translate", a(handleTranslate))
 

@@ -548,11 +548,16 @@ class Reader {
     if (this.notes?.open) { this.notes.hide(); return }
     if (this.dict?.open) { this.dict.hide(); return }
     if (this.sheet.classList.contains('show') || this.panel.classList.contains('show')) { this.closeOverlays(); return }
-    const w = innerWidth
+    // 点一下就翻页：只有正中间一块是叫出 / 收起工具栏，左边三分之一往前翻，其余往后翻
+    // （以前中间一整条都是工具栏，点偏一点就翻不了页）
+    const w = innerWidth, hh = innerHeight
     const rtl = this.engine?.rtl?.()
-    if (x < w * 0.3) { this.showUI(false); rtl ? this.engine.next() : this.engine.prev(); this.afterUserNav() }
-    else if (x > w * 0.7) { this.showUI(false); rtl ? this.engine.prev() : this.engine.next(); this.afterUserNav() }
-    else this.showUI(!this.root.classList.contains('ui'))
+    const center = x > w * 0.35 && x < w * 0.65 && y > hh * 0.3 && y < hh * 0.7
+    if (center) { this.showUI(!this.root.classList.contains('ui')); return }
+    const back = rtl ? x > w * 0.65 : x < w * 0.35
+    this.showUI(false)
+    back ? this.engine.prev() : this.engine.next()
+    this.afterUserNav()
   }
 
   showUI(on) {
