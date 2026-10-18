@@ -332,8 +332,9 @@ class Mock(BaseHTTPRequestHandler):
 
     def opds(self, p, q):
         A = 'xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:dc="http://purl.org/dc/terms/"'
-        def entry(t, a, f, summary=""):
+        def entry(t, a, f, summary="", cats=()):
             return (f"<entry><title>{t}</title><id>urn:{t}</id><author><name>{a}</name></author><summary type='text'>{summary}</summary>"
+                    + "".join(f"<category term='{c}' label='{c}'/>" for c in cats) +
                     f"<link rel='http://opds-spec.org/acquisition' type='application/epub+zip' href='/files/{urllib.parse.quote(f)}' length='1234'/>"
                     f"<link rel='http://opds-spec.org/acquisition' type='application/x-mobipocket-ebook' href='/files/{urllib.parse.quote(f)}.mobi'/>"
                     f"<link rel='http://opds-spec.org/image' type='image/jpeg' href='{MOCK}/img/{urllib.parse.quote(t)}.jpg'/></entry>")
@@ -348,7 +349,7 @@ class Mock(BaseHTTPRequestHandler):
             return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>新书</title><id>new</id><link rel='next' type='{nav}' href='/opds/new2.xml'/>"
                              + entry("镜花缘", "李汝珍", "镜花缘.epub", "清代长篇小说") + entry("老残游记", "刘鹗", "老残游记.epub") + "</feed>", "application/atom+xml")
         if p == "/opds/new2.xml":
-            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>新书 第 2 页</title><id>new2</id>" + entry("海上花列传", "韩邦庆", "海上花列传.epub") + "</feed>", "application/atom+xml")
+            return self.send(200, f"<?xml version='1.0' encoding='utf-8'?><feed {A}><title>新书 第 2 页</title><id>new2</id>" + entry("海上花列传", "韩邦庆", "海上花列传.epub", cats=("Chinese fiction", "Shanghai (China) -- Fiction")) + "</feed>", "application/atom+xml")
         if p == "/opds/search":
             kw = q.get("q", [""])[0]
             es = "".join(entry(t, a, t + ".epub") for t, a in [("镜花缘", "李汝珍"), ("老残游记", "刘鹗"), ("海上花列传", "韩邦庆")] if kw and kw in t)
@@ -964,6 +965,7 @@ def test_fetch_discover():
     check("OPDS 分页", feed.get("next"))
     page2 = j("GET", "/api/catalogs/gutenberg/browse?next=" + urllib.parse.quote(feed["next"]))
     check("下一页", page2["entries"] and page2["entries"][0]["title"] == "海上花列传", page2)
+    check("书目带上书源的主题（入库时自动分类用）", "Chinese fiction" in (page2["entries"][0].get("tags") or []), page2["entries"][0].get("tags"))
     sr = j("GET", "/api/catalogs/gutenberg/browse?q=" + urllib.parse.quote("老残"))
     check("OPDS 搜索（OpenSearch 描述）", [e["title"] for e in sr["entries"]] == ["老残游记"], sr)
     img = api("GET", "/api/catalog-image?c=gutenberg&url=" + urllib.parse.quote(bk["cover"]))
@@ -991,6 +993,19 @@ def test_fetch_discover():
     j("POST", "/api/fetch", json={"url": "ia:rulinwaishi00wu", "catalog": "ia"})
     b = wait(lambda: book_by_title("儒林外史"), 40, 1, "档案馆入库")
     check("互联网档案馆下载（自动选 EPUB）", b and b["files"][0]["format"] == "epub")
+    # 1.0.0.8：书源里的书目信息（主题、简介）跟着下载走，入库识别时用上（AI 也看得到；没配置 AI 时按主题分类）
+    make_epub(os.path.join(T, "remote", "hint-test.epub"), "", "", [("第一回", ["书源信息测试。" * 40])])
+    n0 = len(AI_LOG)
+    j("POST", "/api/fetch", json={"url": MOCK + "/files/hint-test.epub", "name": "书源信息测试 - 测试作者", "catalog": "gutenberg", "title": "书源信息测试", "author": "测试作者",
+                                  "summary": "一部测试用的长篇小说。", "language": "zh", "tags": ["Science fiction", "测试主题甲"]})
+    hb = wait(lambda: book_by_title("书源信息测试"), 40, 1, "带书目信息的下载入库")
+    sent = [x for x in AI_LOG[n0:] if "书源信息测试" in json.dumps(x, ensure_ascii=False)]
+    check("从发现入库：作者用书源的（文件里没有）", hb and hb["author"] == "测试作者", hb and (hb["title"], hb["author"]))
+    # 主题、简介记到书上（识别把握不大要问 AI 时，AI 也看得到）
+    check("从发现入库：书源的主题、简介记到书上", hb and "测试主题甲" in (hb.get("tags") or []) and "长篇小说" in (hb.get("description") or ""), hb and (hb.get("tags"), hb.get("description")))
+    if sent:
+        check("从发现入库：问 AI 时带上书源的主题、简介", "测试主题甲" in json.dumps(sent[-1], ensure_ascii=False), sent[-1])
+    check("从发现入库：按书源的主题自动分了类", hb and hb.get("category") not in ("", None, "其他"), hb and hb.get("category"))
 
 
 # ---- 1.0.0.7 书架和设置 ----
