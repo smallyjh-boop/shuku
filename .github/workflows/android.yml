@@ -342,11 +342,12 @@ jobs:
           assert "/legacy/app.js" in b and "/legacy/pdf.worker.js" in b, "legacy=1 的清单"
           print("兼容旧系统的网页：正常（%d 个文件）" % sum(p.startswith("/legacy/") for p in b))
           EOF
-          # 旧版 Chromium（Chrome 64，像墨案这类旧安卓自带的网页组件）打开书库：书架、EPUB、TXT、PDF、漫画都要能用。
+          # 旧版 Chromium（Chrome 64，像墨案这类旧安卓自带的网页组件）打开书库：书架、EPUB、TXT、PDF、漫画都要能用；
+          # 模拟书库 App（原生桥），按墨案 inkPad X 的屏幕（936x1248）走一遍，再换 6 寸、横屏等几种尺寸看书架和 EPUB，页面不能比屏幕宽。
           # 浏览器在 npm 的 chrome-aws-lambda 包里（brotli 压缩的 headless_shell），测试书由测试脚本现做、上传
           if ( cd "$RUNNER_TEMP" && npm pack -q chrome-aws-lambda@64.0.3264 > /dev/null 2>&1 && tar xzf chrome-aws-lambda-64.0.3264.tgz \
               && node -e "const z=require('zlib'),fs=require('fs');fs.writeFileSync('chromium64',z.brotliDecompressSync(fs.readFileSync('package/bin/chromium.br')));fs.chmodSync('chromium64',0o755)" ); then
-            node tools/legacy/test-old-chrome.mjs "$RUNNER_TEMP/chromium64" http://127.0.0.1:18080 "$tok" "$RUNNER_TEMP/old-chrome" --samples 2>&1 | tee -a "$RUNNER_TEMP/build.log" \
+            node tools/legacy/test-old-chrome.mjs "$RUNNER_TEMP/chromium64" http://127.0.0.1:18080 "$tok" "$RUNNER_TEMP/old-chrome" --samples --app 2>&1 | tee -a "$RUNNER_TEMP/build.log" \
               || { ok=""; echo "旧版浏览器打不开书库"; }
           else
             echo "::warning::取不到旧版 Chromium，这次不测旧浏览器"

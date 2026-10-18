@@ -1,12 +1,14 @@
 // 用旧版 Chromium 打开书库，检查兼容旧系统的那一套网页（模拟墨案 inkPad 这类旧安卓的网页组件）。
 //
-//   node tools/legacy/test-old-chrome.mjs <旧版 chromium 路径> <书库地址> <登录令牌> [截图目录] [--strip] [--samples]
+//   node tools/legacy/test-old-chrome.mjs <旧版 chromium 路径> <书库地址> <登录令牌> [截图目录] [--strip] [--samples] [--app] [--size=宽x高]
 //
 // 旧版 Chromium：npm 上 chrome-aws-lambda@64.0.3264 包里的 bin/chromium.br（Chrome 64 的 headless_shell，brotli 压缩），
 // 用 node -e "require('zlib').brotliDecompressSync(...)" 解开。
 // --strip：再删掉 Chrome 58～63 没有的功能（ResizeObserver、Promise.finally、元素的 scrollTo、DOMMatrix），检查补上的那些能用。
-// --samples：先往书库里放几本测试书（EPUB、TXT、PDF、漫画，这里现做），打包时在空的书库上检查用。
-// 走一遍：书架、EPUB 翻页、TXT、PDF（含翻页）、漫画；页面报的错全部打印出来，有错就退出码 1。
+// --samples：先往书库里放几本测试书（EPUB、TXT、PDF、漫画，这里现做）并记上进度（“继续阅读”那一排），打包时在空的书库上检查用。
+// --app：模拟书库 App 的原生桥（设置存在原生里、原生告诉网页是墨水屏和屏幕尺寸），和在 App 里打开时走一样的路。
+// 走一遍：书架、EPUB 翻页、TXT、PDF（含翻页）、漫画，最后换几种屏幕尺寸再看书架和 EPUB；
+// 页面报的错全部打印出来，页面比屏幕宽（能左右拖、阅读器排到屏幕外）也算错，有错就退出码 1。
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -16,6 +18,7 @@ import zlib from 'node:zlib'
 const [bin, base, token, shotsArg] = process.argv.slice(2).filter(a => !a.startsWith('--'))
 const strip = process.argv.includes('--strip')
 const samples = process.argv.includes('--samples')
+const appBridge = process.argv.includes('--app')
 if (!bin || !base || !token) {
   console.log('用法：node test-old-chrome.mjs <chromium> <书库地址> <令牌> [截图目录] [--strip]')
   process.exit(2)
@@ -36,7 +39,7 @@ const ok = (msg) => console.log('  ✓ ' + msg)
 let ver
 for (let i = 0; i < 60 && !ver; i++) { await sleep(250); try { ver = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json() } catch {} }
 if (!ver) { console.log(chromeLog.slice(-3000)); process.exit(1) }
-console.log('浏览器：' + ver.Browser + (strip ? '（去掉 Chrome 58～63 没有的功能）' : ''))
+console.log('浏览器：' + ver.Browser + (strip ? '（去掉 Chrome 58～63 没有的功能）' : '') + (appBridge ? '，模拟书库 App' : ''))
 const target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page')
 const ws = new WebSocket(target.webSocketDebuggerUrl)
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
@@ -94,11 +97,24 @@ await send('Page.enable')
 await send('Network.enable')
 // 模拟墨案 inkPad X：10 寸竖屏，安卓 8 的网页组件 + 书库 App 的标记（墨水屏模式）
 await send('Network.setUserAgentOverride', { userAgent: ver['User-Agent'].replace('HeadlessChrome', 'Chrome') + ' ShukuApp/9.9 ShukuEInk' })
-await send('Emulation.setDeviceMetricsOverride', { width: 702, height: 936, deviceScaleFactor: 1, mobile: true })
+// --size=宽x高：模拟的屏幕（网页像素），默认是墨案 inkPad X 实测的 936x1248（10 寸、密度 1.5，电脑那种带侧栏的排版）
+const sizeArg = (process.argv.find(a => a.startsWith('--size=')) || '--size=936x1248').slice(7).split('x').map(Number)
+await send('Emulation.setDeviceMetricsOverride', { width: sizeArg[0], height: sizeArg[1], deviceScaleFactor: 1, mobile: true })
 await send('Page.addScriptToEvaluateOnNewDocument', {
   source: `localStorage.getItem('shuku.token') || localStorage.setItem('shuku.token', ${JSON.stringify(token)});` + (strip ? `
     delete window.ResizeObserver; delete Promise.prototype.finally; delete Element.prototype.scrollTo; delete Element.prototype.scrollBy;
-    delete window.DOMMatrix; delete window.DOMMatrixReadOnly;` : ''),
+    delete window.DOMMatrix; delete window.DOMMatrixReadOnly;` : '') + (appBridge ? `
+    (function () {
+      // 模拟书库 App 的原生桥（App 里网页走的是这一路：设置存在原生、墨水屏和屏幕尺寸由原生告诉网页）
+      var ls = window.localStorage
+      window.ShukuNative = {
+        storageGet: function (k) { return ls.getItem(k) }, storageSet: function (k, v) { ls.setItem(k, v) }, storageRemove: function (k) { ls.removeItem(k) },
+        storageKeys: function () { var a = []; for (var i = 0; i < ls.length; i++) a.push(ls.key(i)); return JSON.stringify(a) },
+        version: function () { return '9.9' }, deviceName: function () { return '旧浏览器测试' }, isEInk: function () { return true },
+        deviceInfo: function () { return JSON.stringify({ brand: 'Moaan', model: 'inkPad X', android: '8.1.0', webview: '64.0.3264.0', eink: true, abi: 'armeabi-v7a', screen: { w: 1404, h: 1872, density: 1.5, dpi: 240, inches: 10.3 } }) },
+        downloads: function () { return '[]' }, prefs: function () { return '{}' }
+      }
+    })();` : ''),
 })
 
 const api = async (p) => (await fetch(base + p, { headers: { Authorization: 'Bearer ' + token } })).json()
@@ -114,8 +130,39 @@ async function step(name, fn) {
   try { await fn(); if (flushErrors(name)) ok(name) } catch (e) { fail(`${name}：${e.message}`); flushErrors(name); await shot('fail-' + name).catch(() => {}) }
 }
 
+// 页面不能比屏幕宽：旧的网页组件会把整页撑宽（能左右拖），阅读器跟着排到屏幕外面，一片空白。
+// 列出跨过屏幕右边的元素（在能左右滑的容器里面的不算）
+async function checkLayout(where, W) {
+  const r = await evaluate(`(() => {
+    const W = ${W}, out = []
+    const scroller = el => { for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) { const o = getComputedStyle(p).overflowX; if (o !== 'visible') return true } return false }
+    for (const el of document.querySelectorAll('body *')) {
+      const b = el.getBoundingClientRect()
+      if (b.width > 0 && b.left < W - 1 && b.right > W + 1 && !scroller(el))
+        out.push(el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\\s+/).join('.') : '') + ' 到 ' + Math.round(b.right))
+    }
+    return { iw: innerWidth, sw: document.documentElement.scrollWidth, out: out.slice(0, 6) }
+  })()`)
+  if (r.iw !== W || r.sw > W + 1 || r.out.length) throw new Error(`${where}比屏幕宽（屏幕 ${W}，网页 ${r.iw}，内容 ${r.sw}）${r.out.length ? '：' + r.out.join('；') : ''}`)
+}
+
+// 阅读器要和屏幕一样宽；EPUB、TXT 竖着拿（高大于宽）时一页一栏（旧浏览器没有容器查询，靠 build.mjs 改的 paginator）
+async function checkReader(W, H) {
+  const r = await evaluate(`(() => {
+    const rd = document.querySelector('.reader').getBoundingClientRect()
+    const v = document.querySelector('foliate-view')
+    const d = v && v.renderer && v.renderer.getContents ? v.renderer.getContents()[0] : null
+    let cols = 0
+    if (d) { const cw = parseFloat(d.doc.defaultView.getComputedStyle(d.doc.documentElement).columnWidth); if (cw > 0) cols = cw > v.getBoundingClientRect().width / 2 ? 1 : 2 }
+    return { iw: innerWidth, rw: Math.round(rd.width), cols, paged: !!(v && v.renderer && v.renderer.getAttribute('flow') !== 'scrolled') }
+  })()`)
+  if (r.iw !== W || r.rw > W + 1) throw new Error(`阅读器比屏幕宽（屏幕 ${W}，网页 ${r.iw}，阅读器 ${r.rw}）`)
+  if (r.paged && H > W && r.cols === 2) throw new Error('竖屏排成了两栏')
+  return r
+}
+
 await step('打开书库（兼容旧系统的那一套）', async () => {
-  await send('Page.navigate', { url: base + '/#/all' })
+  await send('Page.navigate', { url: base + '/#/' })
   await waitFor("document.querySelector('#app') && document.querySelector('#app').children.length > 0", 40000, '网页启动')
   const legacy = await evaluate('!!window.SHUKU_LEGACY')
   if (!legacy) throw new Error('没有用兼容旧系统的那一套')
@@ -124,6 +171,7 @@ await step('打开书库（兼容旧系统的那一套）', async () => {
   await waitFor("document.querySelectorAll('.book, .card, [data-id]').length > 0", 20000, '书架上的书')
   await sleep(1500)
   await shot('01-library')
+  await checkLayout('书架', sizeArg[0])
 })
 
 async function openReader(name, book, after) {
@@ -135,6 +183,7 @@ async function openReader(name, book, after) {
     if (msg) throw new Error('阅读器报错：' + msg)
     await sleep(2500)
     await shot(name + '-1')
+    await checkReader(sizeArg[0], sizeArg[1])
     if (after) await after()
   })
 }
@@ -161,7 +210,32 @@ await step('回到书架', async () => {
   await waitFor("!document.querySelector('.reader')", 10000, '退出阅读器')
   await sleep(1000)
   await shot('99-home')
+  await checkLayout('书架', sizeArg[0])
 })
+
+// 换几种屏幕再看书架和 EPUB：6 寸（600x800）、10 寸密度 2（702x936，手机那种排版）、横着拿（1248x936）
+for (const [w, hh] of [[600, 800], [702, 936], [1248, 936]]) {
+  if (w === sizeArg[0] && hh === sizeArg[1]) continue
+  await step(`屏幕 ${w}x${hh}`, async () => {
+    await send('Emulation.setDeviceMetricsOverride', { width: w, height: hh, deviceScaleFactor: 1, mobile: true })
+    await evaluate("window.__beforeReload = 1; location.hash = '#/'")
+    await send('Page.reload')
+    // 等新页面（重新加载前的旧页面还在的那一下不算）
+    await waitFor("!window.__beforeReload && document.querySelector('#app') && document.querySelector('#app').children.length > 0 && document.querySelectorAll('.book, .card, [data-id]').length > 0", 40000, '书架')
+    await sleep(1500)
+    await shot(`size-${w}x${hh}-shelf`)
+    await checkLayout('书架', w)
+    if (!epub) return
+    await evaluate(`location.hash = '#/read/${epub.id}'`)
+    await waitFor("document.querySelector('.reader') && !document.querySelector('.reader .r-loading')", 40000, '阅读器打开')
+    await sleep(2500)
+    await shot(`size-${w}x${hh}-epub`)
+    const r = await checkReader(w, hh)
+    if (!r.cols) throw new Error('EPUB 正文没有排出来')
+    await evaluate("location.hash = '#/'")
+    await waitFor("!document.querySelector('.reader')", 10000, '退出阅读器')
+  })
+}
 
 ws.close()
 proc.kill('SIGKILL')
@@ -183,13 +257,21 @@ async function addSamples() {
     if (!r.ok) throw new Error('上传测试书失败：' + name + ' ' + r.status)
   }
   // 等入库
+  let items = []
   for (let i = 0; i < 120; i++) {
-    const items = (await api('/api/books?limit=200')).items || []
+    items = (await api('/api/books?limit=200')).items || []
     const have = f => items.some(b => [].concat(b.formats || []).join(',').includes(f))
-    if (['epub', 'txt', 'pdf', 'cbz'].every(have)) return
+    if (['epub', 'txt', 'pdf', 'cbz'].every(have)) break
+    if (i === 119) console.log('  （测试书没有全部入库，后面缺的跳过）')
     await sleep(1000)
   }
-  console.log('  （测试书没有全部入库，后面缺的跳过）')
+  // 记上进度：书架上有“继续阅读”那一排（只给百分比，打开时按百分比跳）
+  for (const b of items.filter(b => b.created_at >= t0)) {
+    await fetch(base + `/api/books/${b.id}/progress`, {
+      method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ location: '', percent: 0.1, device: '旧浏览器测试' }),
+    })
+  }
 }
 
 // （函数声明会提升：上面先调用 addSamples 时这些已经能用）

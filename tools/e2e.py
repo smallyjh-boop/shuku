@@ -1727,6 +1727,8 @@ def ui_tests():
         pg.wait_for_timeout(300)
         check("点书页关闭字典（不翻页）", not pg.locator(".r-dict.show").count() and pg.eval_on_selector(".r-prog input[type=range]", "e => e.value") == v_before)
         # 设置面板：× 关闭、点外面关闭、Esc 关闭；目录：× 关闭、点外面关闭
+        # 刚打开书时工具栏短暂显示、1.8 秒后自动收起：先等它收起再手动显示，不然点按钮时正好被收起（按钮跑到屏幕外）
+        pg.wait_for_function("() => !document.querySelector('.reader').classList.contains('ui')", timeout=6000)
         def sheet_open():
             pg.evaluate("() => document.querySelector('.reader').classList.add('ui')")
             pg.click(".r-top button[title='阅读设置']")

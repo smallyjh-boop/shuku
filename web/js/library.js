@@ -1,4 +1,4 @@
-import { h, clear, fill, add, icon, coverEl, debounce, store, save, pct, fmtTime, toast, toastError, confirmDialog, formDialog, openMenu } from './ui.js'
+import { h, clear, fill, add, icon, coverEl, debounce, store, save, pct, fmtTime, toast, toastError, confirmDialog, formDialog, openMenu, isEInk } from './ui.js'
 import { api, apiUrl, net } from './api.js'
 import { isNative, isDownloaded, onNative, call, refreshDownloads } from './native.js'
 import { offlineSupported, isOfflineBook, offlineButton } from './offline.js'
@@ -208,16 +208,26 @@ export function renderLibrary(main, opts, ctx) {
     loadMore(restoreTo)
   }
 
+  let contGen = 0
   async function loadContinue() {
+    const my = ++contGen
     clear(continueWrap)
     if (opts.view !== 'home' || q || tag) { if (gridTitle) gridTitle.hidden = !!q; return }
     if (gridTitle) gridTitle.hidden = false
     try {
       const r = await api('/api/books?reading=1&sort=recent&limit=12')
-      if (!r.items.length) return
-      continueWrap.append(
-        h('div', { class: 'section-title' }, h('h2', null, '继续阅读'), r.total > 12 ? h('a', { href: '#/reading' }, `全部 ${r.total} 本`) : null),
-        h('div', { class: 'continue' }, r.items.map(b => continueCard(b))))
+      if (my !== contGen || !r.items.length) return
+      const title = h('div', { class: 'section-title' }, h('h2', null, '继续阅读'))
+      const row = h('div', { class: 'continue' }, r.items.map(b => continueCard(b)))
+      continueWrap.append(title, row)
+      let shown = r.items.length
+      // 墨水屏上排成格子、不左右滑（app.css）：按排出来的列数只留两行（窄屏一行），其余点“全部”
+      if (isEInk()) {
+        const cols = getComputedStyle(row).gridTemplateColumns.split(' ').filter(Boolean).length || 1
+        shown = Math.min(shown, cols * (innerWidth < 700 ? 1 : 2))
+        for (const el of [...row.children].slice(shown)) el.remove()
+      }
+      if (r.total > shown) title.append(h('a', { href: '#/reading' }, `全部 ${r.total} 本`))
     } catch {}
   }
 

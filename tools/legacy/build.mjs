@@ -35,6 +35,41 @@ const PATCHES = {
   'web/vendor/foliate-js/paginator.js': [
     // 正则的后行断言（Chrome 62）
     [".replace(/(?<=[{\\s;])-epub-/gi, '')", ".replace(/([{\\s;])-epub-/gi, '$1')"],
+    // 样式嵌套（Chrome 112）、容器查询（Chrome 105）：旧浏览器整段丢掉，竖屏也排成两栏（墨案 10 寸竖着拿，一页两栏字很挤）。
+    // 展开成普通写法；“竖屏”改成下面排版前由脚本标在元素上（data-portrait）
+    [`            &.vertical {
+                --_max-column-count-spread: var(--_max-column-count-portrait);
+                --_max-width: var(--_max-block-size);
+                --_max-height: calc(var(--_max-inline-size) * var(--_max-column-count-spread));
+            }
+            @container (orientation: portrait) {
+                & {
+                    --_max-column-count-spread: var(--_max-column-count-portrait);
+                }
+                &.vertical {
+                    --_max-column-count-spread: var(--_max-column-count);
+                }
+            }
+        }`, `        }
+        #top.vertical {
+            --_max-column-count-spread: var(--_max-column-count-portrait);
+            --_max-width: var(--_max-block-size);
+            --_max-height: calc(var(--_max-inline-size) * var(--_max-column-count-spread));
+        }
+        :host([data-portrait]) #top {
+            --_max-column-count-spread: var(--_max-column-count-portrait);
+        }
+        :host([data-portrait]) #top.vertical {
+            --_max-column-count-spread: var(--_max-column-count);
+        }`],
+    // :is()（Chrome 88）
+    [':is(#header, #footer) > * > * {', '#header > * > *, #footer > * > * {'],
+    [':is(#header, #footer) > * {', '#header > *, #footer > * {'],
+    // 量尺寸之前先标上横竖（栏数影响 #container 的宽度）
+    [`        const { width, height } = this.#container.getBoundingClientRect()
+        const size = vertical ? height : width`, `        { const r = this.getBoundingClientRect(); if (r.height >= r.width) this.setAttribute('data-portrait', ''); else this.removeAttribute('data-portrait') }
+        const { width, height } = this.#container.getBoundingClientRect()
+        const size = vertical ? height : width`],
   ],
   'web/vendor/foliate-js/search.js': [
     // \p{Format}（Chrome 64）：换成格式字符的范围

@@ -44,5 +44,7 @@
 
 - `index.html` 不直接写 `<script type="module">`：`web/js/boot.js`（只用 ES5）按功能检测选网页——新浏览器加载 `/js/main.js`；旧浏览器（墨水屏阅读器、旧安卓自带的网页组件，Chrome 117 以前）加载 `tools/legacy` 构建的 `web/legacy/`（不进 git；打包时 Node 22 `npm ci && node build.mjs`，镜像里跟着网页一起）。打不开时 boot.js 显示浏览器版本和出错原因。
 - 新写的网页代码要能被兼容构建处理（`build.mjs` 会检查）：不用正则后行断言、命名分组、`\p{…}`，不用顶层 await、`import.meta`；新的浏览器功能要么有退路，要么在 `tools/legacy/src/dom.js`（或 `shims.js`）里补上。改完跑 `node tools/legacy/build.mjs` 和 `tools/legacy/test-old-chrome.mjs`（Chrome 64：npm 包 `chrome-aws-lambda@64.0.3264` 里的 `bin/chromium.br`，brotli 解开；`--samples` 自己放测试书，`--strip` 再去掉 Chrome 58～63 没有的功能）。打包试运行时也跑这个检查。
+- 页面不能比屏幕宽（墨案 inkPad X 是 936x1248 网页像素，用的是电脑那种带侧栏的排版）：网格里的 `fr` 一律写成 `minmax(0, 1fr)`（光写 `1fr` 会被宽的内容撑开，旧的网页组件里整页变宽、能左右拖，固定定位的阅读器跟着排到屏幕外面一片空白）；`html` 上有 `overflow-x: hidden`，viewport 有 `minimum-scale=1`。`test-old-chrome.mjs` 默认按 936x1248 检查，再看 600x800、702x936、1248x936（`--app` 模拟 App 的原生桥，打包时用这个）。
+- foliate 的 `paginator.js` 样式里有嵌套和容器查询（竖屏单栏靠它），旧浏览器不认识，`build.mjs` 的 PATCHES 展开成普通写法、竖屏由脚本标 `data-portrait`；更新 foliate-js 时 PATCHES 对不上会报错，照着改。
 - `/api/assets` 默认不列 `/legacy/`，`?legacy=1` 才列（App 在网页组件旧时才缓存这一套）。
 - 墨水屏模式是 `html.eink`（App 认出墨水屏：`EInk.kt`；设置 → 外观）。新写样式时想着墨水屏：别用灰字、阴影、半透明、动画，`html.eink` 下要清楚；墨水屏阅读一律按页翻。字号一律写成 `calc(Npx * var(--ui-scale, 1))`（界面字号设置靠它）。
