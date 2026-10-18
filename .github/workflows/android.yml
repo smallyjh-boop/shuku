@@ -55,7 +55,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定系统版本：ubuntu-latest 2026-10-19 起换成 Ubuntu 26，避免打包环境突然变化
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
