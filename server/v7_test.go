@@ -358,11 +358,16 @@ func TestProgressConflict(t *testing.T) {
 	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "D"}); m["conflict"] != nil || getProgress(admin.ID, b).Location != "D" {
 		t.Error("旧客户端", m)
 	}
+	// 位置没变、只报阅读时长：时间不变（别的设备不会误报冲突）
+	cur := getProgress(admin.ID, b)
+	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": cur.Location, "seconds": 30, "device": "电脑"}); int64(m["updated_at"].(float64)) != cur.UpdatedAt {
+		t.Error("位置没变时不应该改时间", m, cur.UpdatedAt)
+	}
 	// 阅读时长：一次最多 4 小时
 	call(t, srv, tok, "PUT", path, map[string]any{"location": "D", "seconds": 99999})
 	var sec int
 	db.QueryRow(`SELECT SUM(seconds) FROM reading_log WHERE user_id=?`, admin.ID).Scan(&sec)
-	if sec != 14400 {
+	if sec != 14400+30 {
 		t.Error("阅读时长上限", sec)
 	}
 }

@@ -862,6 +862,11 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"updated_at": cur.UpdatedAt, "conflict": true, "current": cur})
 		return
 	}
+	// 位置没变（只是报一下阅读时长）：不改时间。不然别的设备会以为这里又往后读了，误报冲突
+	if cur.UpdatedAt > 0 && cur.Location == req.Location && cur.FileID == req.FileID {
+		writeJSON(w, 200, map[string]int64{"updated_at": cur.UpdatedAt})
+		return
+	}
 	ts := now()
 	if ts <= cur.UpdatedAt {
 		ts = cur.UpdatedAt + 1 // 同一秒里存两次，也要让 updated_at 变，客户端靠它判断新旧
