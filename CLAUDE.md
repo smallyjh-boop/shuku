@@ -39,3 +39,10 @@
 - 删书是软删除（`books.deleted_at`，文件进 `_回收站`），30 天后 purgeLoop 彻底删除；扫描时找不到的文件标 `files.missing_since`，不马上删。写新查询时记得排除 `deleted_at>0` 的书。
 - 恢复备份：放到 `/data/restore.db`，进程正常退出（退出码 3），靠 compose 的 `restart: unless-stopped` 拉起来，启动时换上。
 - 网页有内容安全策略（`server/api.go` 的 pageCSP，只允许本站脚本文件）：`index.html` 不能写内联脚本（启动前要做的事在 `web/js/boot.js`），不用 eval / new Function / 内联事件属性。书的章节在 blob: iframe 里会继承这个策略，书里夹带的脚本不运行。
+
+## 旧浏览器、墨水屏（1.0.0.8 起）
+
+- `index.html` 不直接写 `<script type="module">`：`web/js/boot.js`（只用 ES5）按功能检测选网页——新浏览器加载 `/js/main.js`；旧浏览器（墨水屏阅读器、旧安卓自带的网页组件，Chrome 117 以前）加载 `tools/legacy` 构建的 `web/legacy/`（不进 git；打包时 Node 22 `npm ci && node build.mjs`，镜像里跟着网页一起）。打不开时 boot.js 显示浏览器版本和出错原因。
+- 新写的网页代码要能被兼容构建处理（`build.mjs` 会检查）：不用正则后行断言、命名分组、`\p{…}`，不用顶层 await、`import.meta`；新的浏览器功能要么有退路，要么在 `tools/legacy/src/dom.js`（或 `shims.js`）里补上。改完跑 `node tools/legacy/build.mjs` 和 `tools/legacy/test-old-chrome.mjs`（Chrome 64：npm 包 `chrome-aws-lambda@64.0.3264` 里的 `bin/chromium.br`，brotli 解开；`--samples` 自己放测试书，`--strip` 再去掉 Chrome 58～63 没有的功能）。打包试运行时也跑这个检查。
+- `/api/assets` 默认不列 `/legacy/`，`?legacy=1` 才列（App 在网页组件旧时才缓存这一套）。
+- 墨水屏模式是 `html.eink`（App 认出墨水屏：`EInk.kt`；设置 → 外观）。新写样式时想着墨水屏：别用灰字、阴影、半透明、动画，`html.eink` 下要清楚；墨水屏阅读一律按页翻。字号一律写成 `calc(Npx * var(--ui-scale, 1))`（界面字号设置靠它）。
