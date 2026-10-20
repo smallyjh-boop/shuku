@@ -220,8 +220,17 @@ func safeName(s string) string {
 		return ""
 	})
 	s = strings.Trim(cleanSpace(s), ". ")
+	// 太长就截短，但扩展名要留着：否则 .pdf 被截掉，入库时认不出是什么格式
 	if r := []rune(s); len(r) > 80 {
-		s = strings.TrimSpace(string(r[:80]))
+		ext := filepath.Ext(s)
+		if len([]rune(ext)) > 12 {
+			ext = ""
+		}
+		stem := []rune(strings.TrimSuffix(s, ext))
+		if keep := 80 - len([]rune(ext)); len(stem) > keep {
+			stem = stem[:keep]
+		}
+		s = strings.TrimSpace(string(stem)) + ext
 	}
 	return s
 }
