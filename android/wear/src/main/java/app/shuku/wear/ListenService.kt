@@ -98,6 +98,7 @@ class ListenService : Service() {
         val more: Boolean = false, // 选了“多准备一些”
         val online: Boolean = true,
         val posAt: Long = 0, // 读到这一句的时间（阅读页据此跟着翻）
+        val chapterCount: Int = 0, // 这本书一共几章（还没打开时是 0）
     )
 
     /** 正在听的书（给 Tile、表盘复杂功能看，哪个线程都能读） */
@@ -1187,7 +1188,7 @@ class ListenService : Service() {
             timerLeftMs = if (timerEnd > 0) max(0, timerEnd - System.currentTimeMillis()) else 0,
             chapterIndex = seg?.chap?.i ?: max(0, startChap), frac = seg?.let { it.start.toDouble() / max(1, it.chap.len) } ?: startFrac,
             fileId = fileId, deviceVoice = useDevice, offlineSec = offlineSec, preparing = preparing, more = more,
-            online = app.netUsable(), posAt = posAt,
+            online = app.netUsable(), posAt = posAt, chapterCount = chapters.length(),
         )
     }
 
@@ -1311,6 +1312,14 @@ class ListenService : Service() {
         /** 接着放（暂停着的话） */
         fun play() {
             instance?.let { if (!it.playing) it.resume() }
+        }
+
+        /** 上一章 / 下一章：从那一章开头读 */
+        fun chapter(ctx: Context, d: Int) {
+            val st = instance?.snapshot() ?: return
+            val ni = st.chapterIndex + d
+            if (ni < 0 || (st.chapterCount > 0 && ni >= st.chapterCount)) return
+            start(ctx, st.bookId, st.title, ni, 0.0)
         }
 
         fun next() { instance?.step(1) }

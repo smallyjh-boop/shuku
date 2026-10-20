@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -169,6 +170,9 @@ class MainActivity : Activity() {
     private fun home() {
         col.addView(Ui.text(this, app.config.name.ifEmpty { "书库" }, 17f, bold = true, center = true, maxLines = 1))
         statusView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 2f)) }
+        // 今天读了多久（和 Tile、表盘上的一样）
+        val mins = Today.info().seconds / 60
+        if (mins > 0) col.addView(Ui.text(this, "今天读了 $mins 分钟", 12f, Ui.INK2, center = true), Ui.lp(this, 2f))
         updateView = Ui.text(this, "", 12f, Ui.ACCENT, center = true).apply { visibility = View.GONE }.also { col.addView(it, Ui.lp(this, 6f)) }
         listenBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -282,13 +286,39 @@ class MainActivity : Activity() {
         val box = listenBox ?: return
         box.removeAllViews()
         val s = ListenService.state()
+        val p = Ui.dp(this, 12f)
         if (!s.active) {
-            box.visibility = View.GONE
+            // 没在听：最近读的那本，一点就接着听 / 接着读
+            val b = Today.info().book
+            if (b == null) {
+                box.visibility = View.GONE
+                return
+            }
+            box.visibility = View.VISIBLE
+            box.background = Ui.pill(Ui.CARD, Ui.dp(this, 18f).toFloat())
+            box.setPadding(p, Ui.dp(this, 10f), p, Ui.dp(this, 10f))
+            box.gravity = Gravity.CENTER_HORIZONTAL
+            box.isClickable = false
+            box.setOnClickListener(null)
+            box.addView(Ui.text(this, "上次读到", 11f, Ui.ACCENT, center = true), Ui.lp(this))
+            val pct = (b.percent * 100).roundToInt()
+            box.addView(Ui.text(this, b.title + if (pct > 0) "　$pct%" else "", 14f, bold = true, center = true, maxLines = 2), Ui.lp(this, 2f))
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+            val g = Ui.dp(this, 3f)
+            row.addView(Ui.button(this, "继续听", primary = true) {
+                startActivity(Intent(this, ListenActivity::class.java).putExtra(ListenActivity.EXTRA_RESUME, b.id).putExtra("title", b.title))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = g })
+            row.addView(Ui.button(this, "继续读") {
+                startActivity(Intent(this, ReadActivity::class.java).putExtra("id", b.id).putExtra("title", b.title))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = g })
+            box.addView(row, Ui.lp(this, 8f, matchWidth = false))
             return
         }
         box.visibility = View.VISIBLE
         box.background = Ui.pill(Ui.CARD, Ui.dp(this, 18f).toFloat())
-        val p = Ui.dp(this, 12f)
         box.setPadding(p, Ui.dp(this, 10f), p, Ui.dp(this, 8f))
         box.gravity = Gravity.CENTER_HORIZONTAL
         box.isClickable = true
@@ -347,6 +377,15 @@ class MainActivity : Activity() {
         })
         row.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { tts("next") })
         box.addView(row, Ui.lp(this, 6f, matchWidth = false))
+        // 手机的音量（戴着耳机听手机时，不用掏手机）
+        val vol = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val g = Ui.dp(this, 3f)
+        vol.addView(Ui.button(this, "音量 −") { tts("voldown") }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = g })
+        vol.addView(Ui.button(this, "音量 +") { tts("volup") }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = g })
+        box.addView(vol, Ui.lp(this, 6f, matchWidth = false))
         box.addView(Ui.text(this, "停止", 12f, Ui.INK2, center = true).apply {
             val v = Ui.dp(this@MainActivity, 6f)
             setPadding(v * 3, v, v * 3, v)

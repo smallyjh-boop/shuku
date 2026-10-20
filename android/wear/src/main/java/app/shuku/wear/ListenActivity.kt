@@ -34,6 +34,9 @@ class ListenActivity : Activity() {
     private lateinit var outputBox: LinearLayout
     private lateinit var speakerButton: TextView
     private lateinit var controls: LinearLayout
+    private lateinit var chapterRow: LinearLayout
+    private lateinit var prevChapter: TextView
+    private lateinit var nextChapter: TextView
     private lateinit var volumeRow: LinearLayout
     private lateinit var volumeView: TextView
     private lateinit var playButton: ImageButton
@@ -159,6 +162,15 @@ class ListenActivity : Activity() {
         controls.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
         col.addView(controls, Ui.lp(this, 10f, matchWidth = false))
 
+        // 上一章 / 下一章
+        chapterRow = row()
+        val cg = Ui.dp(this, 3f)
+        prevChapter = Ui.button(this, "上一章") { ListenService.chapter(this, -1) }
+        nextChapter = Ui.button(this, "下一章") { ListenService.chapter(this, 1) }
+        chapterRow.addView(prevChapter, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = cg })
+        chapterRow.addView(nextChapter, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = cg })
+        col.addView(chapterRow, Ui.lp(this, 6f, matchWidth = false))
+
         // 音量：手表没有音量键时用这两个按钮（调的是听书用的媒体音量）
         volumeRow = row()
         volumeRow.addView(Ui.button(this, "音量 −") { adjustVolume(-1) })
@@ -205,6 +217,7 @@ class ListenActivity : Activity() {
             outputBox.visibility = View.GONE
             controls.visibility = View.GONE
             volumeRow.visibility = View.GONE
+            chapterRow.visibility = View.GONE
             options.visibility = View.GONE
             offlineView.visibility = View.GONE
             moreButton.visibility = View.GONE
@@ -215,6 +228,9 @@ class ListenActivity : Activity() {
         controls.visibility = View.VISIBLE
         volumeRow.visibility = View.VISIBLE
         updateVolume()
+        chapterRow.visibility = if (s.chapterCount > 1) View.VISIBLE else View.GONE
+        prevChapter.visibility = if (s.chapterIndex > 0) View.VISIBLE else View.GONE
+        nextChapter.visibility = if (s.chapterIndex + 1 < s.chapterCount) View.VISIBLE else View.GONE
         options.visibility = View.VISIBLE
         moreButton.visibility = View.VISIBLE
         stopButton.visibility = View.VISIBLE
