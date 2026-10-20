@@ -861,6 +861,7 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		Seconds  int      `json:"seconds"` // 距上次上报实际阅读的秒数
 		Base     *int64   `json:"base"`    // 客户端知道的服务器进度时间
 		At       *float64 `json:"at"`      // 客户端记下这个位置的时间（毫秒），只用来判断离线排队的先后
+		TimeOnly bool     `json:"time_only"` // 只报阅读时长，位置是客户端以前传过的，不改书库上的位置
 	}
 	if readJSON(r, &req) != nil {
 		errJSON(w, 400, "格式不正确")
@@ -871,6 +872,11 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur := getProgress(u.ID, id)
+	// 只报时长：书库上的位置可能已经被同一台设备更新过（手机关屏听书时原生存的），不能用旧位置覆盖回去
+	if req.TimeOnly && cur.UpdatedAt > 0 {
+		writeJSON(w, 200, map[string]int64{"updated_at": cur.UpdatedAt})
+		return
+	}
 	// 冲突：客户端打开以后，别的设备又存过不一样的位置。同一台设备自己连着翻页时，
 	// 上一次保存的回复可能还没到（App 里是原生排队上传），base 落后一步不算冲突
 	sameDevice := req.Device != "" && cur.Device == req.Device

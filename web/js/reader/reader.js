@@ -685,6 +685,8 @@ class Reader {
     if (this.serverAhead && this.userMoved) { this.base = Math.max(this.base || 0, this.serverAhead.updated_at || 0); this.serverAhead = null }
     this.userMoved = false
     const body = { file_id: this.info.file_id, location, percent: this.loc.fraction || 0, device: deviceName, seconds, at: Date.now() }
+    // 位置没变、只是报阅读时长：告诉书库别改位置（App 关屏听书时由原生存了更新的位置，网页醒来时手上的还是旧的）
+    if (location === this.sentLoc) body.time_only = true
     if (this.base != null) body.base = this.base
     this.sentLoc = location
     // App 里交给原生保存：离线时先存在手机上，联网后再同步；结果用 progress 事件回来

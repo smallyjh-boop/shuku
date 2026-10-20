@@ -22,12 +22,16 @@ class ProgressSync(private val app: ShukuApp) {
 
     fun save(bookId: Int, body: String) {
         val j = try { JSONObject(body) } catch (e: Exception) { return }
-        try { app.store.updateProgress(bookId, j) } catch (e: Exception) {}
+        // time_only：位置没变、只报阅读时长（网页从冻结中醒来时手上的位置可能是旧的），不改本机记的位置
+        val timeOnly = j.optBoolean("time_only")
+        if (!timeOnly) try { app.store.updateProgress(bookId, j) } catch (e: Exception) {}
         synchronized(lock) {
             val old = prefs.getString(bookId.toString(), null)?.let { try { JSONObject(it) } catch (e: Exception) { null } }
             val secs = j.optInt("seconds").coerceAtLeast(0) + (old?.optInt("seconds") ?: 0).coerceAtLeast(0)
-            j.put("seconds", secs.coerceAtMost(MAX_SECONDS))
-            prefs.edit().putString(bookId.toString(), j.toString()).apply()
+            // 排着队的是一个真正的位置：留着它，只把时长加上去
+            val keep = if (timeOnly && old != null) old else j
+            keep.put("seconds", secs.coerceAtMost(MAX_SECONDS))
+            prefs.edit().putString(bookId.toString(), keep.toString()).apply()
         }
         app.io.execute { flush() }
     }

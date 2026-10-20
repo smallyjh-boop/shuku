@@ -363,6 +363,11 @@ func TestProgressConflict(t *testing.T) {
 	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": cur.Location, "seconds": 30, "device": "电脑"}); int64(m["updated_at"].(float64)) != cur.UpdatedAt {
 		t.Error("位置没变时不应该改时间", m, cur.UpdatedAt)
 	}
+	// 只报时长（App 关屏听书时原生存了新位置，网页醒来时手上还是旧位置）：不能把位置改回去
+	before := getProgress(admin.ID, b)
+	if _, m, _ = call(t, srv, tok, "PUT", path, map[string]any{"location": "旧位置", "device": "手机", "time_only": true}); getProgress(admin.ID, b).Location != before.Location || int64(m["updated_at"].(float64)) != before.UpdatedAt {
+		t.Error("time_only 不应该改位置", m)
+	}
 	// 阅读时长：一次最多 4 小时
 	call(t, srv, tok, "PUT", path, map[string]any{"location": "D", "seconds": 99999})
 	var sec int

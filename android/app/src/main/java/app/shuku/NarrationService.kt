@@ -278,7 +278,9 @@ class NarrationService : Service() {
         if (feed && seg.loc.isNotEmpty()) ev.put("loc", seg.loc).put("pct", seg.pct)
         Events.emit("tts", ev)
         tick()
-        if (!webAlive() || feed) notePosition(seg)
+        // 一直由这里记进度（最多 30 秒存一次，暂停、停止时马上存）：关屏后网页被冻结，
+        // 网页自己存不了，以前只在网页不在了才由这里存，关屏听的那一段就丢了
+        notePosition(seg)
         askMore()
         if (useDevice) return speakDevice(seg)
         val job = audioFor(seg)
