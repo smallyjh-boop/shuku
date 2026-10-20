@@ -16,6 +16,12 @@ const HL_COLORS = ['yellow', 'green', 'blue', 'pink']
 // 书库没装文字识别（501）时这次打开书库不再请求，只提示一次
 let ocrMissing = false
 const OCR_MIN = 8 // 一页不到这么多个字（空白不算）就当是扫描的
+// 识别语言：书库按书的语言（不知道时看书名的文字）自动挑；挑得不对可以在面板的“识别”里换，按这本书记住
+const OCR_LANGS = [['', '自动'], ['chi_sim+eng', '简体中文'], ['chi_tra+eng', '繁体中文'], ['eng', '英文'], ['tha+eng', '泰文'],
+  ['jpn+eng', '日文'], ['kor+eng', '韩文'], ['vie+eng', '越南文'], ['lao+eng', '老挝文'], ['khm+eng', '高棉文'], ['mya+eng', '缅甸文'],
+  ['ind+eng', '印尼文'], ['msa+eng', '马来文'], ['fra+eng', '法文'], ['deu+eng', '德文'], ['spa+eng', '西班牙文'],
+  ['ita+eng', '意大利文'], ['por+eng', '葡萄牙文'], ['rus+eng', '俄文']]
+const ocrLangName = code => (OCR_LANGS.find(l => l[0] === code) || [code, code])[1]
 const hasText = c => {
   let n = 0
   for (const it of (c && c.items) || []) { n += (it.str || '').replace(/\s+/g, '').length; if (n >= OCR_MIN) return true }
@@ -82,6 +88,8 @@ export class Engine {
     this.texts = new Map() // 页 → Promise<文字内容>
     this.ocr = new Map() // 页 → Promise<识别结果>（扫描版）
     this.ocrFailed = new Map() // 页 → 识别失败的时间（一分钟内不再请求）
+    this.ocrPages = new Set() // 识别过的页（换识别语言时重画这些页的文字层）
+    this.ocrUsed = '' // 书库这次用的识别语言
   }
 
   async open(info, saved) {
@@ -383,7 +391,9 @@ export class Engine {
     if (!this.ocr.has(n)) {
       const failed = this.ocrFailed.get(n)
       if (failed && Date.now() - failed < 60000) return Promise.reject(new Error('识别失败'))
-      const p = api(`/api/files/${this.info.file_id}/ocr/${n}`)
+      const lang = this.ocrLang()
+      const p = api(`/api/files/${this.info.file_id}/ocr/${n}` + (lang ? '?lang=' + encodeURIComponent(lang) : ''))
+      p.then(r => { if (r?.lang) this.ocrUsed = r.lang }, () => {})
       p.catch(e => {
         this.ocr.delete(n)
         if (e?.status === 501) this.noOcr()
@@ -392,6 +402,42 @@ export class Engine {
       this.ocr.set(n, p)
     }
     return this.ocr.get(n)
+  }
+
+  // 这本书选过的识别语言（空是自动）
+  ocrLang() {
+    try { return localStorage.getItem('shuku.ocrLang.' + this.info.file_id) || '' } catch (e) { return '' }
+  }
+
+  // 换识别语言：识别过的页按新语言重新识别（书库按语言分开缓存，换回来不用再识别）
+  setOcrLang(code) {
+    try {
+      if (code) localStorage.setItem('shuku.ocrLang.' + this.info.file_id, code)
+      else localStorage.removeItem('shuku.ocrLang.' + this.info.file_id)
+    } catch (e) {}
+    this.ocr.clear()
+    this.ocrFailed.clear()
+    this.ocrUsed = ''
+    for (const n of this.ocrPages) {
+      const entry = this.rendered.get(n)
+      if (entry) this.renderText(n, null, entry)
+    }
+  }
+
+  drawOcrTab(box) {
+    const cur = this.ocrLang()
+    box.append(h('p', { class: 'muted', style: { padding: '12px 18px 4px', fontSize: '12.5px' } },
+      '这本书是扫描版，文字是书库识别出来的。认错了字、或者是外文书，选对语言重新识别：'))
+    if (this.ocrUsed) box.append(h('p', { class: 'muted', style: { padding: '0 18px 6px', fontSize: '12.5px' } }, '现在用的：' + this.ocrUsed.split('+').map(c => ocrLangName(c === 'eng' ? 'eng' : c + '+eng')).join('、')))
+    const list = h('div', { class: 'toc' })
+    for (const [code, label] of OCR_LANGS) {
+      list.append(h('a', {
+        class: 'l1' + (code === cur ? ' cur' : ''), tabindex: 0, role: 'button',
+        onclick: () => { this.setOcrLang(code); clear(box); this.drawOcrTab(box); toast(code ? '按' + label + '重新识别' : '改回自动') },
+        onkeydown: e => { if (e.key === 'Enter') e.target.click() },
+      }, label + (code === cur ? '　✓' : '')))
+    }
+    box.append(list)
   }
 
   noOcr() {
@@ -416,6 +462,7 @@ export class Engine {
     const t = setTimeout(() => el.append(busy), 500) // 书库已经识别过的话很快，不闪一下
     let r = null
     try { r = await this.ocrOf(n) } catch (e) {} finally { clearTimeout(t); busy.remove() }
+    this.ocrPages.add(n)
     if (this.rendered.get(n) !== entry || !r?.lines?.length) return
     this.layLines(n, tl, r.lines)
     // 下一页也先识别着（扫描版通常整本都是）
@@ -681,9 +728,14 @@ export class Engine {
     CSS.highlights.set('pdf-search', new Highlight(...rs))
   }
 
-  panelTabs() { return [['toc', '目录'], ['bm', '书签'], ['notes', '笔记'], ['search', '搜索']] }
+  panelTabs() {
+    const tabs = [['toc', '目录'], ['bm', '书签'], ['notes', '笔记'], ['search', '搜索']]
+    if (this.ocrPages.size) tabs.push(['ocr', '识别']) // 扫描版才有
+    return tabs
+  }
 
   drawPanelTab(tab, box) {
+    if (tab === 'ocr') { this.drawOcrTab(box); return }
     if (tab !== 'search') return
     const input = h('input', { type: 'search', placeholder: '在书中搜索', 'aria-label': '在书中搜索', value: this.lastQuery || '' })
     const results = h('div')

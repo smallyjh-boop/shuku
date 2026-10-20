@@ -86,13 +86,39 @@ func ocrInstalledLangs() map[string]bool {
 	return have
 }
 
-// 用哪些语言识别：指定了就用指定的（去掉没装的），否则按书的语言猜；中文书加上英文（书里常夹英文）
-func ocrLangFor(bookLang, want string) string {
+// 书的语言（ISO 代码，两个或三个字母，取前缀）→ tesseract 的识别模型
+var ocrModels = []struct{ prefix, model string }{
+	{"zh-hant", "chi_tra"}, {"zh-tw", "chi_tra"}, {"zh-hk", "chi_tra"}, {"cht", "chi_tra"},
+	{"zh", "chi_sim"}, {"chi", "chi_sim"}, {"ja", "jpn"}, {"jpn", "jpn"}, {"ko", "kor"}, {"th", "tha"}, {"vi", "vie"},
+	{"en", "eng"}, {"fr", "fra"}, {"de", "deu"}, {"ger", "deu"}, {"es", "spa"}, {"spa", "spa"}, {"it", "ita"},
+	{"pt", "por"}, {"por", "por"}, {"ru", "rus"}, {"id", "ind"}, {"ms", "msa"}, {"my", "mya"}, {"bur", "mya"},
+	{"km", "khm"}, {"lo", "lao"}, {"ar", "ara"}, {"hi", "hin"},
+}
+
+func ocrModelOf(lang string) string {
+	l := strings.ToLower(strings.TrimSpace(lang))
+	if l == "" {
+		return ""
+	}
+	for _, m := range ocrModels {
+		if strings.HasPrefix(l, m.prefix) {
+			return m.model
+		}
+	}
+	return ""
+}
+
+// 用哪些语言识别：指定了就用指定的（去掉没装的）；否则按书的语言，书的语言不知道（或没装这个模型）时
+// 看书名是什么文字（泰文书名用泰文模型，拉丁字母用英文）；都看不出来用简体中文。
+// 不是英文的都加上英文（书里常夹英文）
+func ocrLangFor(bookLang, title, want string) string {
 	have := ocrInstalledLangs()
 	pick := func(langs ...string) string {
 		var ok []string
+		seen := map[string]bool{}
 		for _, l := range langs {
-			if have[l] {
+			if have[l] && !seen[l] {
+				seen[l] = true
 				ok = append(ok, l)
 			}
 		}
@@ -103,18 +129,21 @@ func ocrLangFor(bookLang, want string) string {
 			return s
 		}
 	}
-	l := strings.ToLower(bookLang)
-	var s string
-	switch {
-	case strings.HasPrefix(l, "zh-hant"), strings.HasPrefix(l, "zh-tw"), strings.HasPrefix(l, "zh-hk"), l == "cht":
-		s = pick("chi_tra", "eng")
-	case strings.HasPrefix(l, "ja"), l == "jpn":
-		s = pick("jpn", "eng")
-	case strings.HasPrefix(l, "en"):
-		s = pick("eng")
-	default: // 中文或者不知道：简体加英文
-		s = pick("chi_sim", "eng")
+	model := ocrModelOf(bookLang)
+	if model == "" || !have[model] {
+		model = ""
+		switch sl := scriptLang(title); sl {
+		case "latin":
+			model = "eng"
+		case "":
+		default:
+			model = ocrModelOf(sl)
+		}
 	}
+	if model == "" || !have[model] {
+		model = "chi_sim"
+	}
+	s := pick(model, "eng")
 	if s == "" {
 		s = "eng"
 	}
@@ -150,9 +179,9 @@ func handleOCR(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "只有 PDF、DJVU 能识别文字")
 		return
 	}
-	var bookLang string
-	db.QueryRow(`SELECT language FROM books WHERE id=?`, f.BookID).Scan(&bookLang)
-	lang := ocrLangFor(bookLang, r.URL.Query().Get("lang"))
+	var bookLang, title string
+	db.QueryRow(`SELECT language,title FROM books WHERE id=?`, f.BookID).Scan(&bookLang, &title)
+	lang := ocrLangFor(bookLang, title, r.URL.Query().Get("lang"))
 	cp := filepath.Join(cacheRoot(), "ocr", cacheKey(src), fmt.Sprintf("%d-%s.json", page, strings.ReplaceAll(lang, "+", "_")))
 	if b, err := os.ReadFile(cp); err == nil {
 		touchCache(cp)

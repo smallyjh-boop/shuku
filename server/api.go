@@ -858,9 +858,9 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		Location string   `json:"location"`
 		Percent  float64  `json:"percent"`
 		Device   string   `json:"device"`
-		Seconds  int      `json:"seconds"` // 距上次上报实际阅读的秒数
-		Base     *int64   `json:"base"`    // 客户端知道的服务器进度时间
-		At       *float64 `json:"at"`      // 客户端记下这个位置的时间（毫秒），只用来判断离线排队的先后
+		Seconds  int      `json:"seconds"`   // 距上次上报实际阅读的秒数
+		Base     *int64   `json:"base"`      // 客户端知道的服务器进度时间
+		At       *float64 `json:"at"`        // 客户端记下这个位置的时间（毫秒），只用来判断离线排队的先后
 		TimeOnly bool     `json:"time_only"` // 只报阅读时长，位置是客户端以前传过的，不改书库上的位置
 	}
 	if readJSON(r, &req) != nil {

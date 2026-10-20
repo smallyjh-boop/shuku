@@ -34,11 +34,15 @@ FROM base AS runtime
 COPY --from=build /out/dict/ /app/dict/
 
 FROM runtime AS ocr
-# 扫描版 PDF 识别文字：tesseract 和简体、繁体、英文、日文的识别模型（Debian 打包的是“快速”模型，十几 MB）。
+# 扫描版 PDF 识别文字：tesseract 和各语言的识别模型（Debian 打包的是“快速”模型，每种一两 MB）：
+# 简体、繁体、英文、日文、韩文、泰文、越南文、老挝文、高棉文、缅甸文、印尼文、马来文，法、德、西、意、葡、俄文。
 # 发布时这一段单独做成 ghcr.io/smallyjh-boop/shuku-runtime:ocr-…（运行环境和这一段没变就一直用同一个），
 # 放在字典后面：加它不用重新下载字典
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-jpn \
+    tesseract-ocr-kor tesseract-ocr-tha tesseract-ocr-vie tesseract-ocr-lao tesseract-ocr-khm tesseract-ocr-mya \
+    tesseract-ocr-ind tesseract-ocr-msa tesseract-ocr-fra tesseract-ocr-deu tesseract-ocr-spa tesseract-ocr-ita \
+    tesseract-ocr-por tesseract-ocr-rus \
  && rm -f /usr/share/tesseract-ocr/*/tessdata/osd.traineddata \
  && rm -rf /var/lib/apt/lists/*
 
