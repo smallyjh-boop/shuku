@@ -1,6 +1,9 @@
 package app.shuku
 
 import android.content.Context
+import android.util.Base64
+import app.shuku.core.Http
+import app.shuku.core.Relay
 import com.google.android.gms.tasks.Tasks
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
@@ -93,10 +96,74 @@ class PhoneWearService : WearableListenerService() {
                 if (!r.optBoolean("ok")) WearSync.sendError(this, event.sourceNodeId, r.optString("message"))
             }
             path == WearSync.PATH_STATE -> WearSync.pushState(this, NarrationService.state(), force = true)
+            path == Relay.PATH_REQ -> RelayServer.serve(this, event.sourceNodeId, event.data)
             path.startsWith("/shuku/tts/") -> {
                 val cmd = path.removePrefix("/shuku/tts/")
                 if (cmd in setOf("pause", "resume", "next", "prev", "stop")) NarrationService.command(this, cmd, "")
             }
         }
     }
+}
+
+/**
+ * 手表连不上书库时，手机代为转发（手表那边见 wear 的 PhoneRelay）。
+ * 只转发书库的 /api/ 接口，用手表自己的登录令牌（请求头原样带过来），手机不另外保存令牌。
+ */
+object RelayServer {
+    private class Reply(val status: Int, val type: String, val body: ByteArray)
+
+    fun serve(ctx: Context, node: String, payload: ByteArray) {
+        val req = try {
+            org.json.JSONObject(String(payload, Charsets.UTF_8))
+        } catch (e: Exception) {
+            return
+        }
+        val id = req.optString("id")
+        if (id.isEmpty()) return
+        val app = ShukuApp.app
+        app.io.execute {
+            val r = try {
+                forward(app, req)
+            } catch (e: Exception) {
+                err(502, "转发失败：${e.message ?: e.javaClass.simpleName}")
+            }
+            sendReply(ctx, node, id, r)
+        }
+    }
+
+    private fun forward(app: ShukuApp, req: org.json.JSONObject): Reply {
+        val path = req.optString("p")
+        if (!path.startsWith("/api/")) return err(403, "不转发这个地址")
+        if (!app.link.online && app.link.probe() == null) return err(503, "手机连不上书库")
+        val base = app.link.base ?: return err(503, "手机连不上书库")
+        val method = req.optString("m", "GET")
+        val h = req.optJSONObject("h")
+        val auth = h?.optString("Authorization").orEmpty()
+        val ct = h?.optString("Content-Type").orEmpty().ifEmpty { null }
+        val b64 = req.optString("b")
+        val body = if (b64.isEmpty()) null else Base64.decode(b64, Base64.DEFAULT)
+        val headers = if (auth.isNotEmpty()) mapOf("Authorization" to auth) else emptyMap()
+        // 听书要合成语音，比普通请求等得久一些
+        val timeout = if (method == "GET") 20000 else 60000
+        val r = Http.request("$base$path", method, null, body, ct, timeout, headers)
+        return Reply(r.code, r.header("Content-Type") ?: "application/octet-stream", r.body)
+    }
+
+    private fun sendReply(ctx: Context, node: String, id: String, r: Reply) {
+        val total = if (r.body.isEmpty()) 1 else (r.body.size + Relay.CHUNK - 1) / Relay.CHUNK
+        for (i in 0 until total) {
+            val from = i * Relay.CHUNK
+            val to = minOf(r.body.size, from + Relay.CHUNK)
+            val data = if (r.body.isEmpty()) ByteArray(0) else r.body.copyOfRange(from, to)
+            val msg = Relay.encodeChunk(id, i, total, r.status, r.type, data)
+            try {
+                Tasks.await(Wearable.getMessageClient(ctx).sendMessage(node, Relay.PATH_RES, msg), 20, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                return // 手表已经断开：不用再发了，它会超时重试
+            }
+        }
+    }
+
+    private fun err(status: Int, msg: String) =
+        Reply(status, "application/json; charset=utf-8", org.json.JSONObject().put("error", msg).toString().toByteArray())
 }

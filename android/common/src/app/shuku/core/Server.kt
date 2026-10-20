@@ -44,10 +44,12 @@ class Config(context: Context) {
         e.putString("remote", norm(info.optString("remote_url")))
         if (info.optString("id").isNotEmpty()) e.putString("server_id", info.optString("id"))
         if (info.optString("name").isNotEmpty()) e.putString("name", info.optString("name"))
-        e.putString("last_base", norm(usedBase))
+        // 经手机转发的地址（127.0.0.1 上的端口，每次启动都会变）不能存
+        val viaRelay = isRelay(usedBase)
+        if (!viaRelay) e.putString("last_base", norm(usedBase))
         e.apply()
         // 服务器没填内网地址时，把这次用的地址记成内网地址
-        if (lan.isEmpty() && remote.isEmpty()) lan = usedBase
+        if (!viaRelay && lan.isEmpty() && remote.isEmpty()) lan = usedBase
     }
 
     fun clear() {
@@ -55,6 +57,9 @@ class Config(context: Context) {
     }
 
     companion object {
+        /** 手表本机的转发地址（见 wear 的 PhoneRelay） */
+        fun isRelay(u: String?): Boolean = (u ?: "").startsWith("http://127.0.0.1:")
+
         fun norm(u: String?): String {
             var s = (u ?: "").trim().trimEnd('/')
             if (s.isNotEmpty() && !s.startsWith("http://") && !s.startsWith("https://")) s = "http://$s"
@@ -147,7 +152,7 @@ class ServerLink(private val cfg: Config, private val lanTimeout: Int = 1500, pr
             } else cfg.saveFrom(j, base)
             if (cfg.serverId.isEmpty()) cfg.serverId = ping.optString("id")
             this.base = base
-            this.route = if (base == cfg.remote) "remote" else "lan"
+            this.route = if (Config.isRelay(base)) "relay" else if (base == cfg.remote) "remote" else "lan"
             null
         } catch (e: Exception) {
             "连接失败：${e.message ?: e.javaClass.simpleName}"

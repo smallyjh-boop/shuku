@@ -2,6 +2,7 @@ package app.shuku.wear
 
 import android.Manifest
 import android.app.Activity
+import android.media.AudioManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -33,6 +34,8 @@ class ListenActivity : Activity() {
     private lateinit var outputBox: LinearLayout
     private lateinit var speakerButton: TextView
     private lateinit var controls: LinearLayout
+    private lateinit var volumeRow: LinearLayout
+    private lateinit var volumeView: TextView
     private lateinit var playButton: ImageButton
     private lateinit var options: LinearLayout
     private lateinit var speedButton: TextView
@@ -156,6 +159,14 @@ class ListenActivity : Activity() {
         controls.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
         col.addView(controls, Ui.lp(this, 10f, matchWidth = false))
 
+        // 音量：手表没有音量键时用这两个按钮（调的是听书用的媒体音量）
+        volumeRow = row()
+        volumeRow.addView(Ui.button(this, "音量 −") { adjustVolume(-1) })
+        volumeView = Ui.text(this, "", 12f, Ui.INK2, center = true).apply { setPadding(Ui.dp(this@ListenActivity, 8f), 0, Ui.dp(this@ListenActivity, 8f), 0) }
+        volumeRow.addView(volumeView)
+        volumeRow.addView(Ui.button(this, "音量 +") { adjustVolume(1) })
+        col.addView(volumeRow, Ui.lp(this, 6f, matchWidth = false))
+
         options = row()
         val gap = Ui.dp(this, 3f)
         speedButton = Ui.button(this, "1.0×") { ListenService.cycleSpeed() }
@@ -193,6 +204,7 @@ class ListenActivity : Activity() {
             statusView.text = ""
             outputBox.visibility = View.GONE
             controls.visibility = View.GONE
+            volumeRow.visibility = View.GONE
             options.visibility = View.GONE
             offlineView.visibility = View.GONE
             moreButton.visibility = View.GONE
@@ -201,6 +213,8 @@ class ListenActivity : Activity() {
             return
         }
         controls.visibility = View.VISIBLE
+        volumeRow.visibility = View.VISIBLE
+        updateVolume()
         options.visibility = View.VISIBLE
         moreButton.visibility = View.VISIBLE
         stopButton.visibility = View.VISIBLE
@@ -229,6 +243,19 @@ class ListenActivity : Activity() {
         offlineView.text = offlineLine(s)
         offlineView.visibility = if (offlineView.text.isEmpty()) View.GONE else View.VISIBLE
         moreButton.text = if (s.more) "不用多准备了" else "多准备一些（离线听）"
+    }
+
+    private fun adjustVolume(dir: Int) {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        am.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (dir > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
+        updateVolume()
+    }
+
+    private fun updateVolume() {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        volumeView.text = if (max > 0) "${cur * 100 / max}%" else ""
     }
 
     /** 离开手机、没网时还能听多久（平时自动准备几分钟；点了“多准备一些”准备约半小时） */

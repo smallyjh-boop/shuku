@@ -3,6 +3,7 @@ package app.shuku.wear
 import android.content.Intent
 import app.shuku.core.Config
 import app.shuku.core.Http
+import app.shuku.core.Relay
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.WearableListenerService
 import org.json.JSONObject
@@ -21,8 +22,9 @@ class WatchListener : WearableListenerService() {
                 val j = JSONObject(String(event.data))
                 val code = j.optString("code")
                 val oldToken = app.config.token
-                val cands = listOf(j.optString("lan"), j.optString("origin"), j.optString("remote")).map { Config.norm(it) }.filter { it.isNotEmpty() }.distinct()
-                var err: String? = "手表连不上书库（${cands.joinToString("、")}）。手表通过手机蓝牙或 Wi-Fi 上网，请确认能访问这个地址"
+                // 手机发来的地址都连不上（比如手表在外面）时，最后经手机转发（这条消息就是手机发来的，手机一定连着）
+                val cands = listOf(j.optString("lan"), j.optString("origin"), j.optString("remote")).map { Config.norm(it) }.filter { it.isNotEmpty() }.distinct() + PhoneRelay.start()
+                var err: String? = "手表连不上书库（${cands.size - 1} 个地址），也没能经手机转发，请确认手机能连上书库"
                 for (u in cands) {
                     if (app.link.ping(u, 6000) == null) continue
                     err = app.link.connect(u, code, "", WearApp.DEVICE)
@@ -41,6 +43,7 @@ class WatchListener : WearableListenerService() {
                 sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(packageName))
                 if (err == null) Today.updateViews() // Tile、表盘上不再显示“还没连接书库”
             }
+            Relay.PATH_RES -> PhoneRelay.onChunk(event.data)
             "/shuku/config/error" -> {
                 app.config.prefs.edit().putString("connect_error", String(event.data)).apply()
                 sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(packageName))

@@ -132,7 +132,7 @@ class MainActivity : Activity() {
 
     private fun setup() {
         col.addView(Ui.text(this, "书库", 20f, bold = true, center = true))
-        col.addView(Ui.text(this, "在手机的书库 App 里打开“设置”，点“连接手表”。也可以在这里请手机发过来。", 13f, Ui.INK2, center = true), Ui.lp(this, 8f))
+        col.addView(Ui.text(this, "点下面的按钮，手机会自动把连接信息发过来（手机上要打开书库 App，手表要连着手机）。", 13f, Ui.INK2, center = true), Ui.lp(this, 8f))
         val err = app.config.str("connect_error", "")
         val status = Ui.text(this, err, 12f, Ui.DANGER, center = true)
         col.addView(Ui.button(this, "从手机获取", primary = true) {
@@ -160,7 +160,8 @@ class MainActivity : Activity() {
             }
         }, Ui.lp(this, 12f))
         col.addView(status, Ui.lp(this, 8f))
-        col.addView(Ui.button(this, "手动输入地址") { startActivity(Intent(this, ConnectActivity::class.java)) }, Ui.lp(this, 10f))
+        // 手机不在身边、或者没装手机 App 时才需要手输地址（平时不用输）
+        col.addView(Ui.button(this, "没有手机？手动输入地址") { startActivity(Intent(this, ConnectActivity::class.java)) }, Ui.lp(this, 10f))
     }
 
     // ---------- 已连接 ----------
@@ -215,6 +216,7 @@ class MainActivity : Activity() {
     private fun routeLabel() = when (app.link.route) {
         "lan" -> "内网"
         "remote" -> "Tailscale"
+        "relay" -> "手机转发"
         else -> "离线"
     }
 

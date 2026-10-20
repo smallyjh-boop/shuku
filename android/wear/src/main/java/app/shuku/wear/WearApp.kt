@@ -50,6 +50,9 @@ class WearApp : Application() {
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(
             NotificationChannel(CH_LISTEN, "听书", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) })
         watchNetwork()
+        // 手机在身边时，出门也能经手机连书库（见 PhoneRelay）
+        PhoneRelay.start()
+        PhoneRelay.refreshAsync(this)
         // 一周没听的离线听书包删掉
         io.execute { runCatching { ListenStore.expire(this, 7 * 24 * 3600_000L) } }
     }
@@ -60,7 +63,10 @@ class WearApp : Application() {
     // ---------- 网络 ----------
 
     /** 手表现在有没有网（Wi-Fi、手机蓝牙转发、LTE 都算）。后台被系统限制联网时也算没有 */
-    fun hasNetwork(): Boolean = try {
+    fun hasNetwork(): Boolean = hasIp() || PhoneRelay.phoneLikely()
+
+    /** 手表自己有没有网络（Wi-Fi、LTE、蓝牙网络共享） */
+    private fun hasIp(): Boolean = try {
         val cm = getSystemService(ConnectivityManager::class.java)
         val n = cm?.activeNetwork
         n != null && cm.getNetworkCapabilities(n)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
@@ -161,6 +167,8 @@ class WearApp : Application() {
         if (config.lan.isNotEmpty()) cands += "lan" to config.lan
         if (config.remote.isNotEmpty() && config.remote != config.lan) cands += "remote" to config.remote
         if (cands.isEmpty() && config.lastBase.isNotEmpty()) cands += "lan" to config.lastBase
+        // 最后才试：经手机转发（出门、连不上书库地址时）
+        if (PhoneRelay.phoneNode(this) != null) cands += "relay" to PhoneRelay.start()
         if (cands.isEmpty()) {
             link.adopt("offline", null)
             return null
@@ -173,7 +181,7 @@ class WearApp : Application() {
         val ecs = ExecutorCompletionService<Int>(pingPool)
         val t0 = SystemClock.elapsedRealtime()
         cands.forEachIndexed { k, (r, u) ->
-            val t = if (r == "lan") LAN_PING_MS else REMOTE_PING_MS
+            val t = if (r == "lan") LAN_PING_MS else REMOTE_PING_MS // relay 走外网的超时
             deadlines[k] = t0 + t + 1000L
             ecs.submit(Callable {
                 results[k] = link.ping(u, t)
