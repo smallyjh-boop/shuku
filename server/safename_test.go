@@ -12,6 +12,9 @@ func TestSafeNameKeepsExtension(t *testing.T) {
 	if !strings.HasSuffix(got, ".pdf") || len([]rune(got)) > 80 {
 		t.Fatalf("截短后扩展名丢了或太长：%q", got)
 	}
+	if got := safeName(strings.Repeat("书", 100) + ".fb2.zip"); !strings.HasSuffix(got, "书.fb2.zip") || len([]rune(got)) > 80 {
+		t.Fatalf("两段的扩展名要整个留着：%q", got)
+	}
 	if got := safeName("短名字.epub"); got != "短名字.epub" {
 		t.Fatalf("短名字不该变：%q", got)
 	}

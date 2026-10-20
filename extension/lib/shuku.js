@@ -44,9 +44,10 @@ export function filenameFromDisposition(cd) {
 export function safeFileName(name) {
   const s = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim()
   if (s.length <= 150) return s
-  // 太长就截短，扩展名（.pdf、.epub）要留着，不然书库认不出格式
-  const ext = /\.[A-Za-z0-9]{1,8}$/.exec(s)?.[0] || ''
-  return s.slice(0, 150 - ext.length).trim() + ext
+  // 太长就截短，扩展名（.pdf、.epub，两段的 .fb2.zip）要留着，不然书库认不出格式；
+  // 截断处不能留半个 emoji（孤立的代理字符会让 encodeURIComponent 出错、传不上去）
+  const ext = /(\.fb2\.zip|\.kepub\.epub|\.[A-Za-z0-9]{1,8})$/i.exec(s)?.[0] || ''
+  return s.slice(0, 150 - ext.length).replace(/[\uD800-\uDBFF]$/, '').trim() + ext
 }
 
 // 公开书库：“自动”方式下让书库直接下载（不经过浏览器，浏览器关了也不影响）

@@ -223,6 +223,12 @@ func safeName(s string) string {
 	// 太长就截短，但扩展名要留着：否则 .pdf 被截掉，入库时认不出是什么格式
 	if r := []rune(s); len(r) > 80 {
 		ext := filepath.Ext(s)
+		// 两段的扩展名（.fb2.zip 靠整个后缀认格式）一起留着
+		for _, two := range []string{".fb2.zip", ".kepub.epub"} {
+			if strings.HasSuffix(strings.ToLower(s), two) {
+				ext = s[len(s)-len(two):]
+			}
+		}
 		if len([]rune(ext)) > 12 {
 			ext = ""
 		}
