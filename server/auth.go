@@ -149,6 +149,10 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "密码至少 6 位")
 		return
 	}
+	if len(req.Password) > maxPassword {
+		errJSON(w, 400, errPasswordLong)
+		return
+	}
 	h, _ := hashPassword(req.Password)
 	name := cleanUserName(req.Name)
 	if name == "" {
@@ -262,6 +266,10 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "新密码太短")
 		return
 	}
+	if len(req.New) > maxPassword {
+		errJSON(w, 400, errPasswordLong)
+		return
+	}
 	h, _ := hashPassword(req.New)
 	db.Exec(`UPDATE users SET pass=? WHERE id=?`, h, u.ID)
 	db.Exec(`DELETE FROM sessions WHERE user_id=? AND token<>?`, u.ID, tokenFrom(r))
@@ -333,6 +341,10 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, map[string]string{"id": getSetting("server_id", ""), "name": getSetting("server_name", "我的书库"), "app": "shuku"})
 }
+
+// bcrypt 只认前 72 个字节，再长会出错（以前出错时存了空密码，账号就登不上了）
+const maxPassword = 72
+const errPasswordLong = "密码太长了（最多 72 个字母，约 24 个汉字）"
 
 func hashPassword(p string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)

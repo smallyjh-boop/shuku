@@ -165,7 +165,7 @@ func handleOCR(w http.ResponseWriter, r *http.Request) {
 	}
 	page, _ := strconv.Atoi(r.PathValue("page"))
 	if page < 1 || page > 100000 {
-		errJSON(w, 400, "页码不对")
+		errJSON(w, 404, "没有这一页")
 		return
 	}
 	var src string
@@ -181,6 +181,10 @@ func handleOCR(w http.ResponseWriter, r *http.Request) {
 		src = p
 	default:
 		errJSON(w, 400, "只有 PDF、DJVU 能识别文字")
+		return
+	}
+	if n := pdfPageCount(r, src); n > 0 && page > n {
+		errJSON(w, 404, "没有这一页")
 		return
 	}
 	var bookLang, title string

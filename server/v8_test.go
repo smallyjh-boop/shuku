@@ -189,7 +189,8 @@ func TestOCRScannedPDF(t *testing.T) {
 	if code, _, _ := call(t, srv, tok, "GET", fmt.Sprintf("/api/files/%d/ocr/1", fid), nil); code != 200 {
 		t.Error("缓存", code)
 	}
-	if code, _, _ := call(t, srv, tok, "GET", fmt.Sprintf("/api/files/%d/ocr/2", fid), nil); code != 501 && code != 500 {
-		t.Error("没有 tesseract 时应该报错", code)
+	// 这本 PDF 只有一页：第 2 页没有，回 404（以前把 poppler 的出错原样回成 500）
+	if code, _, _ := call(t, srv, tok, "GET", fmt.Sprintf("/api/files/%d/ocr/2", fid), nil); code != 404 {
+		t.Error("超出页数应该是 404", code)
 	}
 }

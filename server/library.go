@@ -44,8 +44,8 @@ func handleSeries(w http.ResponseWriter, r *http.Request) {
 		args = append(args, k)
 	}
 	if s := strings.TrimSpace(q.Get("q")); s != "" {
-		where = append(where, `(b.series LIKE ? OR b.search_key LIKE ?)`)
-		args = append(args, "%"+s+"%", "%"+strings.ToLower(toSimplified(s))+"%")
+		where = append(where, `(b.series LIKE ? ESCAPE '\' OR b.search_key LIKE ? ESCAPE '\')`)
+		args = append(args, "%"+likeEscape(s)+"%", "%"+likeEscape(strings.ToLower(toSimplified(s)))+"%")
 	}
 	order := `MAX(COALESCE(p.updated_at,0)) DESC, MAX(b.created_at) DESC`
 	switch q.Get("sort") {

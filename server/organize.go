@@ -221,7 +221,8 @@ func safeName(s string) string {
 	})
 	s = strings.Trim(cleanSpace(s), ". ")
 	// 太长就截短，但扩展名要留着：否则 .pdf 被截掉，入库时认不出是什么格式
-	if r := []rune(s); len(r) > 80 {
+	// 按字数不超过 80，按字节不超过 240（文件名最多 255 字节，emoji 一个字 4 字节；留出“ (2)”的位置）
+	if r := []rune(s); len(r) > 80 || len(s) > 240 {
 		ext := filepath.Ext(s)
 		// 两段的扩展名（.fb2.zip 靠整个后缀认格式）一起留着
 		for _, two := range []string{".fb2.zip", ".kepub.epub"} {
@@ -235,6 +236,9 @@ func safeName(s string) string {
 		stem := []rune(strings.TrimSuffix(s, ext))
 		if keep := 80 - len([]rune(ext)); len(stem) > keep {
 			stem = stem[:keep]
+		}
+		for len(stem) > 0 && len(string(stem))+len(ext) > 240 {
+			stem = stem[:len(stem)-1]
 		}
 		s = strings.TrimSpace(string(stem)) + ext
 	}
@@ -568,3 +572,8 @@ func undoBatch(batch string) (int, error) {
 func newBatch() string { return randToken(6) }
 
 var _ = sql.ErrNoRows
+
+// LIKE 里的 % _ \ 当普通字符（搜“100%”不该把所有书都搜出来），配合 ESCAPE '\'
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}

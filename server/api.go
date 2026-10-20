@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"os"
@@ -178,8 +179,8 @@ func handleBooks(w http.ResponseWriter, r *http.Request) {
 	args := append([]any{}, vargs...)
 	if s := strings.TrimSpace(q.Get("q")); s != "" {
 		for _, term := range strings.Fields(toSimplified(strings.ToLower(s))) {
-			where = append(where, `b.search_key LIKE ?`)
-			args = append(args, "%"+term+"%")
+			where = append(where, `b.search_key LIKE ? ESCAPE '\'`)
+			args = append(args, "%"+likeEscape(term)+"%")
 		}
 	}
 	eq := func(param, col string) {
@@ -385,6 +386,9 @@ func handleUpdateBook(w http.ResponseWriter, r *http.Request) {
 	str("language", &b.Language)
 	str("direction", &b.Direction)
 	str("kind", &b.Kind)
+	if b.Kind != "comic" {
+		b.Kind = "book" // 只有书和漫画两种
+	}
 	if v, ok := req["series_index"].(float64); ok {
 		b.SeriesIndex = v
 	}
@@ -599,6 +603,10 @@ func handleCover(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePutCover(w http.ResponseWriter, r *http.Request) {
+	if _, err := getBook(pathID(r, "id")); err != nil {
+		errJSON(w, 404, "找不到这本书")
+		return
+	}
 	b, _ := io.ReadAll(io.LimitReader(r.Body, 20<<20))
 	if !saveCover(pathID(r, "id"), b) {
 		errJSON(w, 400, "图片无法识别")
@@ -868,6 +876,10 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "格式不正确")
 		return
 	}
+	req.Percent = math.Max(0, math.Min(1, req.Percent))
+	if req.FileID != 0 && db.QueryRow(`SELECT 1 FROM files WHERE id=? AND book_id=?`, req.FileID, id).Scan(new(int)) != nil {
+		req.FileID = 0 // 不是这本书的文件（比如合并过书目）：不记格式
+	}
 	if err := addReadingTime(u.ID, id, req.Seconds); err != nil {
 		errJSON(w, 500, "记录阅读时长失败："+err.Error())
 		return
@@ -887,6 +899,13 @@ func handlePutProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	// 位置没变（只是报一下阅读时长）：不改时间。不然别的设备会以为这里又往后读了，误报冲突
 	if cur.UpdatedAt > 0 && cur.Location == req.Location && cur.FileID == req.FileID {
+		// 位置一样、百分比不一样（比如最后一页，算法变了）：只更新百分比，读到头了照样标读完
+		if !req.TimeOnly && req.Percent != cur.Percent {
+			db.Exec(`UPDATE progress SET percent=? WHERE user_id=? AND book_id=?`, req.Percent, u.ID, id)
+			if req.Percent >= 0.995 && getUserBook(u.ID, id).ReadState != "done" {
+				setReadState(u.ID, id, "done")
+			}
+		}
 		writeJSON(w, 200, map[string]int64{"updated_at": cur.UpdatedAt})
 		return
 	}
@@ -1396,7 +1415,8 @@ func handleAddLibrary(w http.ResponseWriter, r *http.Request) {
 	if l.Template == "" {
 		l.Template = map[string]string{"book": defaultBookTemplate, "comic": defaultComicTemplate}[l.Kind]
 	}
-	db.Exec(`INSERT INTO libraries(name,path,kind,template,sort) VALUES(?,?,?,?,(SELECT COALESCE(MAX(sort),0)+1 FROM libraries))`, l.Name, p, l.Kind, l.Template)
+	db.Exec(`INSERT INTO libraries(id,name,path,kind,template,sort) VALUES(?,?,?,?,?,(SELECT COALESCE(MAX(sort),0)+1 FROM libraries))`,
+		nextSeq("library_id_seq", "libraries", maxUserLibrary()), l.Name, p, l.Kind, l.Template)
 	kickScan()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
@@ -1447,6 +1467,18 @@ func handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 	if _, err := backupDB("manual"); err != nil {
 		errJSON(w, 500, "移除前备份数据库失败："+err.Error())
 		return
+	}
+	if rows, err := db.Query(`SELECT id FROM files WHERE library_id=?`, id); err == nil {
+		var ids []int64
+		for rows.Next() {
+			var fid int64
+			rows.Scan(&fid)
+			ids = append(ids, fid)
+		}
+		rows.Close()
+		for _, fid := range ids {
+			removeFileIndex(fid)
+		}
 	}
 	db.Exec(`DELETE FROM files WHERE library_id=?`, id)
 	db.Exec(`DELETE FROM books WHERE NOT EXISTS(SELECT 1 FROM files WHERE files.book_id=books.id)`)

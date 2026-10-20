@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -356,7 +357,9 @@ func resumePoint(chs []WatchChapter, loc string, percent float64) (int, float64)
 		return 0, 0
 	}
 	total := chs[len(chs)-1].Start + chs[len(chs)-1].Chars
+	percent = math.Max(0, math.Min(1, percent))
 	byChar := func(pos int) (int, float64) {
+		pos = max(0, pos)
 		for _, c := range chs {
 			if pos < c.Start+c.Chars {
 				return c.Index, float64(pos-c.Start) / float64(max(1, c.Chars))

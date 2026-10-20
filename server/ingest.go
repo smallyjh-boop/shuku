@@ -242,6 +242,10 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 	if err != nil {
 		return IngestResult{Status: "error", Msg: err.Error()}
 	}
+	if size == 0 {
+		// 空文件不是书（所有空文件的哈希都一样，还会互相算成重复）
+		return IngestResult{Status: "error", Msg: "文件是空的（0 字节）"}
+	}
 	var dupID, dupBook, dupDeleted int64
 	var dupPath string
 	if db.QueryRow(`SELECT f.id,f.book_id,f.path,b.deleted_at FROM files f JOIN books b ON b.id=f.book_id WHERE f.hash=? ORDER BY b.deleted_at, f.id LIMIT 1`, hash).Scan(&dupID, &dupBook, &dupPath, &dupDeleted) == nil {
@@ -368,7 +372,7 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 			return IngestResult{Status: "error", Msg: err.Error()}
 		}
 	}
-	res, err := db.Exec(`INSERT INTO files(book_id,library_id,path,format,size,hash,created_at) VALUES(?,?,?,?,?,?,?)`, bookID, lib.ID, p, fi.Format, size, hash, ts)
+	res, err := db.Exec(`INSERT INTO files(id,book_id,library_id,path,format,size,hash,created_at) VALUES(?,?,?,?,?,?,?,?)`, nextSeq("file_id_seq", "files", 0), bookID, lib.ID, p, fi.Format, size, hash, ts)
 	if err != nil {
 		if !attached {
 			db.Exec(`DELETE FROM books WHERE id=?`, bookID)
@@ -432,6 +436,17 @@ func ingestFile(ctx context.Context, p string, fromInbox bool) IngestResult {
 
 func insideInbox(p string) bool {
 	return strings.HasPrefix(filepath.Clean(p), filepath.Clean(cfg.Inbox)+string(os.PathSeparator))
+}
+
+// 编号一直往上加、不复用：删掉的书库、文件的编号给了新的，家人账号能看的书库、按编号缓存的页面都会张冠李戴。
+// floor：别处还记着的最大编号（比如家人账号能看的书库列表），新编号也要比它大
+func nextSeq(key, table string, floor int64) int64 {
+	var maxID int64
+	db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM ` + table).Scan(&maxID)
+	seq, _ := strconv.ParseInt(getSetting(key, "0"), 10, 64)
+	seq = max(seq, maxID, floor) + 1
+	setSetting(key, strconv.FormatInt(seq, 10))
+	return seq
 }
 
 // 书目编号：一直往上加，不复用

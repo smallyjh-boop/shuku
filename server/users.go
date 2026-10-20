@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -263,6 +264,10 @@ func handleAddUser(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "密码至少 4 位")
 		return
 	}
+	if len(*req.Password) > maxPassword {
+		errJSON(w, 400, errPasswordLong)
+		return
+	}
 	hash, _ := hashPassword(*req.Password)
 	libs := []int64{}
 	if req.Libraries != nil {
@@ -288,6 +293,25 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	var req userReq
 	if readJSON(r, &req) != nil {
 		errJSON(w, 400, "格式不正确")
+		return
+	}
+	// 先把要改的都检查一遍再写，免得报错时已经改了一半
+	if req.Password != nil && *req.Password != "" {
+		if len(*req.Password) < 4 {
+			errJSON(w, 400, "密码至少 4 位")
+			return
+		}
+		if len(*req.Password) > maxPassword {
+			errJSON(w, 400, errPasswordLong)
+			return
+		}
+	}
+	if req.Name != nil && cleanUserName(*req.Name) == "" {
+		errJSON(w, 400, "名字不能为空")
+		return
+	}
+	if req.Role != nil && *req.Role != "admin" && u.Admin() && adminCount() <= 1 {
+		errJSON(w, 400, "至少要留一个管理员")
 		return
 	}
 	if req.Name != nil {
@@ -490,4 +514,24 @@ func handleBookStates(w http.ResponseWriter, r *http.Request) {
 func handleMe(w http.ResponseWriter, r *http.Request) {
 	u := me(r)
 	writeJSON(w, 200, map[string]any{"id": u.ID, "name": u.Name, "role": u.Role, "libraries": u.Libraries, "has_password": u.HasPass})
+}
+
+// 家人账号能看的书库里最大的编号：新建书库的编号要比它大（删掉的书库编号不能给新书库，不然只能看那个书库的人会看到新书库）
+func maxUserLibrary() int64 {
+	var top int64
+	rows, err := db.Query(`SELECT libraries FROM users`)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw sql.NullString
+		rows.Scan(&raw)
+		var ids []int64
+		json.Unmarshal([]byte(raw.String), &ids)
+		for _, id := range ids {
+			top = max(top, id)
+		}
+	}
+	return top
 }

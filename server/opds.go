@@ -372,8 +372,8 @@ func opdsSearch(w http.ResponseWriter, r *http.Request) {
 	var where []string
 	var args []any
 	for _, t := range strings.Fields(toSimplified(strings.ToLower(q))) {
-		where = append(where, `b.search_key LIKE ?`)
-		args = append(args, "%"+t+"%")
+		where = append(where, `b.search_key LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+likeEscape(t)+"%")
 	}
 	if len(where) == 0 {
 		where = []string{"1=0"}
