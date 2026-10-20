@@ -113,6 +113,7 @@ class ProgressSync(private val app: ShukuApp) {
     private fun tellWeb(id: Int, r: HttpResult) {
         val j = try { JSONObject(r.text) } catch (e: Exception) { return }
         Events.emit("progress", j.put("id", id))
+        NarrationService.progressSaved(id, j)
     }
 
     companion object {

@@ -375,7 +375,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 他的进度、笔记删了就没了：先备份一份，删错了能从备份恢复
-	if _, err := backupDB("manual"); err != nil {
+	if _, err := backupDB("delete"); err != nil {
 		errJSON(w, 500, "删除前备份数据库失败："+err.Error())
 		return
 	}

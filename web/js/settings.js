@@ -455,7 +455,7 @@ async function storageSec(ctx) {
 }
 
 // ---------- 备份（管理员） ----------
-const BACKUP_KIND = { daily: '每日', upgrade: '升级前', manual: '手动', restore: '恢复前' }
+const BACKUP_KIND = { daily: '每日', upgrade: '升级前', manual: '手动', delete: '删除前', restore: '恢复前' }
 
 async function backupSec(ctx) {
   const box = h('div', { class: 'stack', style: { gap: '8px' } })

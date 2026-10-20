@@ -1464,7 +1464,7 @@ func handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 只移除登记，不动文件。登记连同每个人的进度、笔记一起删，先备份一份，删错了能从备份恢复
-	if _, err := backupDB("manual"); err != nil {
+	if _, err := backupDB("delete"); err != nil {
 		errJSON(w, 500, "移除前备份数据库失败："+err.Error())
 		return
 	}
@@ -1482,6 +1482,8 @@ func handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	db.Exec(`DELETE FROM files WHERE library_id=?`, id)
 	db.Exec(`DELETE FROM books WHERE NOT EXISTS(SELECT 1 FROM files WHERE files.book_id=books.id)`)
+	// 阅读记录没有外键：书没了也要删，不然统计里还算着这些书（和彻底删书时一样）
+	db.Exec(`DELETE FROM reading_log WHERE NOT EXISTS(SELECT 1 FROM books WHERE books.id=reading_log.book_id)`)
 	db.Exec(`DELETE FROM libraries WHERE id=?`, id)
 	invalidateSuggestions()
 	writeJSON(w, 200, map[string]bool{"ok": true})

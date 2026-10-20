@@ -24,7 +24,7 @@ func backupDir() string { return filepath.Join(filepath.Dir(dbPath), "backup") }
 
 var backupMu sync.Mutex
 
-// 备份文件名：shuku-20261018-031500-daily.db；类型：daily 每天、upgrade 升级前、manual 手动、restore 恢复前
+// 备份文件名：shuku-20261018-031500-daily.db；类型：daily 每天、upgrade 升级前、manual 手动、delete 删账号删书库前、restore 恢复前
 var backupNameRe = regexp.MustCompile(`^shuku-(\d{8}-\d{6})-([a-z0-9-]+)\.db$`)
 
 func backupDB(kind string) (string, error) {
@@ -82,9 +82,10 @@ func listBackups() []backupInfo {
 	return out
 }
 
-// 每天的留 7 份，升级前、手动的各留 5 份，恢复前的留 3 份
+// 每天的留 7 份，升级前、手动、删除前的各留 5 份，恢复前的留 3 份
+// （删账号、删书库前自动做的备份单独算 delete，不挤掉用户自己点的手动备份）
 func pruneBackups() {
-	keep := map[string]int{"daily": 7, "upgrade": 5, "manual": 5, "restore": 3}
+	keep := map[string]int{"daily": 7, "upgrade": 5, "manual": 5, "delete": 5, "restore": 3}
 	seen := map[string]int{}
 	for _, b := range listBackups() {
 		seen[b.Kind]++

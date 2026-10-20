@@ -71,6 +71,7 @@ class NarrationService : Service() {
     private var ended = false
     private var status = ""
     private var book = JSONObject()
+    private var progressBase = -1L // 书库进度的版本（网页给的），-1：旧版网页没给，不带
     private var cover: Bitmap? = null
     private var voice = ""
     private var lang = ""            // 书的语言（zh、en、th…）：手机自带语音读拉丁字母时按它选
@@ -180,6 +181,7 @@ class NarrationService : Service() {
                 flushPosition()
                 book = j.optJSONObject("book") ?: JSONObject()
                 fileId = book.optInt("file_id")
+                progressBase = if (j.has("progressBase") && !j.isNull("progressBase")) j.optLong("progressBase", -1) else -1
                 webGen = Events.generation
                 orphan = false
                 posSeg = null
@@ -621,6 +623,9 @@ class NarrationService : Service() {
         listenMs -= secs * 1000L
         val body = JSONObject().put("file_id", fileId).put("location", seg.loc).put("percent", seg.pct)
             .put("device", MainActivity.deviceName()).put("seconds", secs)
+        // 带上书库进度的版本：暂停期间别的设备读到了后面，这次不覆盖（书库回冲突，网页提示跳过去）；
+        // 接着听下去就以这台为准（见 onProgress），和网页上的做法一样
+        if (progressBase >= 0) body.put("base", progressBase)
         try { app.progress.save(id, body.toString()) } catch (e: Exception) {}
     }
 
@@ -884,9 +889,23 @@ class NarrationService : Service() {
         }
     }
 
+    /** 书库收到了这本书的进度（ProgressSync 转过来）：记下新的版本 */
+    private fun onProgress(id: Int, r: JSONObject) {
+        if (id != book.optInt("id") || progressBase < 0) return
+        // 冲突：别的设备读到了别处，这次没覆盖；还接着听的话，下一次就以这台为准
+        val v = r.optLong("updated_at")
+        if (v > progressBase) progressBase = v
+    }
+
     companion object {
         @Volatile var instance: NarrationService? = null
             private set
+
+        /** ProgressSync 传完进度后调用（任何线程） */
+        fun progressSaved(id: Int, r: JSONObject) {
+            val s = instance ?: return
+            s.handler.post { s.onProgress(id, r) }
+        }
         private val pending = ConcurrentLinkedQueue<Pair<String, String>>()
         private const val PREFETCH = 30
         private val RETRIES = listOf(3_000L, 5_000L, 10_000L, 20_000L, 30_000L, 30_000L)

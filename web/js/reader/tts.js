@@ -548,6 +548,8 @@ export class NativeNarrator {
     call('tts', 'start', {
       book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
       voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), voices: byLang, lang: this.code, speed: this.speed, segments: this.pack(unit),
+      // 打开这本书时书库进度的版本：App 自己存进度时带上，别的设备读到了后面就不直接覆盖
+      progressBase: this.shell.base ?? null,
     })
   }
 
