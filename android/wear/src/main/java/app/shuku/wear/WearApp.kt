@@ -181,7 +181,8 @@ class WearApp : Application() {
         val ecs = ExecutorCompletionService<Int>(pingPool)
         val t0 = SystemClock.elapsedRealtime()
         cands.forEachIndexed { k, (r, u) ->
-            val t = if (r == "lan") LAN_PING_MS else REMOTE_PING_MS // relay 走外网的超时
+            // 经手机转发要多等：手机 App 可能刚被叫醒，先要自己选线路，再加上蓝牙来回
+            val t = when (r) { "lan" -> LAN_PING_MS; "relay" -> RELAY_PING_MS; else -> REMOTE_PING_MS }
             deadlines[k] = t0 + t + 1000L
             ecs.submit(Callable {
                 results[k] = link.ping(u, t)
@@ -206,6 +207,9 @@ class WearApp : Application() {
                     else -> RoutePick.FAILED // 不通，或者过了时间还没回
                 }
             }
+            // 经手机转发只是退路：别的线路都确定不通了才用它（在家时内网回得慢一点，也不绕手机走）
+            val ri = cands.indexOfFirst { it.first == "relay" }
+            if (ri >= 0 && states[ri] == RoutePick.OK && states.indices.any { it != ri && states[it] != RoutePick.FAILED }) states[ri] = RoutePick.WAITING
             when (val k = pick.step(states, now)) {
                 RoutePick.NONE -> {
                     link.adopt("offline", null)
@@ -364,6 +368,7 @@ class WearApp : Application() {
 
         private const val LAN_PING_MS = 3500
         private const val REMOTE_PING_MS = 5000
+        private const val RELAY_PING_MS = 12000
         private const val LAN_GRACE_MS = 400L
         private const val STALE_MS = 2 * 60_000L
         private const val OFFLINE_HOLD_MS = 20_000L

@@ -23,8 +23,11 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 手表出门、连不上书库时，请手机代为转发（见 app.shuku.core.Relay）。
- * 在手表本机 127.0.0.1 起一个 HTTP 小服务：书库的其他代码照常请求 http://127.0.0.1:端口/api/...，
+ * 在手表本机 127.0.0.1 起一个 HTTP 小服务：书库的其他代码照常请求 http://127.0.0.1:端口/随机串/api/...，
  * 这里把请求经 Wear 数据层交给手机，手机用它已经连好的书库地址去取，结果分块传回。
+ * 地址里带一段随机串：手表上别的 App 不知道它，借不了这条路去访问书库。
+ * 转发这一层出了问题（手机不在、没回应、手机也连不上书库）不回 HTTP，直接断开：
+ * 请求的一方当成连不上（IOException），重新选线路（比如换成手表自己的 Wi-Fi）。
  */
 object PhoneRelay {
     private class Reply(val status: Int, val type: String, val body: ByteArray)
@@ -37,6 +40,7 @@ object PhoneRelay {
     @Volatile private var nodeId: String? = null
     @Volatile private var nodeAt = -1L
     private var server: ServerSocket? = null
+    private val secret = "/r" + UUID.randomUUID().toString().replace("-", "").take(16)
 
     /** 起本机转发服务（只起一次），返回它的地址 */
     @Synchronized
@@ -44,7 +48,7 @@ object PhoneRelay {
         base?.let { return it }
         val ss = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
         server = ss
-        val b = "http://127.0.0.1:${ss.localPort}"
+        val b = "http://127.0.0.1:${ss.localPort}$secret"
         base = b
         Thread({
             while (!ss.isClosed) {
@@ -115,7 +119,7 @@ object PhoneRelay {
         val inp = BufferedInputStream(s.getInputStream())
         val first = readLine(inp) ?: return
         val parts = first.split(" ")
-        if (parts.size < 2) return
+        if (parts.size < 2 || !parts[1].startsWith("$secret/")) return // 不是书库自己的请求
         val headers = HashMap<String, String>()
         while (true) {
             val h = readLine(inp) ?: break
@@ -127,10 +131,10 @@ object PhoneRelay {
         val body = readBody(inp, len)
         val req = JSONObject()
             .put("m", parts[0])
-            .put("p", parts[1])
+            .put("p", parts[1].removePrefix(secret))
             .put("h", JSONObject().put("Authorization", headers["authorization"] ?: "").put("Content-Type", headers["content-type"] ?: ""))
             .put("b", if (body.isEmpty()) "" else Base64.encodeToString(body, Base64.NO_WRAP))
-        val r = forward(WearApp.app, req)
+        val r = forward(WearApp.app, req) ?: return // 转发失败：断开，让请求的一方重新选线路
         val head = "HTTP/1.1 ${r.status} ${reason(r.status)}\r\n" +
             "Content-Type: ${r.type.ifEmpty { "application/octet-stream" }}\r\n" +
             "Content-Length: ${r.body.size}\r\nConnection: close\r\n\r\n"
@@ -140,8 +144,8 @@ object PhoneRelay {
         out.flush()
     }
 
-    private fun forward(ctx: Context, req: JSONObject): Reply {
-        val node = phoneNode(ctx) ?: return err(503, "手机没有连上（请确认手表和手机已配对、蓝牙连着）")
+    private fun forward(ctx: Context, req: JSONObject): Reply? {
+        val node = phoneNode(ctx) ?: return null
         val id = UUID.randomUUID().toString()
         val q = LinkedBlockingQueue<Relay.Chunk>()
         pending[id] = q
@@ -151,7 +155,7 @@ object PhoneRelay {
         } catch (e: Exception) {
             pending.remove(id)
             forgetNode()
-            return err(503, "连不上手机")
+            return null
         }
         try {
             var total = -1
@@ -160,7 +164,8 @@ object PhoneRelay {
             val got = HashMap<Int, ByteArray>()
             while (total < 0 || got.size < total) {
                 // 每一块最多等 40 秒（合成语音、下载章节可能慢）
-                val c = q.poll(40, TimeUnit.SECONDS) ?: return err(504, "手机没有回应")
+                val c = q.poll(40, TimeUnit.SECONDS) ?: return null
+                if (c.type == Relay.FAIL) return null // 手机也连不上书库
                 total = c.total
                 status = c.status
                 type = c.type
@@ -173,8 +178,6 @@ object PhoneRelay {
             pending.remove(id)
         }
     }
-
-    private fun err(status: Int, msg: String) = Reply(status, "application/json; charset=utf-8", JSONObject().put("error", msg).toString().toByteArray())
 
     private fun reason(code: Int) = when (code) {
         200 -> "OK"

@@ -18,6 +18,9 @@ object Relay {
     /** 每块不超过这么多字节（Wear 消息上限约 100KB，留出余量） */
     const val CHUNK = 48 * 1024
 
+    /** 回复的类型是这个：转发失败（手机也连不上书库、不转发这个地址），手表那边按连不上处理 */
+    const val FAIL = "x-shuku-relay-fail"
+
     class Chunk(val id: String, val index: Int, val total: Int, val status: Int, val type: String, val data: ByteArray)
 
     fun encodeChunk(id: String, index: Int, total: Int, status: Int, type: String, data: ByteArray): ByteArray {

@@ -18,30 +18,10 @@ class WatchListener : WearableListenerService() {
     override fun onMessageReceived(event: MessageEvent) {
         val app = WearApp.app
         when (event.path) {
+            // 在后台线程里连：这里的消息是一条一条处理的，如果在这里等，经手机转发的回复就进不来（自己卡住自己）
             "/shuku/config" -> {
-                val j = JSONObject(String(event.data))
-                val code = j.optString("code")
-                val oldToken = app.config.token
-                // 手机发来的地址都连不上（比如手表在外面）时，最后经手机转发（这条消息就是手机发来的，手机一定连着）
-                val cands = listOf(j.optString("lan"), j.optString("origin"), j.optString("remote")).map { Config.norm(it) }.filter { it.isNotEmpty() }.distinct() + PhoneRelay.start()
-                var err: String? = "手表连不上书库（${cands.size - 1} 个地址），也没能经手机转发，请确认手机能连上书库"
-                for (u in cands) {
-                    if (app.link.ping(u, 6000) == null) continue
-                    err = app.link.connect(u, code, "", WearApp.DEVICE)
-                    if (err == null) break
-                }
-                if (err == null) {
-                    if (j.optString("lan").isNotEmpty()) app.config.lan = j.optString("lan")
-                    if (j.optString("remote").isNotEmpty()) app.config.remote = j.optString("remote")
-                    // 重新连接过：把旧的登录注销掉，书库的设备列表里不留重复的手表
-                    val base = app.link.base
-                    if (oldToken.isNotEmpty() && oldToken != app.config.token && base != null) {
-                        runCatching { Http.postJson("$base/api/auth/logout", oldToken, JSONObject(), timeoutMs = 6000) }
-                    }
-                }
-                app.config.prefs.edit().putString("connect_error", err ?: "").apply()
-                sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(packageName))
-                if (err == null) Today.updateViews() // Tile、表盘上不再显示“还没连接书库”
+                val data = event.data
+                app.io.execute { runCatching { configure(app, data) } }
             }
             Relay.PATH_RES -> PhoneRelay.onChunk(event.data)
             "/shuku/config/error" -> {
@@ -56,5 +36,32 @@ class WatchListener : WearableListenerService() {
                 sendBroadcast(Intent(WearApp.ACTION_TTS).setPackage(packageName))
             }
         }
+    }
+
+    /** 手机发来的书库地址和一次性配对码：手表自己去换登录令牌 */
+    private fun configure(app: WearApp, data: ByteArray) {
+        val j = JSONObject(String(data))
+        val code = j.optString("code")
+        val oldToken = app.config.token
+        // 手机发来的地址都连不上（比如手表在外面）时，最后经手机转发（这条消息就是手机发来的，手机一定连着）
+        val cands = listOf(j.optString("lan"), j.optString("origin"), j.optString("remote")).map { Config.norm(it) }.filter { it.isNotEmpty() }.distinct() + PhoneRelay.start()
+        var err: String? = "手表连不上书库（${cands.size - 1} 个地址），也没能经手机转发，请确认手机能连上书库"
+        for (u in cands) {
+            if (app.link.ping(u, 6000) == null) continue
+            err = app.link.connect(u, code, "", WearApp.DEVICE)
+            if (err == null) break
+        }
+        if (err == null) {
+            if (j.optString("lan").isNotEmpty()) app.config.lan = j.optString("lan")
+            if (j.optString("remote").isNotEmpty()) app.config.remote = j.optString("remote")
+            // 重新连接过：把旧的登录注销掉，书库的设备列表里不留重复的手表
+            val base = app.link.base
+            if (oldToken.isNotEmpty() && oldToken != app.config.token && base != null) {
+                runCatching { Http.postJson("$base/api/auth/logout", oldToken, JSONObject(), timeoutMs = 6000) }
+            }
+        }
+        app.config.prefs.edit().putString("connect_error", err ?: "").apply()
+        app.sendBroadcast(Intent(WearApp.ACTION_CONFIGURED).setPackage(app.packageName))
+        if (err == null) Today.updateViews() // Tile、表盘上不再显示“还没连接书库”
     }
 }

@@ -117,6 +117,9 @@ class PhoneWearService : WearableListenerService() {
 object RelayServer {
     private class Reply(val status: Int, val type: String, val body: ByteArray)
 
+    // 单独的线程：一次转发可能等一分钟（合成语音），不能占着 App 的公共线程（进度同步、连接手表要用）
+    private val pool = java.util.concurrent.Executors.newFixedThreadPool(3)
+
     fun serve(ctx: Context, node: String, payload: ByteArray) {
         val req = try {
             org.json.JSONObject(String(payload, Charsets.UTF_8))
@@ -126,11 +129,11 @@ object RelayServer {
         val id = req.optString("id")
         if (id.isEmpty()) return
         val app = ShukuApp.app
-        app.io.execute {
+        pool.execute {
             val r = try {
                 forward(app, req)
             } catch (e: Exception) {
-                err(502, "转发失败：${e.message ?: e.javaClass.simpleName}")
+                fail()
             }
             sendReply(ctx, node, id, r)
         }
@@ -138,9 +141,10 @@ object RelayServer {
 
     private fun forward(app: ShukuApp, req: org.json.JSONObject): Reply {
         val path = req.optString("p")
-        if (!path.startsWith("/api/")) return err(403, "不转发这个地址")
-        if (!app.link.online && app.link.probe() == null) return err(503, "手机连不上书库")
-        val base = app.link.base ?: return err(503, "手机连不上书库")
+        // 只转发书库的接口；带 .. 之类的路径书库会重定向到别处，一律不转
+        val p = path.substringBefore('?').lowercase()
+        if (!p.startsWith("/api/") || p.contains("..") || p.contains("%2e") || p.contains("//") || p.contains('\\')) return fail()
+        if (!app.link.online && app.link.probe() == null) return fail()
         val method = req.optString("m", "GET")
         val h = req.optJSONObject("h")
         val auth = h?.optString("Authorization").orEmpty()
@@ -150,9 +154,18 @@ object RelayServer {
         val headers = if (auth.isNotEmpty()) mapOf("Authorization" to auth) else emptyMap()
         // 听书要合成语音，比普通请求等得久一些
         val timeout = if (method == "GET") 20000 else 60000
-        val r = Http.request("$base$path", method, null, body, ct, timeout, headers)
+        fun once(base: String) = Http.request("$base$path", method, null, body, ct, timeout, headers)
+        val r = try {
+            once(app.link.base ?: return fail())
+        } catch (e: java.io.IOException) {
+            // 手机换了网络（出门了还记着内网地址）：重新选线路再试一次
+            once(app.link.probe() ?: return fail())
+        }
         return Reply(r.code, r.header("Content-Type") ?: "application/octet-stream", r.body)
     }
+
+    /** 转发失败：手表收到这个就当成连不上，自己去换线路 */
+    private fun fail() = Reply(502, Relay.FAIL, ByteArray(0))
 
     private fun sendReply(ctx: Context, node: String, id: String, r: Reply) {
         val total = if (r.body.isEmpty()) 1 else (r.body.size + Relay.CHUNK - 1) / Relay.CHUNK
@@ -168,7 +181,4 @@ object RelayServer {
             }
         }
     }
-
-    private fun err(status: Int, msg: String) =
-        Reply(status, "application/json; charset=utf-8", org.json.JSONObject().put("error", msg).toString().toByteArray())
 }

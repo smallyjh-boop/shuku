@@ -269,7 +269,7 @@ function post(j, { base, token }, blob, name) {
       // 502～504：书库正在重启（比如刚升级），过一会儿再传
       if (xhr.status < 200 || xhr.status >= 300) return fin(Object.assign(new Error(data?.error || `书库返回错误（${xhr.status}）`), { net: xhr.status >= 502 && xhr.status <= 504 }))
       j.bytes = blob.size
-      fin(null, { size: data?.size || blob.size, name })
+      fin(null, { size: data?.size || blob.size, name, file: data?.file || '' })
     }
     xhr.onerror = () => fin(Object.assign(new Error('网络不通'), { net: true }))
     xhr.onabort = () => fin(Object.assign(new Error(j.cancelled ? '已取消' : why || '连接断了'), { net: !j.cancelled }))

@@ -1316,7 +1316,10 @@ class ListenService : Service() {
 
         /** 上一章 / 下一章：从那一章开头读 */
         fun chapter(ctx: Context, d: Int) {
-            val st = instance?.snapshot() ?: return
+            val me = instance ?: return
+            val st = me.snapshot()
+            if (st.chapterCount == 0) return // 还没打开好，章节号还不准
+            me.saveProgress() // 换章前先存：这段听的时长别丢了
             val ni = st.chapterIndex + d
             if (ni < 0 || (st.chapterCount > 0 && ni >= st.chapterCount)) return
             start(ctx, st.bookId, st.title, ni, 0.0)

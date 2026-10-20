@@ -33,6 +33,8 @@ const FRESH = {
   jobId: '', jobStatus: '', began: 0, seen: 0, idle: 0, parked: false, // 让书库下载：书库的任务、等了多久
   xfer: '', heard: 0, rule: 0, // 浏览器下载：离屏页面里的任务、最后一次收到它的消息、来源页规则
   triedBrowser: false, triedNas: false,
+  resubmits: 0, // 书库重启（自动升级）打断了下载，重新交给书库的次数
+  inboxFile: '', ingest: '', ingestMsg: '', ingestTitle: '', doneAt: 0, // 传到书库以后：入库结果（见 checkIngest）
 }
 
 let tasks = []
@@ -240,7 +242,17 @@ async function pollJob(t) {
     t.parked = false
     t.wait = ''
     const j = (list || []).find(x => x.id === t.jobId)
-    if (!j) throw new Error('书库里找不到这个下载任务（可能被取消了）')
+    // 书库重启了（NAS 自动升级时常有）：下载任务没了或者被打断，重新交给书库，最多两次
+    if (!j || (j.status === 'error' && /书库重启/.test(j.error || ''))) {
+      if ((t.resubmits || 0) < 2) {
+        t.resubmits = (t.resubmits || 0) + 1
+        const job = await api('/api/fetch', { method: 'POST', json: { url: t.url, name: t.title || '', source: '浏览器插件', referer: t.page?.url || '' } })
+        Object.assign(t, { jobId: job.id, jobStatus: job.status, idle: 0, wait: '书库重启过，已重新交给书库下载' })
+        persist()
+        continue
+      }
+      throw new Error(j ? serverError(j.error) : '书库里找不到这个下载任务（书库可能重启过），请点“重试”')
+    }
     if (j.status !== t.jobStatus || (j.bytes || 0) !== t.bytes) t.idle = 0
     t.jobStatus = j.status
     t.bytes = j.bytes || 0
@@ -251,8 +263,10 @@ async function pollJob(t) {
       t.status = 'done'
       t.name = j.file || j.name || t.name
       t.progress = 1
+      t.wait = ''
       persist()
       notify(true, t)
+      startIngestCheck(t, j.file)
       return
     }
     if (j.status === 'error') throw new Error(serverError(j.error))
@@ -344,6 +358,7 @@ async function outcome(t, m) {
     Object.assign(t, { status: 'done', name: m.name || t.name, bytes: m.size || t.bytes, total: m.size || t.total, progress: 1 })
     persist()
     notify(true, t)
+    startIngestCheck(t, m.file)
     return 'done'
   }
   if (m.auth) throw isConfigured(await getConfig()) ? await loginExpired() : new AuthError('还没有连接书库，请先在插件设置里连接')
@@ -440,11 +455,51 @@ function closeIdle() {
   })
 }
 
+// ---------- 传到书库以后：查入库结果（入库了，还是书库里已有、认不出格式、出错） ----------
+
+const INGEST_WAIT = 10 * 60 * 1000 // 最多查这么久（书库整理大书、排队的书多时会慢）
+const checking = new Set()
+
+function startIngestCheck(t, file) {
+  if (!file) return // 旧版书库不返回投递目录里的路径：不查
+  Object.assign(t, { inboxFile: file, ingest: 'pending', ingestMsg: '', ingestTitle: '', doneAt: Date.now() })
+  persist()
+  checkIngest(t)
+  watch()
+}
+
+async function checkIngest(t) {
+  if (checking.has(t.id)) return
+  checking.add(t.id)
+  try {
+    while (t.status === 'done' && t.ingest === 'pending') {
+      if (Date.now() - (t.doneAt || 0) > INGEST_WAIT) { t.ingest = 'slow'; break }
+      let r
+      try {
+        r = await api('/api/inbox/status?file=' + encodeURIComponent(t.inboxFile), { timeout: 15000 })
+      } catch (e) {
+        if (e.status === 404 || e.status === 403 || e.status === 401) { t.ingest = ''; break } // 旧版书库、没权限：不查了
+        await sleep(15000) // 连不上书库：等一会儿再查
+        continue
+      }
+      if (r.status !== 'pending') {
+        Object.assign(t, { ingest: r.status, ingestMsg: r.message || '', ingestTitle: r.title || '' })
+        break
+      }
+      await sleep(5000)
+    }
+  } finally {
+    checking.delete(t.id)
+    persist()
+    watch()
+  }
+}
+
 // ---------- 定时检查：有任务时每分钟一次 ----------
 
 let watching = null
 async function watch() {
-  const need = tasks.some(t => BUSY.includes(t.status))
+  const need = tasks.some(t => BUSY.includes(t.status) || (t.status === 'done' && t.ingest === 'pending'))
   if (need === watching) return
   watching = need
   if (!need) return chrome.alarms.clear('watch')
@@ -456,6 +511,7 @@ async function watch() {
 async function heartbeat() {
   watching = null // 按实际情况重新决定要不要这个定时器（没有任务了就去掉）
   for (const t of tasks) if (t.status === 'fetching' && !live.has(t.id)) start(t, true)
+  for (const t of tasks) if (t.status === 'done' && t.ingest === 'pending') checkIngest(t) // 后台休眠过：接着查入库结果
   const quiet = tasks.filter(t => t.xfer && Date.now() - (t.heard || 0) > 60000)
   if (quiet.length) {
     const off = await offscreenJobs()

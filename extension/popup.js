@@ -275,6 +275,21 @@ async function add() {
 
 const ACTIVE = ['queued', 'downloading', 'uploading', 'fetching']
 
+// 传到书库以后的入库结果（旧版书库没有这个结果，一直显示“正在整理入库”）
+function doneText(t) {
+  const got = t.mode === 'nas' ? '书库已下载' : '已传到书库'
+  switch (t.ingest) {
+    case 'done': return '已入库' + (t.ingestTitle ? `《${t.ingestTitle}》` : '')
+    case 'review': return '已入库' + (t.ingestTitle ? `《${t.ingestTitle}》` : '') + '，识别把握不大，请在书库“待确认”里看一下'
+    case 'duplicate': return '书库里已经有这本书，没有重复加入'
+    case 'unsupported': return got + '，但书库认不出这个文件的格式（放在投递目录的 _无法识别 里）'
+    case 'error': return got + '，但入库失败' + (t.ingestMsg ? '：' + t.ingestMsg : '') + '（放在投递目录的 _出错 里）'
+    case 'slow': return got + '，整理入库比较慢，过一会儿在书库里看看'
+    case 'unknown': return got
+  }
+  return got + '，正在整理入库'
+}
+
 function statusText(t) {
   const pct = t.total ? ` ${Math.round((t.bytes / t.total) * 100)}%` : t.bytes ? ` ${fmtBytes(t.bytes)}` : ''
   switch (t.status) {
@@ -282,7 +297,7 @@ function statusText(t) {
     case 'downloading': return '浏览器下载中' + pct
     case 'uploading': return '正在传到书库' + pct
     case 'fetching': return (t.jobStatus === 'queued' ? '书库排队中' : '书库正在下载') + pct
-    case 'done': return (t.mode === 'nas' ? '书库已下载' : '已传到书库') + '，正在整理入库'
+    case 'done': return doneText(t)
     case 'error': return t.error || '失败'
   }
   return ''
@@ -309,7 +324,9 @@ function renderTasks(list) {
     }
     // 进行中的任务后面加上说明：连不上书库正在等、改用了另一种方式
     const extra = active ? [t.wait, t.note].filter(Boolean).join('；') : ''
-    const li = h('li', { class: 'task ' + (active ? 'active' : t.status) + (active && t.wait ? ' wait' : '') },
+    // 传上去了但没入库（认不出格式、出错）：和失败一样用红字
+    const bad = t.status === 'done' && (t.ingest === 'unsupported' || t.ingest === 'error')
+    const li = h('li', { class: 'task ' + (active ? 'active' : bad ? 'error' : t.status) + (active && t.wait ? ' wait' : '') },
       h('div', { class: 't-name', title: t.url }, name),
       h('div', { class: 't-line' }, h('span', { class: 's' }, statusText(t) + (extra ? `（${extra}）` : '')), acts))
     if (active) {

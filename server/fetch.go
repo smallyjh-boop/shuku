@@ -116,7 +116,7 @@ func runFetch(j *FetchJob) {
 			j.Finished = now()
 			j.Status, j.Error = "error", "排队太久，没有开始下载"
 			if errors.Is(ctx.Err(), context.Canceled) {
-				j.Error = "已取消"
+				j.Error = cancelReason()
 			}
 		})
 		return
@@ -128,7 +128,7 @@ func runFetch(j *FetchJob) {
 		if err != nil {
 			j.Status, j.Error = "error", err.Error()
 			if errors.Is(ctx.Err(), context.Canceled) {
-				j.Error = "已取消"
+				j.Error = cancelReason()
 			}
 		} else {
 			j.Status, j.File = "done", name
@@ -139,6 +139,14 @@ func runFetch(j *FetchJob) {
 	} else {
 		logEvent("info", 0, "已下载 "+name+"，正在入库")
 	}
+}
+
+// 取消的原因：书库在重启（自动升级）时不算用户取消，插件看到会重新提交
+func cancelReason() string {
+	if appCtx.Err() != nil {
+		return "书库重启了，下载中断"
+	}
+	return "已取消"
 }
 
 func doFetch(ctx context.Context, j *FetchJob) (string, error) {

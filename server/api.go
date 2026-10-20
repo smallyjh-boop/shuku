@@ -92,6 +92,7 @@ func routes() http.Handler {
 	mux.HandleFunc("POST /api/translate", a(handleTranslate))
 
 	mux.HandleFunc("POST /api/upload", ad(handleUpload))
+	mux.HandleFunc("GET /api/inbox/status", ad(handleInboxStatus))
 	mux.HandleFunc("GET /api/status", a(handleStatus))
 	mux.HandleFunc("POST /api/scan", ad(handleScan))
 	mux.HandleFunc("GET /api/events", ad(handleEvents))
@@ -1128,7 +1129,12 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		if s == "" || s == "." || s == ".." {
 			continue
 		}
-		parts = append(parts, safeName(s))
+		// 投递目录不处理 # @ 开头的文件、_ 开头的文件夹（系统文件、处理结果目录）：传上来的去掉这些开头，不然永远不入库
+		s = strings.TrimLeft(safeName(s), "#@_ ")
+		if s == "" || strings.HasPrefix(s, ".") {
+			continue
+		}
+		parts = append(parts, s)
 	}
 	if len(parts) == 0 {
 		errJSON(w, 400, "缺少文件名")
@@ -1164,7 +1170,8 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	old := time.Now().Add(-10 * time.Second)
 	os.Chtimes(final, old, old)
 	kickInbox()
-	writeJSON(w, 200, map[string]any{"ok": true, "size": n})
+	// file：投递目录里的相对路径，插件拿它查入库结果（/api/inbox/status）
+	writeJSON(w, 200, map[string]any{"ok": true, "size": n, "file": inboxRel(final)})
 }
 
 // ---------- 状态、事件、扫描 ----------

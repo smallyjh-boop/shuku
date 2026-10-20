@@ -61,7 +61,9 @@ export function queueProgress(uid, bookId, body, title) {
   const q = readQueue(uid)
   const old = q[bookId]
   const seconds = (old?.body?.seconds || 0) + (body.seconds || 0)
-  q[bookId] = { body: { ...body, seconds, base: old?.body?.base ?? body.base }, title: title || old?.title || '', at: Date.now() }
+  // 只报时长的（time_only）不能顶掉排着的真正位置：留着原来的，只把时长加上
+  const keep = body.time_only && old ? old.body : body
+  q[bookId] = { body: { ...keep, seconds, base: old?.body?.base ?? body.base }, title: title || old?.title || '', at: Date.now() }
   writeQueue(uid, q)
 }
 // 拿出某本书排着的进度（阅读器打开这本书时接手，免得两边一起传）

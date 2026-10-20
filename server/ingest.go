@@ -16,7 +16,9 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -569,6 +571,7 @@ func processInbox(ctx context.Context) {
 		inbox.current = filepath.Base(p)
 		inbox.mu.Unlock()
 		r := ingestFile(ctx, p, true)
+		noteInboxResult(p, r)
 		name := filepath.Base(p)
 		switch r.Status {
 		case "moved":
@@ -619,6 +622,79 @@ func processInbox(ctx context.Context) {
 		inbox.mu.Unlock()
 		removeEmptyParents(filepath.Dir(p))
 	}
+}
+
+// ---------- 投递的文件处理得怎样了（浏览器插件传上来、书库下载的书，入库成功还是进了 _重复 之类） ----------
+
+type inboxResult struct {
+	Status string
+	BookID int64
+	Msg    string
+	At     time.Time
+}
+
+var inboxResults = struct {
+	sync.Mutex
+	m map[string]inboxResult // 投递目录里的相对路径 → 结果（留一小时）
+}{m: map[string]inboxResult{}}
+
+func inboxRel(p string) string {
+	rel, err := filepath.Rel(cfg.Inbox, p)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+func noteInboxResult(p string, r IngestResult) {
+	rel := inboxRel(p)
+	if rel == "" {
+		return
+	}
+	inboxResults.Lock()
+	defer inboxResults.Unlock()
+	for k, v := range inboxResults.m {
+		if time.Since(v.At) > time.Hour {
+			delete(inboxResults.m, k)
+		}
+	}
+	inboxResults.m[rel] = inboxResult{r.Status, r.BookID, r.Msg, time.Now()}
+}
+
+// GET /api/inbox/status?file=子文件夹/书名.epub（上传、书库下载时返回的 file）
+// status：pending 还在投递目录里等着 / done 入库了 / duplicate 书库里已有 / review 识别把握不大，进了待确认 /
+// unsupported 认不出格式 / error 入库失败 / unknown 不知道（过了一小时，或者书库重启过）
+func handleInboxStatus(w http.ResponseWriter, r *http.Request) {
+	rel := strings.TrimPrefix(path.Clean("/"+filepath.ToSlash(r.URL.Query().Get("file"))), "/")
+	if rel == "" || rel == "." {
+		errJSON(w, 400, "缺少 file")
+		return
+	}
+	inboxResults.Lock()
+	res, ok := inboxResults.m[rel]
+	inboxResults.Unlock()
+	out := map[string]any{"file": rel}
+	switch {
+	case ok:
+		st := res.Status
+		switch st {
+		case "new", "attached", "moved":
+			st = "done"
+		}
+		out["status"], out["message"], out["book_id"] = st, res.Msg, res.BookID
+		if res.BookID > 0 {
+			if b, err := getBook(res.BookID); err == nil {
+				out["title"] = b.Title
+			}
+		}
+	default:
+		if _, err := os.Stat(filepath.Join(cfg.Inbox, filepath.FromSlash(rel))); err == nil {
+			out["status"] = "pending"
+		} else {
+			out["status"] = "unknown"
+		}
+	}
+	writeJSON(w, 200, out)
 }
 
 var copyNameRe = regexp.MustCompile(`(?i)(副本|拷贝|复制|[ _-]copy\b|\(\d\)|（\d）|\[\d\])[^/\\]*$`)
