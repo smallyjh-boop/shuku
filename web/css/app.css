@@ -429,7 +429,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   .mobile-top b { font-family: var(--serif); font-size: calc(19px * var(--ui-scale, 1)); letter-spacing: .06em; }
   .mobile-top .netline { margin-left: auto; font-size: calc(12px * var(--ui-scale, 1)); color: var(--ink-3); }
   .tabbar {
-    display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
     padding: 6px 4px calc(6px + var(--safe-b)); background: var(--bg); background: color-mix(in srgb, var(--bg) 94%, transparent);
     backdrop-filter: blur(12px); border-top: 1px solid var(--rule);
   }
@@ -552,7 +552,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .r-search input { width: 100%; height: 36px; border-radius: 18px; border: 1px solid var(--r-rule); background: transparent; padding: 0 14px; color: inherit; outline: none; }
 .hit { padding: 9px 18px; font-size: calc(13.5px * var(--ui-scale, 1)); line-height: 1.6; cursor: pointer; border-bottom: 1px solid var(--r-rule); }
 .hit mark { background: none; color: var(--r-acc); font-weight: 600; }
-.pages-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px 14px; }
+.pages-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; }
 .pages-grid button { border: 2px solid transparent; padding: 0; background: var(--r-rule); cursor: pointer; aspect-ratio: 2/3; border-radius: 3px; overflow: hidden; position: relative; }
 .pages-grid button.cur { border-color: var(--r-acc); }
 .pages-grid img { width: 100%; height: 100%; object-fit: cover; }
@@ -653,7 +653,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .comic .spread.two img.pg { max-width: 50%; }
 .comic.fit-width .spread.two img.pg { width: 50%; }
 .webtoon { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; }
-.webtoon .col { width: 100%; max-width: var(--strip-w, 820px); width: min(100%, var(--strip-w, 820px)); margin: 0 auto; }
+.webtoon .col { width: 100%; max-width: var(--strip-w, 820px); margin: 0 auto; }
 .webtoon img { width: 100%; display: block; min-height: 200px; background: var(--r-rule); }
 .webtoon img.ok { min-height: 0; background: none; }
 
@@ -682,7 +682,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 /* ---------- 阅读统计 ---------- */
 
 .stats { max-width: 920px; }
-.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 30px; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 30px; }
 .tile { padding: 16px 18px; border-radius: 10px; background: var(--surface); border: 1px solid var(--rule); }
 .tile .v { font-family: var(--serif); font-size: calc(26px * var(--ui-scale, 1)); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .tile .l { margin-top: 4px; color: var(--ink-2); font-size: calc(13.5px * var(--ui-scale, 1)); }
@@ -1042,7 +1042,8 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
 .r-top { padding-left: calc(8px + var(--safe-l)); padding-right: calc(8px + var(--safe-r)); }
 .r-bottom { padding-left: calc(16px + var(--safe-l)); padding-right: calc(16px + var(--safe-r)); }
 .r-status { padding-left: calc(20px + var(--safe-l)); padding-right: calc(20px + var(--safe-r)); }
-.r-panel { padding-left: var(--safe-l); width: min(calc(380px + var(--safe-l)), 88vw); }
+/* 不用 min()：Chrome 79 以前不认识，带 var() 时整条变成 width: auto，侧栏按内容撑开 */
+.r-panel { padding-left: var(--safe-l); width: calc(380px + var(--safe-l)); max-width: 88vw; }
 .r-sheet { margin-right: var(--safe-r); }
 
 /* 键盘操作时看得见焦点 */
@@ -1182,7 +1183,17 @@ html.eink .muted { color: var(--ink-3); }
 html.eink .chip.on, html.eink .seg button.on, html.eink .nav a.on, html.eink .btn.on, html.eink .chip.warnish.on {
   background: var(--ink); color: var(--bg); border-color: var(--ink);
 }
+html.eink .nav a.on .count { color: var(--bg); }
 html.eink .tabbar a.on { color: var(--ink); font-weight: 700; }
+/* 阅读器面板、设置里的说明文字：有的写在行内样式里带半透明，墨水屏上一律实色 */
+html.eink .reader .r-panel [style*="opacity"], html.eink .reader .r-sheet [style*="opacity"],
+html.eink .reader .r-panel .muted, html.eink .reader .r-sheet .muted { opacity: 1 !important; color: var(--r-fg) !important; }
+/* 漫画“页面”网格的页码：白字加阴影在墨水屏上看不清，改成黑底白字 */
+html.eink .pages-grid span { color: var(--r-bg); background: var(--r-fg); text-shadow: none; padding: 0 4px; }
+/* 进度条：旧浏览器不认 accent-color，系统样式在墨水屏上一片浅灰，自己画黑色的轨和滑块 */
+html.eink .r-prog input[type=range] { -webkit-appearance: none; appearance: none; height: 24px; background: transparent; }
+html.eink .r-prog input[type=range]::-webkit-slider-runnable-track { height: 3px; background: var(--r-fg); }
+html.eink .r-prog input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -8px; border-radius: 50%; background: var(--r-fg); border: 2px solid var(--r-bg); }
 html.eink .tabbar a.on svg { stroke-width: 2.4; }
 html.eink .btn, html.eink .chip, html.eink .input, html.eink .seg { border-color: var(--ink); }
 html.eink .btn.quiet { border-color: transparent; }

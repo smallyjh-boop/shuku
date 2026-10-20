@@ -160,9 +160,11 @@ export class Engine {
     el.addEventListener('touchstart', e => { const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; t0 = Date.now() }, { passive: true })
     el.addEventListener('touchend', e => {
       if (e.touches.length || e.changedTouches.length !== 1) return
-      if (visualViewport && visualViewport.scale > 1.05) return // 用户正在放大看图
+      const vv = window.visualViewport // Chrome 61 以前没有
+      if (vv && vv.scale > 1.05) return // 用户正在放大看图
       const t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0
-      if (Date.now() - t0 > 600 || Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return
+      // 滑过屏幕宽的 6%（至少 30 像素）就翻，和书、PDF 一样
+      if (Date.now() - t0 > 600 || Math.abs(dx) < Math.max(30, el.clientWidth * 0.06) || Math.abs(dx) < Math.abs(dy) * 1.5) return
       const forward = dx < 0
       ;(forward !== (this.dir === 'rtl')) ? this.next() : this.prev()
     }, { passive: true })

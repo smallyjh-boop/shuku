@@ -148,12 +148,31 @@ export class Engine {
 
     this.wrap.addEventListener('scroll', () => this.onScroll(), { passive: true })
     this.wrap.addEventListener('click', e => {
+      if (Date.now() - (this.swiped || 0) < 500) return // 刚滑动翻过页
       const sel = getSelection()
       if (sel && !sel.isCollapsed && sel.toString().trim()) return // 刚选了字
       const hit = this.hitHighlight(e.clientX, e.clientY)
       if (hit) { this.shell.onAnnotationTap(hit.location, hit.rect); return }
       this.shell.tap(e.clientX, e.clientY)
     })
+    // 按页翻时左右滑动翻页（和 EPUB 一样：滑过屏幕宽的 6%，至少 30 像素）；放大看、页面比屏幕宽、正选着字时不翻
+    let sx = 0, sy = 0, st = 0
+    this.wrap.addEventListener('touchstart', e => {
+      if (e.touches.length !== 1) return
+      const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now()
+    }, { passive: true })
+    this.wrap.addEventListener('touchend', e => {
+      if (!this.paged() || e.touches.length || e.changedTouches.length !== 1) return
+      const vv = window.visualViewport
+      if (vv && vv.scale > 1.05) return
+      if (this.wrap.scrollWidth > this.wrap.clientWidth + 2) return
+      const sel = getSelection()
+      if (sel && !sel.isCollapsed && sel.toString().trim()) return
+      const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy
+      if (Date.now() - st > 800 || Math.abs(dx) < Math.max(30, this.wrap.clientWidth * 0.06) || Math.abs(dx) < Math.abs(dy) * 1.5) return
+      this.swiped = Date.now()
+      if (dx < 0) this.next(); else this.prev()
+    }, { passive: true })
     // 选字：鼠标松开、手指抬起，或者手机上拖动选区的把手停下来以后
     let pressing = false
     const report = () => { if (!pressing) this.shell.onSelectText?.(this.selected()) }

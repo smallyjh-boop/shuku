@@ -542,7 +542,7 @@ class Reader {
   }
 
   // ---------- 点击区域 ----------
-  // 引擎把点击位置（屏幕坐标 x）交给这里：左 30% 上一页，右 30% 下一页，中间显示 / 隐藏工具栏
+  // 引擎把点击位置（屏幕坐标）交给这里：正中间一块显示 / 隐藏工具栏，左边 35% 上一页，其余下一页（从右往左的书反过来）
   tap(x, y) {
     if (this.popOpen) { this.hidePopover(); return }
     if (this.notes?.open) { this.notes.hide(); return }

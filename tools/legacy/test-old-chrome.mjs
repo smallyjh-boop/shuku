@@ -220,8 +220,10 @@ await openReader('pdf', pick(/pdf/i, b => !samples || /深度学习/.test(b.titl
   })()`)
   if (cjk !== 'ok' && cjk !== 'canvas') throw new Error(cjk)
   // 翻到下一页：换成第 2 页、画出来
+  // 连跑第二次时会接着上次的进度打开：记下现在第几页，看是不是翻到了下一页
+  const p0 = await evaluate("(() => { const c = document.querySelector('.reader .pg.cur'); return c ? +c.dataset.n : 1 })()")
   await key('ArrowRight', 39)
-  await waitFor("(() => { const c = document.querySelector('.reader .pg.cur'); return !c || (c.dataset.n === '2' && !!c.querySelector('canvas, img.pgimg')) })()", 30000, 'PDF 翻到第 2 页')
+  await waitFor(`(() => { const c = document.querySelector('.reader .pg.cur'); return !c || (c.dataset.n === '${p0 + 1}' && !!c.querySelector('canvas, img.pgimg')) })()`, 30000, 'PDF 翻到下一页')
   await shot('pdf-3')
 })
 await openReader('comic', pick(/cbz|cbr|zip/i), async () => { await key('ArrowLeft', 37); await sleep(1500); await shot('comic-2') })
