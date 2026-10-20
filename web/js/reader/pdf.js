@@ -16,11 +16,13 @@ const HL_COLORS = ['yellow', 'green', 'blue', 'pink']
 // 书库没装文字识别（501）时这次打开书库不再请求，只提示一次
 let ocrMissing = false
 const OCR_MIN = 8 // 一页不到这么多个字（空白不算）就当是扫描的
-// 识别语言：书库按书的语言（不知道时看书名的文字）自动挑；挑得不对可以在面板的“识别”里换，按这本书记住
-const OCR_LANGS = [['', '自动'], ['chi_sim+eng', '简体中文'], ['chi_tra+eng', '繁体中文'], ['eng', '英文'], ['tha+eng', '泰文'],
-  ['jpn+eng', '日文'], ['kor+eng', '韩文'], ['vie+eng', '越南文'], ['lao+eng', '老挝文'], ['khm+eng', '高棉文'], ['mya+eng', '缅甸文'],
-  ['ind+eng', '印尼文'], ['msa+eng', '马来文'], ['fra+eng', '法文'], ['deu+eng', '德文'], ['spa+eng', '西班牙文'],
-  ['ita+eng', '意大利文'], ['por+eng', '葡萄牙文'], ['rus+eng', '俄文']]
+// 识别语言：书库按书的语言（不知道时看书名的文字）自动挑；挑得不对可以在面板的“识别”里选，
+// 能同时选几种（一本书里中文、泰文、英文混着），按这本书记住，传给书库是 tha+chi_sim+eng 这样
+const OCR_LANGS = [['chi_sim', '简体中文'], ['chi_tra', '繁体中文'], ['eng', '英文'], ['tha', '泰文'],
+  ['jpn', '日文'], ['kor', '韩文'], ['vie', '越南文'], ['lao', '老挝文'], ['khm', '高棉文'], ['mya', '缅甸文'],
+  ['ind', '印尼文'], ['msa', '马来文'], ['fra', '法文'], ['deu', '德文'], ['spa', '西班牙文'],
+  ['ita', '意大利文'], ['por', '葡萄牙文'], ['rus', '俄文']]
+const OCR_MAX = 4 // 同时最多几种：每多一种识别慢一截
 const ocrLangName = code => (OCR_LANGS.find(l => l[0] === code) || [code, code])[1]
 const hasText = c => {
   let n = 0
@@ -425,17 +427,25 @@ export class Engine {
   }
 
   drawOcrTab(box) {
-    const cur = this.ocrLang()
+    const chosen = this.ocrLang() ? this.ocrLang().split('+') : []
+    const redraw = msg => { clear(box); this.drawOcrTab(box); if (msg) toast(msg) }
     box.append(h('p', { class: 'muted', style: { padding: '12px 18px 4px', fontSize: '12.5px' } },
-      '这本书是扫描版，文字是书库识别出来的。认错了字、或者是外文书，选对语言重新识别：'))
-    if (this.ocrUsed) box.append(h('p', { class: 'muted', style: { padding: '0 18px 6px', fontSize: '12.5px' } }, '现在用的：' + this.ocrUsed.split('+').map(c => ocrLangName(c === 'eng' ? 'eng' : c + '+eng')).join('、')))
+      `这本书是扫描版，文字是书库识别出来的。认错了字、或者是外文书，选上书里有的语言（可以选几种，最多 ${OCR_MAX} 种，选得越多越慢），识别过的页会重新识别：`))
+    if (this.ocrUsed) box.append(h('p', { class: 'muted', style: { padding: '0 18px 6px', fontSize: '12.5px' } }, '现在用的：' + this.ocrUsed.split('+').map(ocrLangName).join('、')))
     const list = h('div', { class: 'toc' })
+    const item = (label, on, click) => list.append(h('a', {
+      class: 'l1' + (on ? ' cur' : ''), tabindex: 0, role: 'button', 'aria-pressed': on ? 'true' : 'false',
+      onclick: click, onkeydown: e => { if (e.key === 'Enter') e.target.click() },
+    }, (on ? '✓ ' : '　 ') + label))
+    item('自动（按书的语言）', !chosen.length, () => { if (chosen.length) { this.setOcrLang(''); redraw('改回自动挑语言') } })
     for (const [code, label] of OCR_LANGS) {
-      list.append(h('a', {
-        class: 'l1' + (code === cur ? ' cur' : ''), tabindex: 0, role: 'button',
-        onclick: () => { this.setOcrLang(code); clear(box); this.drawOcrTab(box); toast(code ? '按' + label + '重新识别' : '改回自动') },
-        onkeydown: e => { if (e.key === 'Enter') e.target.click() },
-      }, label + (code === cur ? '　✓' : '')))
+      const on = chosen.includes(code)
+      item(label, on, () => {
+        let next = on ? chosen.filter(c => c !== code) : chosen.concat(code)
+        if (next.length > OCR_MAX) { toast(`最多同时选 ${OCR_MAX} 种`); return }
+        this.setOcrLang(next.join('+'))
+        redraw(next.length ? '按' + next.map(ocrLangName).join('、') + '重新识别' : '改回自动挑语言')
+      })
     }
     box.append(list)
   }

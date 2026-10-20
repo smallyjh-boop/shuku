@@ -32,6 +32,8 @@ func TestOcrLangFor(t *testing.T) {
 		{"", "", "deu+eng", "eng"},       // 指定的没装：去掉
 		{"th", "", "kor", "kor"},         // 指定的优先于书的语言
 		{"ko", "", "", "kor+eng"},
+		{"", "", "tha+chi_sim+eng", "tha+chi_sim+eng"},             // 同时选几种
+		{"", "", "tha+chi_sim+eng+jpn+kor", "tha+chi_sim+eng+jpn"}, // 最多 4 种
 	}
 	for _, c := range cases {
 		if got := ocrLangFor(c.lang, c.title, c.want); got != c.out {

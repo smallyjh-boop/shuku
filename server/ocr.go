@@ -125,7 +125,11 @@ func ocrLangFor(bookLang, title, want string) string {
 		return strings.Join(ok, "+")
 	}
 	if want != "" {
-		if s := pick(strings.Split(want, "+")...); s != "" {
+		langs := strings.Split(want, "+")
+		if len(langs) > 4 {
+			langs = langs[:4] // 同时最多 4 种：每多一种识别慢一截，别把 NAS 拖住
+		}
+		if s := pick(langs...); s != "" {
 			return s
 		}
 	}
