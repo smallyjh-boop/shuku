@@ -219,25 +219,25 @@ class ReadActivity : Activity() {
         val (s, col) = Ui.page(this, overlay = true)
         val fs = fontSize
         val count = chapters.length()
-        if (i > 0) col.addView(Ui.button(this, "上一章") { open(i - 1, 0.0) }, Ui.lp(this, 0f, matchWidth = false))
         col.addView(Ui.text(this, ch.optString("title").ifEmpty { bookTitle }, fs + 1, Ui.ACCENT, bold = true, center = true), Ui.lp(this, 8f))
         listenButton = Ui.button(this, "听书") { onListenButton() }.also { col.addView(it, Ui.lp(this, 6f, matchWidth = false)) }
         val tv = Ui.text(this, BookText.format(ch.optString("text")), fs, serif = true).apply {
             setLineSpacing(0f, 1.5f)
-            // 点一下正文：出来“从这里听”
+            // 点一下正文：出来“从这里听”；长按：拖到别的章
             setOnClickListener { showBar() }
+            setOnLongClickListener { seekChapter(); true }
         }
         col.addView(tv, Ui.lp(this, 10f))
-        col.addView(Ui.text(this, "${i + 1} / $count", 11f, Ui.INK2, center = true), Ui.lp(this, 16f))
+        col.addView(Ui.text(this, "${i + 1} / $count", 11f, Ui.INK2, center = true).apply {
+            setOnClickListener { seekChapter() } // 点章节号也能拖
+        }, Ui.lp(this, 16f))
         if (i + 1 < count) col.addView(Ui.button(this, "下一章", primary = true) { open(i + 1, 0.0) }, Ui.lp(this, 8f))
         else col.addView(Ui.text(this, "全书完", 14f, Ui.INK2, center = true), Ui.lp(this, 8f))
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        val gap = Ui.dp(this, 3f)
-        row.addView(Ui.button(this, "目录") { toc() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = gap })
-        row.addView(Ui.button(this, "字号") { cycleFont() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = gap })
+        // 目录、跳章、字号：小按钮一排
+        val row = Ui.row(this,
+            Ui.chip(this, android.R.drawable.ic_menu_agenda, "目录") { toc() },
+            Ui.chip(this, null, "跳章") { seekChapter() },
+            Ui.chip(this, null, "Aa") { cycleFont() }.apply { contentDescription = "字号" })
         col.addView(row, Ui.lp(this, 8f, matchWidth = false))
         if (ch.optBoolean("_offline")) col.addView(Ui.text(this, "没联网，这一章是手表上存的", 10f, Ui.INK2, center = true), Ui.lp(this, 8f))
         // 浮在屏幕下方的“从这里听”，点一下正文出来，几秒后自己收起
@@ -293,6 +293,16 @@ class ReadActivity : Activity() {
         val k = sizes.indexOfFirst { it >= fontSize - 0.1f }
         fontSize = sizes[(k + 1) % sizes.size]
         show(cur, ch, frac, quiet = true)
+    }
+
+    /** 拖到第几章（拖动或者转表冠），点“跳到这里”打开那一章 */
+    private fun seekChapter() {
+        val count = chapters.length()
+        if (count <= 1) return
+        Pick.seek(this, "拖到第几章", count, cur, { i ->
+            val t = chapters.optJSONObject(i)?.optString("title").orEmpty()
+            "${i + 1} / $count" + if (t.isNotEmpty()) "\n$t" else ""
+        }) { open(it, 0.0) }
     }
 
     private fun toc() {

@@ -189,32 +189,38 @@ class MainActivity : Activity() {
         // 先显示上次的列表，联网后再换成最新的
         val cached = app.config.str("reading_cache", "")
         if (cached.isNotEmpty()) showBooks(JSONArray(cached)) else listBox!!.addView(Ui.text(this, "正在加载…", 13f, Ui.INK2))
-        col.addView(Ui.button(this, "找书") { startActivity(Intent(this, BooksActivity::class.java)) }, Ui.lp(this, 14f))
-        col.addView(Ui.button(this, "刷新") {
+        // 找书、刷新、更多（断开书库）：图标一排，长按显示是什么
+        val find = Ui.iconButton(this, android.R.drawable.ic_menu_search, "找书") { startActivity(Intent(this, BooksActivity::class.java)) }
+        val refresh = Ui.iconButton(this, android.R.drawable.ic_popup_sync, "刷新") {
             app.retryNow() // 不管刚才是不是不通，马上重新连
             loadedAt = 0
             load()
-        }, Ui.lp(this, 8f))
-        val dis = Ui.button(this, "断开书库") {}
-        dis.setOnClickListener {
-            if (dis.tag == null) {
-                dis.tag = 1
-                dis.text = "再点一次断开"
-                dis.setTextColor(Ui.DANGER)
-                return@setOnClickListener
-            }
-            ListenService.stopNow()
-            // 顺手在书库的设备列表里注销这块手表；手表上准备的离线听书删掉
-            bg {
-                runCatching { app.api("POST", "/api/auth/logout", JSONObject(), 5000) }
-                app.config.clear()
-                app.config.prefs.edit().remove("connect_error").remove("reading_cache").apply()
-                runCatching { ListenStore.clearAll(app) }
-                Today.clear()
-                ui { render() }
+        }
+        val more = Ui.iconButton(this, android.R.drawable.ic_menu_more, "更多") { moreMenu() }
+        for (b in listOf(find, refresh, more)) b.setOnLongClickListener { Toast.makeText(this, it.contentDescription, Toast.LENGTH_SHORT).show(); true }
+        col.addView(Ui.row(this, find, refresh, more), Ui.lp(this, 14f, matchWidth = false))
+    }
+
+    /** 更多：不常用的放这里（断开书库要再确认一次） */
+    private fun moreMenu() {
+        Pick.choose(this, "更多", listOf("断开书库"), -1) {
+            Pick.choose(this, "断开书库？手表上准备的离线听书也会删掉", listOf("断开", "取消"), -1) { k ->
+                if (k == 0) disconnect()
             }
         }
-        col.addView(dis, Ui.lp(this, 8f))
+    }
+
+    private fun disconnect() {
+        ListenService.stopNow()
+        // 顺手在书库的设备列表里注销这块手表；手表上准备的离线听书删掉
+        bg {
+            runCatching { app.api("POST", "/api/auth/logout", JSONObject(), 5000) }
+            app.config.clear()
+            app.config.prefs.edit().remove("connect_error").remove("reading_cache").apply()
+            runCatching { ListenStore.clearAll(app) }
+            Today.clear()
+            ui { render() }
+        }
     }
 
     private fun routeLabel() = when (app.link.route) {
@@ -377,15 +383,19 @@ class MainActivity : Activity() {
         })
         row.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { tts("next") })
         box.addView(row, Ui.lp(this, 6f, matchWidth = false))
-        // 手机的音量（戴着耳机听手机时，不用掏手机）
-        val vol = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        // 手机的音量（戴着耳机听手机时，不用掏手机）：图标加手机现在的音量，点一下拖动或转表冠调
+        val pv = s.optInt("volume", -1) // 旧版手机 App 不报音量
+        if (pv >= 0) {
+            val vol = Ui.chip(this, if (pv == 0) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off, "$pv%") {
+                Pick.seek(this, "手机音量", 11, (pv + 5) / 10, { "${it * 10}%" }) { k ->
+                    s.put("volume", k * 10)
+                    app.config.prefs.edit().putString("tts_state", s.toString()).apply()
+                    renderTts()
+                    bg { PhoneLink.send(this, "/shuku/tts/volume", (k * 10).toString().toByteArray()) }
+                }
+            }.apply { contentDescription = "手机音量" }
+            box.addView(vol, Ui.lp(this, 6f, matchWidth = false))
         }
-        val g = Ui.dp(this, 3f)
-        vol.addView(Ui.button(this, "音量 −") { tts("voldown") }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = g })
-        vol.addView(Ui.button(this, "音量 +") { tts("volup") }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = g })
-        box.addView(vol, Ui.lp(this, 6f, matchWidth = false))
         box.addView(Ui.text(this, "停止", 12f, Ui.INK2, center = true).apply {
             val v = Ui.dp(this@MainActivity, 6f)
             setPadding(v * 3, v, v * 3, v)

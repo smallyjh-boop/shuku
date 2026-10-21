@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import java.util.Locale
 import kotlin.math.ceil
 
@@ -34,19 +35,16 @@ class ListenActivity : Activity() {
     private lateinit var outputBox: LinearLayout
     private lateinit var speakerButton: TextView
     private lateinit var controls: LinearLayout
-    private lateinit var chapterRow: LinearLayout
-    private lateinit var prevChapter: TextView
-    private lateinit var nextChapter: TextView
-    private lateinit var volumeRow: LinearLayout
+    private lateinit var hintView: TextView
     private lateinit var volumeView: TextView
     private lateinit var playButton: ImageButton
     private lateinit var options: LinearLayout
     private lateinit var speedButton: TextView
     private lateinit var timerButton: TextView
     private lateinit var offlineView: TextView
-    private lateinit var moreButton: TextView
-    private lateinit var textButton: TextView
-    private lateinit var stopButton: TextView
+    private lateinit var iconRow: LinearLayout
+    private lateinit var moreButton: ImageButton
+    private lateinit var backButton: TextView
 
     private var visible = false
 
@@ -54,6 +52,13 @@ class ListenActivity : Activity() {
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             if (visible) update()
+        }
+    }
+
+    // 音量变了（转表冠、按耳机上的键、系统音量条）：更新音量图标旁的数字
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (visible) updateVolume()
         }
     }
 
@@ -65,6 +70,9 @@ class ListenActivity : Activity() {
         build()
         val f = IntentFilter(WearApp.ACTION_LISTEN)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver, f)
+        // 系统发的音量变化广播
+        val vf = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(volumeReceiver, vf, Context.RECEIVER_EXPORTED) else registerReceiver(volumeReceiver, vf)
         // 通知栏里的播放控制（只问一次）
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
             !app.config.bool("asked_notifications", false)) {
@@ -128,6 +136,7 @@ class ListenActivity : Activity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(receiver) } catch (e: Exception) {}
+        try { unregisterReceiver(volumeReceiver) } catch (e: Exception) {}
         app.main.removeCallbacks(tick)
         super.onDestroy()
     }
@@ -144,6 +153,9 @@ class ListenActivity : Activity() {
         textView = Ui.text(this, "", 15f, serif = true, center = true, maxLines = 6).apply { setLineSpacing(0f, 1.3f) }
             .also { col.addView(it, Ui.lp(this, 10f)) }
         statusView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 6f)) }
+        // 长按书名、章节名、正文：拖到别的章（比一章一章点“上一章”“下一章”快）
+        for (v in listOf(titleView, chapterView, textView)) v.setOnLongClickListener { seekChapter(); true }
+        hintView = Ui.text(this, "长按文字可以拖到别的章", 10f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 2f)) }
 
         // 没连耳机
         outputBox = LinearLayout(this).apply {
@@ -162,46 +174,32 @@ class ListenActivity : Activity() {
         controls.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
         col.addView(controls, Ui.lp(this, 10f, matchWidth = false))
 
-        // 上一章 / 下一章
-        chapterRow = row()
-        val cg = Ui.dp(this, 3f)
-        prevChapter = Ui.button(this, "上一章") { ListenService.chapter(this, -1) }
-        nextChapter = Ui.button(this, "下一章") { ListenService.chapter(this, 1) }
-        chapterRow.addView(prevChapter, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = cg })
-        chapterRow.addView(nextChapter, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = cg })
-        col.addView(chapterRow, Ui.lp(this, 6f, matchWidth = false))
-
-        // 音量：手表没有音量键时用这两个按钮（调的是听书用的媒体音量）
-        volumeRow = row()
-        volumeRow.addView(Ui.button(this, "音量 −") { adjustVolume(-1) })
-        volumeView = Ui.text(this, "", 12f, Ui.INK2, center = true).apply { setPadding(Ui.dp(this@ListenActivity, 8f), 0, Ui.dp(this@ListenActivity, 8f), 0) }
-        volumeRow.addView(volumeView)
-        volumeRow.addView(Ui.button(this, "音量 +") { adjustVolume(1) })
-        col.addView(volumeRow, Ui.lp(this, 6f, matchWidth = false))
-
-        options = row()
-        val gap = Ui.dp(this, 3f)
-        speedButton = Ui.button(this, "1.0×") { ListenService.cycleSpeed() }
-        timerButton = Ui.button(this, "定时") { ListenService.cycleTimer() }
-        options.addView(speedButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = gap })
-        options.addView(timerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = gap })
+        // 语速、定时、音量一排：点语速、定时弹出来选；音量是图标加现在的音量，点一下出来系统的音量条（转表冠、按耳机上的键也行）
+        speedButton = Ui.chip(this, null, "1.0×") { pickSpeed() }.apply { contentDescription = "语速" }
+        timerButton = Ui.chip(this, android.R.drawable.ic_lock_idle_alarm, "") { pickTimer() }.apply { contentDescription = "睡眠定时" }
+        volumeView = Ui.chip(this, android.R.drawable.ic_lock_silent_mode_off, "") { showVolume() }.apply { contentDescription = "音量" }
+        options = Ui.row(this, speedButton, timerButton, volumeView)
         col.addView(options, Ui.lp(this, 8f, matchWidth = false))
 
-        // 离线听：已经准备好多少；多准备一些（约 1 小时）
-        offlineView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 10f)) }
-        moreButton = Ui.button(this, "多准备一些（离线听）") { ListenService.setMore(!ListenService.state().more) }
-            .also { col.addView(it, Ui.lp(this, 6f)) }
+        // 离线听：已经准备好多少
+        offlineView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 8f)) }
 
-        textButton = Ui.button(this, "看文字") { openText() }.also { col.addView(it, Ui.lp(this, 8f)) }
-        stopButton = Ui.text(this, "停止听书", 12f, Ui.INK2, center = true).apply {
-            val v = Ui.dp(this@ListenActivity, 6f)
-            setPadding(v * 3, v, v * 3, v)
-            setOnClickListener {
-                ListenService.stopNow()
-                finish()
-            }
+        // 看文字、离线听（多准备一些，开着时亮）、停止：图标一排，长按显示是什么
+        val textIcon = Ui.iconButton(this, android.R.drawable.ic_menu_agenda, "看文字") { openText() }
+        moreButton = Ui.iconButton(this, android.R.drawable.stat_sys_download, "离线听：多准备一些") {
+            val on = !ListenService.state().more
+            ListenService.setMore(on)
+            Toast.makeText(this, if (on) "多准备约半小时，离开手机也能听" else "不用多准备了", Toast.LENGTH_SHORT).show()
         }
-        col.addView(stopButton, Ui.lp(this, 4f, matchWidth = false))
+        val stopIcon = Ui.iconButton(this, android.R.drawable.ic_menu_close_clear_cancel, "停止听书") {
+            ListenService.stopNow()
+            finish()
+        }
+        for (b in listOf(textIcon, moreButton, stopIcon)) b.setOnLongClickListener { Toast.makeText(this, it.contentDescription, Toast.LENGTH_SHORT).show(); true }
+        iconRow = Ui.row(this, textIcon, moreButton, stopIcon)
+        col.addView(iconRow, Ui.lp(this, 10f, matchWidth = false))
+        backButton = Ui.button(this, "返回") { finish() }.apply { visibility = View.GONE }
+        col.addView(backButton, Ui.lp(this, 10f, matchWidth = false))
     }
 
     private fun update() {
@@ -216,27 +214,22 @@ class ListenActivity : Activity() {
             statusView.text = ""
             outputBox.visibility = View.GONE
             controls.visibility = View.GONE
-            volumeRow.visibility = View.GONE
-            chapterRow.visibility = View.GONE
+            hintView.visibility = View.GONE
             options.visibility = View.GONE
             offlineView.visibility = View.GONE
-            moreButton.visibility = View.GONE
-            stopButton.visibility = View.GONE
-            textButton.text = "返回"
+            iconRow.visibility = View.GONE
+            backButton.visibility = View.VISIBLE
             return
         }
         controls.visibility = View.VISIBLE
-        volumeRow.visibility = View.VISIBLE
         updateVolume()
-        chapterRow.visibility = if (s.chapterCount > 1) View.VISIBLE else View.GONE
-        prevChapter.visibility = if (s.chapterIndex > 0) View.VISIBLE else View.GONE
-        nextChapter.visibility = if (s.chapterIndex + 1 < s.chapterCount) View.VISIBLE else View.GONE
+        // 提示长按跳章：头几次看到时显示，书只有一章时不用
+        hintView.visibility = if (s.chapterCount > 1 && app.config.prefs.getInt("seek_hint", 0) < 5) View.VISIBLE else View.GONE
         options.visibility = View.VISIBLE
-        moreButton.visibility = View.VISIBLE
-        stopButton.visibility = View.VISIBLE
-        textButton.text = "看文字"
+        iconRow.visibility = View.VISIBLE
+        backButton.visibility = View.GONE
         titleView.text = s.title
-        chapterView.text = s.chapter
+        chapterView.text = if (s.chapterCount > 1) "${s.chapterIndex + 1}/${s.chapterCount}　${s.chapter}" else s.chapter
         textView.text = s.text.ifEmpty { if (s.status.isEmpty()) "准备中…" else "" }
         statusView.text = when {
             s.needOutput -> ""
@@ -252,18 +245,19 @@ class ListenActivity : Activity() {
         playButton.contentDescription = if (s.playing) "暂停" else "继续"
         speedButton.text = String.format(Locale.US, "%.1f×", s.speed)
         timerButton.text = when {
-            s.timer == -1 -> "读完本章停"
-            s.timer > 0 -> "还剩 ${ceil(s.timerLeftMs / 60_000.0).toInt()} 分"
+            s.timer == -1 -> "本章"
+            s.timer > 0 -> "${ceil(s.timerLeftMs / 60_000.0).toInt()} 分"
             else -> "定时"
         }
         offlineView.text = offlineLine(s)
         offlineView.visibility = if (offlineView.text.isEmpty()) View.GONE else View.VISIBLE
-        moreButton.text = if (s.more) "不用多准备了" else "多准备一些（离线听）"
+        Ui.iconOn(moreButton, s.more)
     }
 
-    private fun adjustVolume(dir: Int) {
+    /** 系统的音量条（Wear OS 上可以直接转表冠调） */
+    private fun showVolume() {
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
-        am.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (dir > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
+        am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
         updateVolume()
     }
 
@@ -272,6 +266,35 @@ class ListenActivity : Activity() {
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
         volumeView.text = if (max > 0) "${cur * 100 / max}%" else ""
+        // 静音时换成静音图标
+        Ui.chipIcon(volumeView, if (cur == 0) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
+    }
+
+    /** 点语速：列出来直接选 */
+    private fun pickSpeed() {
+        val s = ListenService.state()
+        val speeds = ListenService.SPEEDS
+        val cur = speeds.indexOfFirst { kotlin.math.abs(it - s.speed) < 0.01 }
+        Pick.choose(this, "语速", speeds.map { String.format(Locale.US, "%.1f×", it) }, cur) { ListenService.setSpeed(speeds[it]) }
+    }
+
+    /** 点定时：列出来直接选 */
+    private fun pickTimer() {
+        val s = ListenService.state()
+        val opts = ListenService.TIMERS
+        val names = opts.map { if (it == 0) "不定时" else if (it == -1) "读完本章停" else "$it 分钟后停" }
+        Pick.choose(this, "睡眠定时", names, opts.indexOf(s.timer)) { ListenService.setTimer(opts[it]) }
+    }
+
+    /** 长按：拖到别的章接着听 */
+    private fun seekChapter() {
+        val s = ListenService.state()
+        if (!s.active || s.chapterCount <= 1) return
+        app.config.prefs.edit().putInt("seek_hint", 99).apply() // 会用了，不再提示
+        Pick.seek(this, "拖到第几章", s.chapterCount, s.chapterIndex, { i ->
+            val t = ListenService.chapterTitle(i)
+            "${i + 1} / ${s.chapterCount}" + if (t.isNotEmpty()) "\n$t" else ""
+        }) { ListenService.jump(this, it) }
     }
 
     /** 离开手机、没网时还能听多久（平时自动准备几分钟；点了“多准备一些”准备约半小时） */

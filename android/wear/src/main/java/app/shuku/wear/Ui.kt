@@ -66,6 +66,42 @@ object Ui {
         setOnClickListener { onClick() }
     }
 
+    /** 小一号的按钮：可以带个图标（语速、定时、音量这一排） */
+    fun chip(ctx: Context, icon: Int?, label: String, onClick: () -> Unit): TextView = text(ctx, label, 13f, INK, center = true).apply {
+        background = pill(CARD, dp(ctx, 18f).toFloat())
+        setPadding(dp(ctx, 12f), dp(ctx, 8f), dp(ctx, 12f), dp(ctx, 8f))
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+        if (icon != null) chipIcon(this, icon)
+    }
+
+    fun chipIcon(tv: TextView, icon: Int) {
+        if (tv.tag == icon) return
+        tv.tag = icon
+        val d = tv.resources.getDrawable(icon, tv.context.theme).mutate()
+        val sz = dp(tv.context, 16f)
+        d.setBounds(0, 0, sz, sz)
+        d.setTint(INK)
+        tv.setCompoundDrawablesRelative(d, null, null, null)
+        tv.compoundDrawablePadding = dp(tv.context, 4f)
+    }
+
+    /** 图标按钮的开关状态（开着时石青底黑图标） */
+    fun iconOn(b: ImageButton, on: Boolean) {
+        b.background = pill(if (on) ACCENT else CARD, dp(b.context, 22f).toFloat())
+        b.setColorFilter(if (on) BG else INK)
+    }
+
+    /** 一排横着的按钮，之间留点空 */
+    fun row(ctx: Context, vararg views: View): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        for (v in views) addView(v, (v.layoutParams as? LinearLayout.LayoutParams) ?: LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(ctx, 3f); marginEnd = dp(ctx, 3f) })
+    }
+
     fun lp(ctx: Context, top: Float = 0f, matchWidth: Boolean = true) = LinearLayout.LayoutParams(
         if (matchWidth) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
         ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(ctx, top) }

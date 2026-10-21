@@ -1026,7 +1026,12 @@ class ListenService : Service() {
 
     private fun cycleSpeed() {
         val i = SPEEDS.indexOfFirst { it >= speed - 0.01 }
-        speed = SPEEDS[(i + 1) % SPEEDS.size]
+        setSpeed(SPEEDS[(i + 1) % SPEEDS.size])
+    }
+
+    private fun setSpeed(v: Double) {
+        if (kotlin.math.abs(v - speed) < 0.01) return
+        speed = v
         app.config.prefs.edit().putFloat("listen_speed", speed.toFloat()).apply()
         // 按新语速重新合成；原来准备好的先留着，没网时接着用
         clearAudio()
@@ -1045,8 +1050,10 @@ class ListenService : Service() {
         pauseAt("定时结束")
     }
 
-    private fun cycleTimer() {
-        timerMin = TIMERS[(TIMERS.indexOf(timerMin) + 1) % TIMERS.size]
+    private fun cycleTimer() = setTimer(TIMERS[(TIMERS.indexOf(timerMin) + 1) % TIMERS.size])
+
+    private fun setTimer(v: Int) {
+        timerMin = v
         handler.removeCallbacks(timerTask)
         timerEnd = 0
         if (timerMin > 0) {
@@ -1316,14 +1323,25 @@ class ListenService : Service() {
 
         /** 上一章 / 下一章：从那一章开头读 */
         fun chapter(ctx: Context, d: Int) {
+            val st = instance?.snapshot() ?: return
+            jump(ctx, st.chapterIndex + d)
+        }
+
+        /** 跳到第 i 章开头接着听（听书页长按出来的进度条） */
+        fun jump(ctx: Context, i: Int) {
             val me = instance ?: return
             val st = me.snapshot()
             if (st.chapterCount == 0) return // 还没打开好，章节号还不准
+            if (i < 0 || i >= st.chapterCount) return
             me.saveProgress() // 换章前先存：这段听的时长别丢了
-            val ni = st.chapterIndex + d
-            if (ni < 0 || (st.chapterCount > 0 && ni >= st.chapterCount)) return
-            start(ctx, st.bookId, st.title, ni, 0.0)
+            start(ctx, st.bookId, st.title, i, 0.0)
         }
+
+        /** 第 i 章的标题（没有就是空） */
+        fun chapterTitle(i: Int): String = instance?.chapters?.optJSONObject(i)?.optString("title").orEmpty()
+
+        fun setSpeed(v: Double) { instance?.setSpeed(v) }
+        fun setTimer(v: Int) { instance?.setTimer(v) }
 
         fun next() { instance?.step(1) }
         fun prev() { instance?.step(-1) }

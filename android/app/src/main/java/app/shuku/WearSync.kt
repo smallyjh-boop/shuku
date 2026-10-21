@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
  *   /shuku/config/request 手表 → 手机：请手机发连接信息
  *   /shuku/config/error   手机 → 手表：发不了连接信息的原因（手机还没连书库、连不上书库）
  *   /shuku/tts/state      手机 → 手表：听书状态；手表 → 手机：请发一次状态
- *   /shuku/tts/<命令>      手表 → 手机：pause / resume / next / prev / stop / volup / voldown
+ *   /shuku/tts/<命令>      手表 → 手机：pause / resume / next / prev / stop；volume（消息内容是音量百分比）
  */
 object WearSync {
     const val PATH_CONFIG = "/shuku/config"
@@ -100,11 +100,18 @@ class PhoneWearService : WearableListenerService() {
             path.startsWith("/shuku/tts/") -> {
                 val cmd = path.removePrefix("/shuku/tts/")
                 if (cmd in setOf("pause", "resume", "next", "prev", "stop")) NarrationService.command(this, cmd, "")
-                // 手表上调手机的音量（显示系统的音量条）
-                if (cmd == "volup" || cmd == "voldown") (getSystemService(AUDIO_SERVICE) as android.media.AudioManager).adjustStreamVolume(
-                    android.media.AudioManager.STREAM_MUSIC,
-                    if (cmd == "volup") android.media.AudioManager.ADJUST_RAISE else android.media.AudioManager.ADJUST_LOWER,
-                    android.media.AudioManager.FLAG_SHOW_UI)
+                // 手表上调手机的音量：volume 带百分比（0～100）；volup / voldown 是上一版手表发的
+                val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+                val music = android.media.AudioManager.STREAM_MUSIC
+                when (cmd) {
+                    "volume" -> String(event.data).trim().toIntOrNull()?.let { pct ->
+                        val max = am.getStreamMaxVolume(music)
+                        am.setStreamVolume(music, (pct.coerceIn(0, 100) * max + 50) / 100, 0)
+                        WearSync.pushState(this, NarrationService.state(), force = true)
+                    }
+                    "volup", "voldown" -> am.adjustStreamVolume(music,
+                        if (cmd == "volup") android.media.AudioManager.ADJUST_RAISE else android.media.AudioManager.ADJUST_LOWER, 0)
+                }
             }
         }
     }

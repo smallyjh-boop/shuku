@@ -1,11 +1,18 @@
 // 听书：按句读，高亮当前句、自动翻页；语速、音色、睡眠定时；锁屏控制
 // 声音来源：服务器（微软自然语音 / 自定义接口，带缓存）或设备自带语音
 
-import { h, fill, icon, iconBtn, toast, store, save } from '../ui.js'
+import { h, fill, icon, iconBtn, toast, store, save, openMenu } from '../ui.js'
 import { api, apiUrl, net } from '../api.js'
 import { call, callJSON, onNative } from '../native.js'
 
 const SPEEDS = [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5]
+
+// 点语速按钮：弹出来直接选（以前点一下换一档，要点好几下）
+function pickSpeed(nar, e) {
+  const r = e.currentTarget.getBoundingClientRect()
+  openMenu(SPEEDS.map(v => ({ label: v.toFixed(1) + '×' + (Math.abs(v - nar.speed) < 0.01 ? '　✓' : ''), run: () => nar.setSpeed(v) })),
+    { x: r.left, y: r.top, above: true, title: '语速' })
+}
 const TIMERS = [0, 15, 30, 60, -1] // -1：读完本章
 const PREFS_KEY = 'shuku.tts'
 
@@ -178,7 +185,7 @@ export class Narrator {
 
   buildUI() {
     this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
-    this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: () => this.cycleSpeed() }, '1.0×')
+    this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: e => pickSpeed(this, e) }, '1.0×')
     this.timerBtn = h('button', { class: 'icon-btn', title: '睡眠定时', onclick: () => this.cycleTimer() }, icon('timer'))
     this.timerText = h('span', { class: 'timer' })
     this.stateEl = h('span', { class: 'state' })
@@ -386,9 +393,10 @@ export class Narrator {
   }
 
   // ---------- 控制 ----------
-  cycleSpeed() {
-    const i = SPEEDS.indexOf(this.speed)
-    this.prefs.speed = SPEEDS[(i + 1) % SPEEDS.length]
+  cycleSpeed() { this.setSpeed(SPEEDS[(SPEEDS.indexOf(this.speed) + 1) % SPEEDS.length]) }
+
+  setSpeed(v) {
+    this.prefs.speed = v
     save(PREFS_KEY, this.prefs)
     this.updateUI()
     this.restartCurrent()
@@ -475,7 +483,7 @@ export class NativeNarrator {
 
   buildUI() {
     this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
-    this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: () => this.cycleSpeed() }, '1.0×')
+    this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: e => pickSpeed(this, e) }, '1.0×')
     this.timerBtn = h('button', { class: 'icon-btn', title: '睡眠定时', onclick: () => this.cycleTimer() }, icon('timer'))
     this.timerText = h('span', { class: 'timer' })
     this.stateEl = h('span', { class: 'state' })
@@ -620,11 +628,12 @@ export class NativeNarrator {
   play() { call('tts', 'resume', '') }
   pause() { call('tts', 'pause', '') }
 
-  cycleSpeed() {
-    const i = SPEEDS.indexOf(this.speed)
-    this.prefs.speed = SPEEDS[(i + 1) % SPEEDS.length]
+  cycleSpeed() { this.setSpeed(SPEEDS[(SPEEDS.indexOf(this.speed) + 1) % SPEEDS.length]) }
+
+  setSpeed(v) {
+    this.prefs.speed = v
     save(PREFS_KEY, this.prefs)
-    call('tts', 'speed', String(this.prefs.speed))
+    call('tts', 'speed', String(v))
     this.updateUI()
   }
 

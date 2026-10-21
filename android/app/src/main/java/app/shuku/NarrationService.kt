@@ -806,7 +806,16 @@ class NarrationService : Service() {
 
     private fun stateJson(): JSONObject = JSONObject().put("active", true).put("playing", playing).put("speed", speed).put("timer", timerMin)
         .put("status", status).put("title", book.optString("title")).put("author", book.optString("author"))
-        .put("text", queue.getOrNull(index)?.text ?: "")
+        .put("text", queue.getOrNull(index)?.text ?: "").put("volume", volumePercent())
+
+    /** 手机现在的媒体音量（百分比，手表上显示） */
+    private fun volumePercent(): Int = try {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max > 0) am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / max else -1
+    } catch (e: Exception) {
+        -1
+    }
 
     // 锁屏的媒体控制、手表只在播放/暂停、换书、换封面、定时、语速、出错这些变化时更新。
     // 以前每读一句都更新一次：手机的媒体会话会同步到手表（Wear OS 的媒体控制），再加上发给书库手表版的状态，
