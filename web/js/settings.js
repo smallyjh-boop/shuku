@@ -71,7 +71,7 @@ function appearance(ctx) {
 // ---------- 网络 ----------
 function network(s) {
   const lan = h('input', { class: 'input', value: s.network?.lan_url || '', placeholder: 'http://192.168.1.10:27200' })
-  const remote = h('input', { class: 'input', value: s.network?.remote_url || '', placeholder: 'https://nas.tail1234.ts.net' })
+  const remote = h('input', { class: 'input', value: s.network?.remote_url || '', placeholder: 'https://nas.tail1234.ts.net:9443' })
   const status = h('div', { class: 'stack', style: { gap: '6px', marginTop: '4px' } })
   const cur = h('div', { class: 'status-line' })
   const drawCur = () => fill(cur, h('span', { class: 'dot ' + ({ lan: 'ok', remote: 'acc', offline: 'bad' }[net.route] || 'ok') }), `当前线路：${net.label()}${net.base ? '（' + net.base + '）' : '（' + location.origin + '）'}`)
