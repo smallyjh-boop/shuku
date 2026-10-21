@@ -35,7 +35,17 @@ check() {
 package $pkg;
 public final class BuildConfig { public static final boolean DEBUG = true; public static final String APPLICATION_ID = "app.shuku"; public static final String VERSION_NAME = "check"; public static final int VERSION_CODE = 1; }
 JAVA
-  javac -nowarn -d "$OUT/gen/$mod/classes" "$OUT/gen/$mod/$(echo $pkg | tr . /)/BuildConfig.java" 2>&1 | grep -v "^Picked up" || true
+  # R 也是 Gradle 生成的：按 res/drawable 里的文件补一个（代码里引用了不存在的图标，这里就编不过）
+  {
+    echo "package $pkg; public final class R { public static final class drawable {"
+    n=0
+    for f in "$HERE/$mod/src/main/res/drawable/"*.xml; do
+      [ -f "$f" ] || continue
+      n=$((n+1)); echo "public static final int $(basename "$f" .xml) = $((0x7f080000 + n));"
+    done
+    echo "} }"
+  } > "$OUT/gen/$mod/$(echo $pkg | tr . /)/R.java"
+  javac -nowarn -d "$OUT/gen/$mod/classes" "$OUT/gen/$mod/$(echo $pkg | tr . /)/BuildConfig.java" "$OUT/gen/$mod/$(echo $pkg | tr . /)/R.java" 2>&1 | grep -v "^Picked up" || true
   echo "== $mod"
   local log
   log=$(kotlinc -cp "$ANDROID_JAR:$STD:$OUT/stubs:$OUT/gen/$mod/classes" -d "$OUT/$mod" $(find "$HERE/$mod/src/main/java" "$HERE/common/src" -name '*.kt'))

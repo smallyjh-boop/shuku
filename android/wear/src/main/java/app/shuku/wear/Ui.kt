@@ -12,7 +12,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -56,50 +56,90 @@ object Ui {
         setOnClickListener { onClick() }
     }
 
-    fun iconButton(ctx: Context, icon: Int, desc: String, onClick: () -> Unit): ImageButton = ImageButton(ctx).apply {
-        setImageResource(icon)
-        contentDescription = desc
-        background = pill(CARD, dp(ctx, 22f).toFloat())
-        setColorFilter(INK)
-        val s = dp(ctx, 44f)
-        layoutParams = LinearLayout.LayoutParams(s, s).apply { marginStart = dp(ctx, 4f); marginEnd = dp(ctx, 4f) }
-        setOnClickListener { onClick() }
+    /**
+     * 圆形图标按钮，下面一行小字。一排放三个：宽度按屏幕算（圆表盘中间那一段放得下三个，不会跑到屏幕外面）。
+     * 图标用 res/drawable 里的 ic_a_*；也可以显示几个字（比如语速“1.2×”）
+     */
+    class Action(val root: LinearLayout, val circle: FrameLayout, private val img: ImageView, private val txt: TextView, val label: TextView, private val radius: Float) {
+        fun icon(res: Int) {
+            if (img.tag != res) {
+                img.tag = res
+                img.setImageResource(res)
+            }
+            img.visibility = View.VISIBLE
+            txt.visibility = View.GONE
+        }
+
+        fun text(s: String) {
+            txt.text = s
+            txt.visibility = View.VISIBLE
+            img.visibility = View.GONE
+        }
+
+        fun caption(s: String) {
+            label.text = s
+            label.visibility = if (s.isEmpty()) View.GONE else View.VISIBLE
+        }
+
+        /** 开着、主要的：石青底黑图标 */
+        fun on(on: Boolean) {
+            circle.background = pill(if (on) ACCENT else CARD, radius)
+            img.setColorFilter(if (on) BG else INK)
+            txt.setTextColor(if (on) BG else INK)
+        }
+
+        fun desc(s: String) {
+            circle.contentDescription = s
+        }
     }
 
-    /** 小一号的按钮：可以带个图标（语速、定时、音量这一排） */
-    fun chip(ctx: Context, icon: Int?, label: String, onClick: () -> Unit): TextView = text(ctx, label, 13f, INK, center = true).apply {
-        background = pill(CARD, dp(ctx, 18f).toFloat())
-        setPadding(dp(ctx, 12f), dp(ctx, 8f), dp(ctx, 12f), dp(ctx, 8f))
-        gravity = Gravity.CENTER
-        isClickable = true
-        isFocusable = true
-        setOnClickListener { onClick() }
-        if (icon != null) chipIcon(this, icon)
+    /** 一个按钮占多宽（dp）：三个一排放在页面中间能用的宽度里，最大 60 */
+    fun actionWidth(ctx: Context): Float {
+        val m = ctx.resources.displayMetrics
+        val round = ctx.resources.configuration.isScreenRound
+        val usable = m.widthPixels * (if (round) 0.76f else 0.9f) / m.density
+        return minOf(60f, usable / 3f - 4f)
     }
 
-    fun chipIcon(tv: TextView, icon: Int) {
-        if (tv.tag == icon) return
-        tv.tag = icon
-        val d = tv.resources.getDrawable(icon, tv.context.theme).mutate()
-        val sz = dp(tv.context, 16f)
-        d.setBounds(0, 0, sz, sz)
-        d.setTint(INK)
-        tv.setCompoundDrawablesRelative(d, null, null, null)
-        tv.compoundDrawablePadding = dp(tv.context, 4f)
+    /** inCard：放在卡片里（卡片两边有留白，按钮小一点） */
+    fun action(ctx: Context, icon: Int?, caption: String, primary: Boolean = false, inCard: Boolean = false, onClick: () -> Unit): Action {
+        val w = actionWidth(ctx) - if (inCard) 9f else 0f
+        val size = dp(ctx, w - 8f)
+        val radius = size / 2f
+        val img = ImageView(ctx).apply {
+            val p = (size * 0.24f).roundToInt()
+            setPadding(p, p, p, p)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val txt = text(ctx, "", 13f, INK, bold = true, center = true).apply { gravity = Gravity.CENTER }
+        val circle = FrameLayout(ctx).apply {
+            addView(img, FrameLayout.LayoutParams(size, size))
+            addView(txt, FrameLayout.LayoutParams(size, size))
+            isClickable = true
+            isFocusable = true
+            contentDescription = caption
+            setOnClickListener { onClick() }
+        }
+        val label = text(ctx, caption, 10f, INK2, center = true, maxLines = 1)
+        val root = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(circle, LinearLayout.LayoutParams(size, size))
+            addView(label, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(ctx, 3f) })
+            layoutParams = LinearLayout.LayoutParams(dp(ctx, w), ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(ctx, 2f); marginEnd = dp(ctx, 2f) }
+        }
+        val a = Action(root, circle, img, txt, label, radius)
+        if (icon != null) a.icon(icon) else a.text("")
+        a.caption(caption)
+        a.on(primary)
+        return a
     }
 
-    /** 图标按钮的开关状态（开着时石青底黑图标） */
-    fun iconOn(b: ImageButton, on: Boolean) {
-        b.background = pill(if (on) ACCENT else CARD, dp(b.context, 22f).toFloat())
-        b.setColorFilter(if (on) BG else INK)
-    }
-
-    /** 一排横着的按钮，之间留点空 */
-    fun row(ctx: Context, vararg views: View): LinearLayout = LinearLayout(ctx).apply {
+    /** 一排圆形按钮（居中） */
+    fun actions(ctx: Context, vararg items: Action): LinearLayout = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
-        for (v in views) addView(v, (v.layoutParams as? LinearLayout.LayoutParams) ?: LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(ctx, 3f); marginEnd = dp(ctx, 3f) })
+        for (it in items) addView(it.root)
     }
 
     fun lp(ctx: Context, top: Float = 0f, matchWidth: Boolean = true) = LinearLayout.LayoutParams(

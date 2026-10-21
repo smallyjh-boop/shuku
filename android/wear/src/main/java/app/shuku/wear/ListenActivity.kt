@@ -13,7 +13,6 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -36,14 +35,14 @@ class ListenActivity : Activity() {
     private lateinit var speakerButton: TextView
     private lateinit var controls: LinearLayout
     private lateinit var hintView: TextView
-    private lateinit var volumeView: TextView
-    private lateinit var playButton: ImageButton
+    private lateinit var playButton: Ui.Action
     private lateinit var options: LinearLayout
-    private lateinit var speedButton: TextView
-    private lateinit var timerButton: TextView
+    private lateinit var speedButton: Ui.Action
+    private lateinit var timerButton: Ui.Action
+    private lateinit var volumeButton: Ui.Action
     private lateinit var offlineView: TextView
     private lateinit var iconRow: LinearLayout
-    private lateinit var moreButton: ImageButton
+    private lateinit var moreButton: Ui.Action
     private lateinit var backButton: TextView
 
     private var visible = false
@@ -141,11 +140,6 @@ class ListenActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun row() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-    }
-
     private fun build() {
         val (_, col) = Ui.page(this)
         titleView = Ui.text(this, "", 14f, Ui.ACCENT, bold = true, center = true, maxLines = 2).also { col.addView(it, Ui.lp(this)) }
@@ -168,36 +162,38 @@ class ListenActivity : Activity() {
         speakerButton = Ui.button(this, "用手表扬声器") { ListenService.useSpeaker() }.also { outputBox.addView(it, Ui.lp(this, 6f)) }
         col.addView(outputBox, Ui.lp(this, 8f))
 
-        controls = row()
-        controls.addView(Ui.iconButton(this, android.R.drawable.ic_media_previous, "上一句") { ListenService.prev() })
-        playButton = Ui.iconButton(this, android.R.drawable.ic_media_pause, "暂停") { ListenService.toggle() }.also { controls.addView(it) }
-        controls.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
-        col.addView(controls, Ui.lp(this, 10f, matchWidth = false))
+        // 上一句、播放 / 暂停、下一句
+        playButton = Ui.action(this, R.drawable.ic_a_pause, "", primary = true) { ListenService.toggle() }
+        controls = Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_prev, "") { ListenService.prev() }.apply { desc("上一句") },
+            playButton,
+            Ui.action(this, R.drawable.ic_a_next, "") { ListenService.next() }.apply { desc("下一句") })
+        col.addView(controls, Ui.lp(this, 10f))
 
-        // 语速、定时、音量一排：点语速、定时弹出来选；音量是图标加现在的音量，点一下出来系统的音量条（转表冠、按耳机上的键也行）
-        speedButton = Ui.chip(this, null, "1.0×") { pickSpeed() }.apply { contentDescription = "语速" }
-        timerButton = Ui.chip(this, android.R.drawable.ic_lock_idle_alarm, "") { pickTimer() }.apply { contentDescription = "睡眠定时" }
-        volumeView = Ui.chip(this, android.R.drawable.ic_lock_silent_mode_off, "") { showVolume() }.apply { contentDescription = "音量" }
-        options = Ui.row(this, speedButton, timerButton, volumeView)
-        col.addView(options, Ui.lp(this, 8f, matchWidth = false))
+        // 语速、定时、音量：点语速、定时弹出来选；音量下面是现在的音量，点一下出来系统的音量条（转表冠、按耳机上的键也行）
+        speedButton = Ui.action(this, null, "语速") { pickSpeed() }
+        timerButton = Ui.action(this, R.drawable.ic_a_timer, "定时") { pickTimer() }
+        volumeButton = Ui.action(this, R.drawable.ic_a_volume, "音量") { showVolume() }
+        options = Ui.actions(this, speedButton, timerButton, volumeButton)
+        col.addView(options, Ui.lp(this, 10f))
 
         // 离线听：已经准备好多少
         offlineView = Ui.text(this, "", 11f, Ui.INK2, center = true).also { col.addView(it, Ui.lp(this, 8f)) }
 
-        // 看文字、离线听（多准备一些，开着时亮）、停止：图标一排，长按显示是什么
-        val textIcon = Ui.iconButton(this, android.R.drawable.ic_menu_agenda, "看文字") { openText() }
-        moreButton = Ui.iconButton(this, android.R.drawable.stat_sys_download, "离线听：多准备一些") {
+        // 看文字、离线听（多准备一些，开着时亮）、停止
+        moreButton = Ui.action(this, R.drawable.ic_a_download, "离线听") {
             val on = !ListenService.state().more
             ListenService.setMore(on)
             Toast.makeText(this, if (on) "多准备约半小时，离开手机也能听" else "不用多准备了", Toast.LENGTH_SHORT).show()
         }
-        val stopIcon = Ui.iconButton(this, android.R.drawable.ic_menu_close_clear_cancel, "停止听书") {
-            ListenService.stopNow()
-            finish()
-        }
-        for (b in listOf(textIcon, moreButton, stopIcon)) b.setOnLongClickListener { Toast.makeText(this, it.contentDescription, Toast.LENGTH_SHORT).show(); true }
-        iconRow = Ui.row(this, textIcon, moreButton, stopIcon)
-        col.addView(iconRow, Ui.lp(this, 10f, matchWidth = false))
+        iconRow = Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_book, "看文字") { openText() },
+            moreButton,
+            Ui.action(this, R.drawable.ic_a_stop, "停止") {
+                ListenService.stopNow()
+                finish()
+            })
+        col.addView(iconRow, Ui.lp(this, 10f))
         backButton = Ui.button(this, "返回") { finish() }.apply { visibility = View.GONE }
         col.addView(backButton, Ui.lp(this, 10f, matchWidth = false))
     }
@@ -241,17 +237,19 @@ class ListenActivity : Activity() {
         statusView.visibility = if (statusView.text.isEmpty()) View.GONE else View.VISIBLE
         outputBox.visibility = if (s.needOutput) View.VISIBLE else View.GONE
         speakerButton.visibility = if (s.needOutput && AudioOut.hasSpeaker(this)) View.VISIBLE else View.GONE
-        playButton.setImageResource(if (s.playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
-        playButton.contentDescription = if (s.playing) "暂停" else "继续"
-        speedButton.text = String.format(Locale.US, "%.1f×", s.speed)
-        timerButton.text = when {
-            s.timer == -1 -> "本章"
-            s.timer > 0 -> "${ceil(s.timerLeftMs / 60_000.0).toInt()} 分"
+        playButton.icon(if (s.playing) R.drawable.ic_a_pause else R.drawable.ic_a_play)
+        playButton.desc(if (s.playing) "暂停" else "继续")
+        speedButton.text(String.format(Locale.US, "%.1f×", s.speed))
+        // 定了时：图标亮着，下面写还剩多久
+        timerButton.on(s.timer != 0)
+        timerButton.caption(when {
+            s.timer == -1 -> "读完本章"
+            s.timer > 0 -> "还剩 ${ceil(s.timerLeftMs / 60_000.0).toInt()} 分"
             else -> "定时"
-        }
+        })
         offlineView.text = offlineLine(s)
         offlineView.visibility = if (offlineView.text.isEmpty()) View.GONE else View.VISIBLE
-        Ui.iconOn(moreButton, s.more)
+        moreButton.on(s.more)
     }
 
     /** 系统的音量条（Wear OS 上可以直接转表冠调） */
@@ -265,9 +263,9 @@ class ListenActivity : Activity() {
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-        volumeView.text = if (max > 0) "${cur * 100 / max}%" else ""
+        volumeButton.caption(if (max > 0) "音量 ${cur * 100 / max}%" else "音量")
         // 静音时换成静音图标
-        Ui.chipIcon(volumeView, if (cur == 0) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off)
+        volumeButton.icon(if (cur == 0) R.drawable.ic_a_volume_off else R.drawable.ic_a_volume)
     }
 
     /** 点语速：列出来直接选 */

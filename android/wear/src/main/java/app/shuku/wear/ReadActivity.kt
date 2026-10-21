@@ -233,12 +233,11 @@ class ReadActivity : Activity() {
         }, Ui.lp(this, 16f))
         if (i + 1 < count) col.addView(Ui.button(this, "下一章", primary = true) { open(i + 1, 0.0) }, Ui.lp(this, 8f))
         else col.addView(Ui.text(this, "全书完", 14f, Ui.INK2, center = true), Ui.lp(this, 8f))
-        // 目录、跳章、字号：小按钮一排
-        val row = Ui.row(this,
-            Ui.chip(this, android.R.drawable.ic_menu_agenda, "目录") { toc() },
-            Ui.chip(this, null, "跳章") { seekChapter() },
-            Ui.chip(this, null, "Aa") { cycleFont() }.apply { contentDescription = "字号" })
-        col.addView(row, Ui.lp(this, 8f, matchWidth = false))
+        // 目录、跳章、字号
+        col.addView(Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_list, "目录") { toc() },
+            Ui.action(this, R.drawable.ic_a_jump, "跳章") { seekChapter() },
+            Ui.action(this, null, "字号") { cycleFont() }.apply { text("Aa") }), Ui.lp(this, 10f))
         if (ch.optBoolean("_offline")) col.addView(Ui.text(this, "没联网，这一章是手表上存的", 10f, Ui.INK2, center = true), Ui.lp(this, 8f))
         // 浮在屏幕下方的“从这里听”，点一下正文出来，几秒后自己收起
         val root = s.parent as FrameLayout

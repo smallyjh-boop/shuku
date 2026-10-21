@@ -24,7 +24,7 @@
 - 听书的声音按语言：`/api/tts/voices` 每个音色带 `code`（zh、en、th…），`defaults` 是每种语言的默认音色；网页 `tts.js` 的 `voiceFor` 按书的语言挑、`prefs.voices[语言]` 记住选过的。微软语音合成前 `adaptVoice` 看文字种类（`scriptLang`，汉字假名按 4 个字母算），音色读不了就换成这种语言的默认音色；整句拉丁字母遇到中文、泰文这类音色时换成书的语言（不是拉丁字母的语言就用英语）的音色。网页的书的语言看正文（`bookCode`，元数据只用来区分拉丁字母的语言），每句按 `segLang` 挑声音。
 - 手机后台听书（`NarrationService`）：句子平时由网页给（`need` / `append`）；网页 15 秒没回应（熄屏后被冻结）或不在了，改由服务自己从 `/api/books/{id}/chapters?loc=&pct=` 找到读到哪一章、`/chapters/{i}` 取正文接着读（`startFeed` / `feedMore`），用的是 `common` 里和手表共用的 `BookText`、`BookPos`。预先合成 `PREFETCH`（30）句；合成失败 `synthFailed` 按 `RETRIES` 隔几秒重试（重新探测线路），一分半钟后才改用手机语音，手机没有语音引擎（`deviceBroken`）时一直等网络。第一次听书时 `askIgnoreBatteryOnce` 请求不受电池优化限制。听书进度一直由服务自己记（`notePosition`，每 30 秒、暂停停止时；关屏后网页被冻结，存不了），网页位置没变、只报阅读时长时带 `time_only`，书库和 `ProgressSync` 都不拿它改位置。
 - 安卓签名：`android/signing/shuku.jks`（手机和手表必须同一个签名、同一个包名 `app.shuku`）。
-- 手表 App 是原生界面（不是 WebView），自己能听书：`ListenService` 按句调 `POST /api/tts` 合成、手表自己播放（蓝牙耳机，或用户同意后用扬声器；书库语音不行时用手表自带语音），进度和阅读页一样换算成 `sec:` / `p:` 位置传回书库。首页另外还能遥控手机上的听书（Wearable 消息 `/shuku/tts/…`）。没有 Android SDK 时用 `android/tools/check.sh` 做类型检查。
+- 手表 App 是原生界面（不是 WebView），自己能听书：`ListenService` 按句调 `POST /api/tts` 合成、手表自己播放（蓝牙耳机，或用户同意后用扬声器；书库语音不行时用手表自带语音），进度和阅读页一样换算成 `sec:` / `p:` 位置传回书库。首页另外还能遥控手机上的听书（Wearable 消息 `/shuku/tts/…`）。没有 Android SDK 时用 `android/tools/check.sh` 做类型检查（它按 res/drawable 补一个 R，引用不存在的图标会报错）。手表按钮统一用 `Ui.action`（圆形图标加一行小字，宽度按屏幕算，一排三个；卡片里 `inCard`），图标是 `res/drawable/ic_a_*.xml`。
 
 ## 在线升级（已做好）
 

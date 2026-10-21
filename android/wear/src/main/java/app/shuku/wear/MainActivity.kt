@@ -189,16 +189,15 @@ class MainActivity : Activity() {
         // 先显示上次的列表，联网后再换成最新的
         val cached = app.config.str("reading_cache", "")
         if (cached.isNotEmpty()) showBooks(JSONArray(cached)) else listBox!!.addView(Ui.text(this, "正在加载…", 13f, Ui.INK2))
-        // 找书、刷新、更多（断开书库）：图标一排，长按显示是什么
-        val find = Ui.iconButton(this, android.R.drawable.ic_menu_search, "找书") { startActivity(Intent(this, BooksActivity::class.java)) }
-        val refresh = Ui.iconButton(this, android.R.drawable.ic_popup_sync, "刷新") {
-            app.retryNow() // 不管刚才是不是不通，马上重新连
-            loadedAt = 0
-            load()
-        }
-        val more = Ui.iconButton(this, android.R.drawable.ic_menu_more, "更多") { moreMenu() }
-        for (b in listOf(find, refresh, more)) b.setOnLongClickListener { Toast.makeText(this, it.contentDescription, Toast.LENGTH_SHORT).show(); true }
-        col.addView(Ui.row(this, find, refresh, more), Ui.lp(this, 14f, matchWidth = false))
+        // 找书、刷新、更多（断开书库）
+        col.addView(Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_search, "找书") { startActivity(Intent(this, BooksActivity::class.java)) },
+            Ui.action(this, R.drawable.ic_a_refresh, "刷新") {
+                app.retryNow() // 不管刚才是不是不通，马上重新连
+                loadedAt = 0
+                load()
+            },
+            Ui.action(this, R.drawable.ic_a_more, "更多") { moreMenu() }), Ui.lp(this, 14f))
     }
 
     /** 更多：不常用的放这里（断开书库要再确认一次） */
@@ -309,18 +308,14 @@ class MainActivity : Activity() {
             box.addView(Ui.text(this, "上次读到", 11f, Ui.ACCENT, center = true), Ui.lp(this))
             val pct = (b.percent * 100).roundToInt()
             box.addView(Ui.text(this, b.title + if (pct > 0) "　$pct%" else "", 14f, bold = true, center = true, maxLines = 2), Ui.lp(this, 2f))
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            val g = Ui.dp(this, 3f)
-            row.addView(Ui.button(this, "继续听", primary = true) {
-                startActivity(Intent(this, ListenActivity::class.java).putExtra(ListenActivity.EXTRA_RESUME, b.id).putExtra("title", b.title))
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = g })
-            row.addView(Ui.button(this, "继续读") {
-                startActivity(Intent(this, ReadActivity::class.java).putExtra("id", b.id).putExtra("title", b.title))
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = g })
-            box.addView(row, Ui.lp(this, 8f, matchWidth = false))
+            // 两个圆图标：继续听（耳机）、继续读（书）
+            box.addView(Ui.actions(this,
+                Ui.action(this, R.drawable.ic_a_headset, "继续听", primary = true, inCard = true) {
+                    startActivity(Intent(this, ListenActivity::class.java).putExtra(ListenActivity.EXTRA_RESUME, b.id).putExtra("title", b.title))
+                },
+                Ui.action(this, R.drawable.ic_a_book, "继续读", inCard = true) {
+                    startActivity(Intent(this, ReadActivity::class.java).putExtra("id", b.id).putExtra("title", b.title))
+                }), Ui.lp(this, 8f))
             return
         }
         box.visibility = View.VISIBLE
@@ -338,14 +333,11 @@ class MainActivity : Activity() {
         box.addView(Ui.text(this, s.title, 14f, bold = true, center = true, maxLines = 1), Ui.lp(this, 2f))
         val line = s.status.ifEmpty { s.text }
         if (line.isNotEmpty()) box.addView(Ui.text(this, line, 12f, Ui.INK2, serif = true, center = true, maxLines = 2), Ui.lp(this, 2f))
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_previous, "上一句") { ListenService.prev() })
-        row.addView(Ui.iconButton(this, if (s.playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, if (s.playing) "暂停" else "继续") { ListenService.toggle() })
-        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { ListenService.next() })
-        box.addView(row, Ui.lp(this, 6f, matchWidth = false))
+        box.addView(Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_prev, "", inCard = true) { ListenService.prev() }.apply { desc("上一句") },
+            Ui.action(this, if (s.playing) R.drawable.ic_a_pause else R.drawable.ic_a_play, "", primary = true, inCard = true) { ListenService.toggle() }
+                .apply { desc(if (s.playing) "暂停" else "继续") },
+            Ui.action(this, R.drawable.ic_a_next, "", inCard = true) { ListenService.next() }.apply { desc("下一句") }), Ui.lp(this, 6f))
     }
 
     // ---------- 手机上的听书 ----------
@@ -369,43 +361,36 @@ class MainActivity : Activity() {
         box.addView(Ui.text(this, s.optString("title"), 14f, bold = true, center = true, maxLines = 1), Ui.lp(this, 2f))
         val line = s.optString("status").ifEmpty { s.optString("text") }
         if (line.isNotEmpty()) box.addView(Ui.text(this, line, 12f, Ui.INK2, serif = true, center = true, maxLines = 2), Ui.lp(this, 2f))
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_previous, "上一句") { tts("prev") })
-        row.addView(Ui.iconButton(this, if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play, if (playing) "暂停" else "继续") {
-            // 先在手表上改过来，手机回状态后再校正
-            s.put("playing", !playing)
+        box.addView(Ui.actions(this,
+            Ui.action(this, R.drawable.ic_a_prev, "", inCard = true) { tts("prev") }.apply { desc("上一句") },
+            Ui.action(this, if (playing) R.drawable.ic_a_pause else R.drawable.ic_a_play, "", primary = true, inCard = true) {
+                // 先在手表上改过来，手机回状态后再校正
+                s.put("playing", !playing)
+                app.config.prefs.edit().putString("tts_state", s.toString()).apply()
+                renderTts()
+                tts(if (playing) "pause" else "resume")
+            }.apply { desc(if (playing) "暂停" else "继续") },
+            Ui.action(this, R.drawable.ic_a_next, "", inCard = true) { tts("next") }.apply { desc("下一句") }), Ui.lp(this, 6f))
+        // 手机的音量（戴着耳机听手机时，不用掏手机）：下面写着手机现在的音量，点一下拖动或转表冠调；停止
+        val pv = s.optInt("volume", -1) // 旧版手机 App 不报音量
+        val stop = Ui.action(this, R.drawable.ic_a_stop, "停止", inCard = true) {
+            s.put("active", false)
             app.config.prefs.edit().putString("tts_state", s.toString()).apply()
             renderTts()
-            tts(if (playing) "pause" else "resume")
-        })
-        row.addView(Ui.iconButton(this, android.R.drawable.ic_media_next, "下一句") { tts("next") })
-        box.addView(row, Ui.lp(this, 6f, matchWidth = false))
-        // 手机的音量（戴着耳机听手机时，不用掏手机）：图标加手机现在的音量，点一下拖动或转表冠调
-        val pv = s.optInt("volume", -1) // 旧版手机 App 不报音量
-        if (pv >= 0) {
-            val vol = Ui.chip(this, if (pv == 0) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_lock_silent_mode_off, "$pv%") {
+            tts("stop")
+        }
+        val bottom = if (pv >= 0) {
+            val vol = Ui.action(this, if (pv == 0) R.drawable.ic_a_volume_off else R.drawable.ic_a_volume, "手机 $pv%", inCard = true) {
                 Pick.seek(this, "手机音量", 11, (pv + 5) / 10, { "${it * 10}%" }) { k ->
                     s.put("volume", k * 10)
                     app.config.prefs.edit().putString("tts_state", s.toString()).apply()
                     renderTts()
                     bg { PhoneLink.send(this, "/shuku/tts/volume", (k * 10).toString().toByteArray()) }
                 }
-            }.apply { contentDescription = "手机音量" }
-            box.addView(vol, Ui.lp(this, 6f, matchWidth = false))
-        }
-        box.addView(Ui.text(this, "停止", 12f, Ui.INK2, center = true).apply {
-            val v = Ui.dp(this@MainActivity, 6f)
-            setPadding(v * 3, v, v * 3, v)
-            setOnClickListener {
-                s.put("active", false)
-                app.config.prefs.edit().putString("tts_state", s.toString()).apply()
-                renderTts()
-                tts("stop")
-            }
-        }, Ui.lp(this, 2f, matchWidth = false))
+            }.apply { desc("手机音量") }
+            Ui.actions(this, vol, stop)
+        } else Ui.actions(this, stop)
+        box.addView(bottom, Ui.lp(this, 6f))
     }
 
     private fun tts(cmd: String) = bg {
