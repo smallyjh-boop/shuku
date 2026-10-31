@@ -85,6 +85,10 @@ export class AutoTurn {
       iconBtn('close', '关掉自动翻页', () => this.stop()))
     for (const ev of ['click', 'pointerdown']) this.chip.addEventListener(ev, e => e.stopPropagation())
     this.shell.root.append(this.chip)
+    // 看书时（工具栏收起）只在底下的状态栏（页边空白里）显示一小行，不压在正文上；
+    // 点屏幕中间叫出工具栏时才出现上面那条带“－ ＋ 暂停 关掉”的按钮（这时也不计时）
+    this.mini = h('span', { class: 'r-auto-mini', hidden: true })
+    this.shell.statusR?.before(this.mini)
   }
 
   // ---------- 每翻到一页（Reader.onRelocate 调用） ----------
@@ -140,6 +144,7 @@ export class AutoTurn {
     this.paused = false
     if (this.page) { this.page.elapsed = 0; this.page.tainted = false }
     this.chip.hidden = false
+    this.mini.hidden = false
     this.shell.root.classList.add('autoturn')
     this.shell.showUI(false)
     // 阅读时屏幕一直亮着（App 里平时 10 分钟没碰屏幕就交给系统锁屏；浏览器用 Wake Lock）
@@ -148,13 +153,14 @@ export class AutoTurn {
     this.lockScreen()
     this.showLabel()
     const m = this.model
-    toast(m.n >= 3 ? '自动翻页：按你平时的速度翻' : '自动翻页：还在学你的速度，嫌快嫌慢点“－”“＋”，自己翻页也会学', { duration: 3000 })
+    toast((m.n >= 3 ? '自动翻页：按你平时的速度翻。' : '自动翻页：还在学你的速度，自己翻页也会学。') + '点屏幕中间可以调快慢、暂停、关掉', { duration: 3500 })
   }
 
   stop() {
     if (!this.on) return
     this.on = false
     this.chip.hidden = true
+    this.mini.hidden = true
     this.shell.root.classList.remove('autoturn')
     call('keepAwake', false)
     try { this.wake?.release?.() } catch {}
@@ -200,7 +206,7 @@ export class AutoTurn {
     this.page.elapsed++
     const need = predict(this.model, this.kind, this.page.chars)
     if (this.page.elapsed >= need) this.turn()
-    else if (!isEInk() && !this.chip.hidden) this.label.textContent = `自动翻页 · ${Math.ceil(need - this.page.elapsed)} 秒`
+    else if (!isEInk()) this.mini.textContent = `自动翻页 · ${Math.ceil(need - this.page.elapsed)} 秒`
   }
 
   async turn() {
@@ -219,6 +225,7 @@ export class AutoTurn {
     if (!this.on) return
     const sec = predict(this.model, this.kind, this.page?.chars || 0)
     this.label.textContent = this.paused ? '自动翻页 · 暂停' : `自动翻页 · 这页约 ${fmtSec(sec)}`
+    this.mini.textContent = this.paused ? '自动翻页 · 暂停' : `自动翻页 · ${fmtSec(sec)}`
   }
 
   // 阅读设置里的说明：学了多少页、现在多快
@@ -239,5 +246,5 @@ export class AutoTurn {
     toast('已清除，重新学习你的阅读速度', { duration: 2000 })
   }
 
-  destroy() { this.stop(); clearInterval(this.timer); this.offVis(); this.chip.remove() }
+  destroy() { this.stop(); clearInterval(this.timer); this.offVis(); this.chip.remove(); this.mini.remove() }
 }

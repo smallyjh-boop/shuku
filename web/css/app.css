@@ -1096,6 +1096,11 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
 .r-auto .icon-btn svg { width: 16px; height: 16px; }
 .r-auto[hidden] { display: none; }
 .reader.ui .r-auto { top: calc(62px + var(--safe-t)); }
+/* 看书时不显示上面那条（挡字），只在底下状态栏里写一小行 */
+.reader:not(.ui) .r-auto { display: none; }
+.r-status > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-auto-mini { flex: none; padding: 0 10px; white-space: nowrap; }
+.r-auto-mini[hidden] { display: none; }
 html.eink .r-auto { box-shadow: none; border: 2px solid var(--r-rule); }
 /* 底栏八个按钮：窄屏手机上挤一挤 */
 @media (max-width: 420px) { .r-tools .icon-btn { padding: 0 7px; } }

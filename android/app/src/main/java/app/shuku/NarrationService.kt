@@ -29,6 +29,8 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import app.shuku.core.DeviceSpeech
+import app.shuku.core.MixedText
 import app.shuku.core.BookPos
 import app.shuku.core.BookText
 import app.shuku.core.Http
@@ -114,7 +116,9 @@ class NarrationService : Service() {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var utterance: String? = null
+    private var utterance: String? = null   // 这一句最后一段的 id：它读完才算这句读完
+    private val warnedLangs = HashSet<String>() // 已经提示过“手机没有这种语言的声音”
+    private var unreadable = 0
 
     // ---------- 生命周期 ----------
 
@@ -709,14 +713,33 @@ class NarrationService : Service() {
             }
             return
         }
-        val loc = localeFor(seg.text)
+        // 一句里混着几种文字（中文里的英文、英文书里的中文）：切成几段，每段换成那种语言的声音接着读
         val want = deviceVoice.ifEmpty { voice }
-        val picked = if (want.isNotEmpty()) t.voices?.firstOrNull { it.name == want && it.locale.language == loc.language } else null
-        if (picked != null) t.voice = picked else if (t.voice?.locale?.language != loc.language) t.language = loc
         t.setSpeechRate(speed.toFloat())
-        utterance = seg.id
+        var first = true
+        var last: String? = null
+        val missing = LinkedHashSet<String>()
+        for ((k, run) in MixedText.runs(seg.text, lang).withIndex()) {
+            if (!DeviceSpeech.use(t, run.locale, want)) { missing += MixedText.langName(run.locale); continue }
+            val id = "${seg.id}#$k"
+            t.speak(run.text, if (first) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, Bundle(), id)
+            first = false
+            last = id
+        }
+        // 手机上没有这种语言的声音：说一次怎么装（不拿英文声音硬读中文）
+        val news = missing.filter { warnedLangs.add(it) }
+        if (news.isNotEmpty()) Events.emit("tts", JSONObject().put("type", "error").put("message",
+            "手机自带语音没有${news.joinToString("、")}，这部分读不出来。可以在系统设置 → 文字转语音里装语音包（比如“Google 文字转语音”的中文），或者换成在线合成"))
+        if (last == null) {
+            // 这一句一个字也读不了：跳过，连着好几句都读不了就停下
+            utterance = null
+            if (++unreadable >= 3) { unreadable = 0; pause(); status = "手机语音读不了这种文字"; publish(); return }
+            handler.postDelayed({ if (playing && queue.getOrNull(index)?.id == seg.id) advance() }, 300)
+            return
+        }
+        unreadable = 0
+        utterance = last
         acquireLocks()
-        t.speak(seg.text, TextToSpeech.QUEUE_FLUSH, Bundle(), seg.id)
         status = ""
         publish()
     }
@@ -752,32 +775,6 @@ class NarrationService : Service() {
         }
         val c = if (code == "latin") (if (lang.isNotEmpty() && lang !in nonLatin) lang else "en") else code
         return voices[c] ?: ""
-    }
-
-    /** 手机自带语音用哪种语言读：看文字种类（泰、韩、日、中、俄、阿拉伯）；拉丁字母按书的语言，中文书里的就用英语 */
-    private fun localeFor(text: String): Locale {
-        var thai = 0; var hangul = 0; var kana = 0; var han = 0; var cyr = 0; var arabic = 0
-        for (c in text) {
-            when (Character.UnicodeScript.of(c.code)) {
-                Character.UnicodeScript.THAI -> thai++
-                Character.UnicodeScript.HANGUL -> hangul++
-                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana++
-                Character.UnicodeScript.HAN -> han++
-                Character.UnicodeScript.CYRILLIC -> cyr++
-                Character.UnicodeScript.ARABIC -> arabic++
-                else -> {}
-            }
-        }
-        return when {
-            kana > 0 -> Locale.JAPANESE
-            thai > 0 && thai >= han * 4 -> Locale("th", "TH")
-            hangul > 0 && hangul * 2 >= han * 4 -> Locale.KOREAN
-            han > 0 -> Locale.SIMPLIFIED_CHINESE
-            cyr > 0 -> Locale("ru", "RU")
-            arabic > 0 -> Locale("ar")
-            lang.isNotEmpty() && lang !in setOf("zh", "ja", "ko", "th", "ru", "ar") -> Locale(lang)
-            else -> Locale.US
-        }
     }
 
     // ---------- 定时 ----------

@@ -172,6 +172,46 @@ function browserVoices(code) {
   try { return ss.getVoices().filter(v => String(v.lang).replace('_', '-').slice(0, 2) === lang) } catch { return [] }
 }
 
+// 本机语音读混着几种文字的句子：按文字种类切成几段，每段用那种语言的声音读（和 App 的 MixedText 一样）。
+// 主要是中日韩文字的句子里夹的短英文（几个字母、一两个词）不切开，中文声音读得了
+const RUN_KIND = [['th', /[\u0E00-\u0E7F]/], ['ja', /[\u3040-\u30FF]/], ['ko', /[\uAC00-\uD7AF]/], ['zh', /[\u4E00-\u9FFF\u3400-\u4DBF]/],
+  ['ru', /[\u0400-\u04FF]/], ['ar', /[\u0600-\u06FF]/], ['latin', /[A-Za-z\u00C0-\u024F]/]]
+export function mixedRuns(text, book) {
+  const t = String(text || '')
+  const hasKana = /[\u3040-\u30FF]/.test(t), hasHangul = /[\uAC00-\uD7AF]/.test(t)
+  const kindOf = c => {
+    for (const [k, re] of RUN_KIND) if (re.test(c)) return k === 'zh' && hasKana ? 'ja' : k === 'zh' && hasHangul ? 'ko' : k
+    return ''
+  }
+  let parts = []
+  for (const c of t) {
+    const k = kindOf(c)
+    const last = parts[parts.length - 1]
+    if (!k || (last && last.k === k)) { if (last) last.s += c; else parts.push({ k: '', s: c }) }
+    else if (parts.length === 1 && !parts[0].k) { parts[0].k = k; parts[0].s += c }
+    else parts.push({ k, s: c })
+  }
+  const CJK = { zh: 1, ja: 1, ko: 1 }
+  let cjk = 0, latin = 0
+  for (const c of t) { const k = kindOf(c); if (CJK[k]) cjk += 4; else if (k === 'latin') latin++ }
+  if (cjk >= latin) {
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i]
+      if (p.k !== 'latin' || parts.length < 2) continue
+      const letters = (p.s.match(/[A-Za-z\u00C0-\u024F]/g) || []).length, words = p.s.trim().split(/\s+/).filter(w => /[A-Za-z]/.test(w)).length
+      if (letters > 12 && words > 2) continue
+      if (i > 0 && CJK[parts[i - 1].k]) { parts[i - 1].s += p.s; parts.splice(i--, 1) }
+      else if (parts[i + 1] && CJK[parts[i + 1].k]) { parts[i + 1].s = p.s + parts[i + 1].s; parts.splice(i--, 1) }
+    }
+  }
+  const out = []
+  for (const p of parts) { const l = out[out.length - 1]; if (l && l.k === p.k) l.s += p.s; else out.push({ ...p }) }
+  const latinLang = book && !NON_LATIN[book] ? book : 'en'
+  return out.filter(p => p.s.trim()).map(p => ({ text: p.s.trim(), code: !p.k || p.k === 'latin' ? latinLang : p.k }))
+}
+
+const LANG_NAME = { zh: '中文', ja: '日语', ko: '韩语', th: '泰语', ru: '俄语', ar: '阿拉伯语', en: '英语', fr: '法语', de: '德语', es: '西班牙语', it: '意大利语', pt: '葡萄牙语', vi: '越南语' }
+
 // 阅读设置里的声音下拉框：只列这种语言的（和多语言的），选了记在这种语言下
 function voiceSelect(info, code, cur, onChange) {
   let list = info.voices || []
@@ -208,6 +248,7 @@ export class Narrator {
     this.prefs = store(PREFS_KEY, { speed: 1, voice: '', engine: '' })
     this.queue = []
     this.i = 0
+    this.unreadable = 0
     this.playing = false
     this.active = false
     this.cache = new Map() // 段落文字 → Promise<blob url>
@@ -449,21 +490,39 @@ export class Narrator {
     this.setState('')
     if (!window.speechSynthesis) { this.pause(); this.setState('朗读失败'); toast('这个浏览器没有自带的语音', { error: true }); return }
     speechSynthesis.cancel()
-    const u = new SpeechSynthesisUtterance(seg.text)
-    // 文字是哪种就用哪种语言读；拉丁字母按书的语言（英、法、德……），中文书里的英文句子用英语
-    const code = segLang(seg.text, this.code)
-    const lang = BCP[code] || code
-    u.lang = lang
-    const voices = browserVoices(code)
-    // 自己在阅读设置里选过的 → “自然”“增强”的声音（Edge 的 Natural、苹果的 Enhanced / Premium）→ 这种语言的第一个
-    const mine = this.prefs.deviceVoices?.[code]
-    const pick = voices.find(v => v.name === mine) || voices.find(v => /natural|neural|enhanced|premium|siri/i.test(v.name)) || voices.find(v => v.lang.replace('_', '-') === lang) || voices[0]
-    if (pick) u.voice = pick
-    u.rate = this.speed
+    // 一句里混着几种文字：切成几段，每段用那种语言的声音（中文用中文声音、英文用英文声音……），最后一段读完才算这句读完
     const token = (this.token = {})
-    u.onend = () => { if (token === this.token) this.advance() }
-    u.onerror = () => {}
-    speechSynthesis.speak(u)
+    const any = (() => { try { return speechSynthesis.getVoices().length > 0 } catch { return false } })()
+    const missing = []
+    let last = null
+    for (const run of mixedRuns(seg.text, this.code)) {
+      const code = run.code
+      const lang = BCP[code] || code
+      const voices = browserVoices(code)
+      // 这台设备没有这种语言的声音：跳过这一段（不拿英文声音硬读中文）；声音列表还没取到时照样交给浏览器按语言挑
+      if (any && !voices.length) { missing.push(LANG_NAME[code] || code); continue }
+      const u = new SpeechSynthesisUtterance(run.text)
+      u.lang = lang
+      // 自己选过的 → “自然”“增强”的声音（Edge 的 Natural、苹果的 Enhanced / Premium）→ 这种语言的第一个
+      const mine = this.prefs.deviceVoices?.[code]
+      const pick = voices.find(v => v.name === mine) || voices.find(v => /natural|neural|enhanced|premium|siri/i.test(v.name)) || voices.find(v => v.lang.replace('_', '-') === lang) || voices[0]
+      if (pick) u.voice = pick
+      u.rate = this.speed
+      u.onerror = () => {}
+      speechSynthesis.speak(u)
+      last = u
+    }
+    const fresh = missing.filter(m => !(this.warned ||= new Set()).has(m))
+    fresh.forEach(m => this.warned.add(m))
+    if (fresh.length) toast(`这台设备没有${fresh.join('、')}的声音，这部分读不出来。可以在系统设置里装语音包，或者换成在线合成`, { duration: 6000 })
+    if (!last) {
+      // 一个字也读不了：跳过这句；连着好几句都读不了就停下（不然整本书一下子就跳完了）
+      if (++this.unreadable >= 3) { this.unreadable = 0; this.pause(); this.setState('本机读不了这种文字'); return }
+      setTimeout(() => { if (token === this.token) this.advance() }, 300)
+      return
+    }
+    this.unreadable = 0
+    last.onend = () => { if (token === this.token) this.advance() }
   }
 
   async advance() {
