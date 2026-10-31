@@ -1,6 +1,8 @@
 package app.shuku.wear
 
 import app.shuku.core.BookPos
+import app.shuku.core.DeviceSpeech
+import app.shuku.core.MixedText
 import app.shuku.core.BookText
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -987,15 +989,25 @@ class ListenService : Service() {
             }
             return
         }
-        val loc = localeOf(seg.text)
-        if (t.voice?.locale?.language != loc.language && t.setLanguage(loc) < TextToSpeech.LANG_AVAILABLE) {
-            deviceTrouble("手表自带语音不会读这种语言")
+        // 一句里混着几种文字：切成几段，每段换成那种语言的声音接着读；手表没有的语言跳过那一段
+        t.setSpeechRate(speed.toFloat())
+        val base = "$gen:${seg.chap.i}:${seg.n}"
+        var first = true
+        var last: String? = null
+        val missing = LinkedHashSet<String>()
+        for ((k, run) in MixedText.runs(seg.text).withIndex()) {
+            if (!DeviceSpeech.use(t, run.locale)) { missing += MixedText.langName(run.locale); continue }
+            val id = "$base#$k"
+            t.speak(run.text, if (first) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, Bundle(), id)
+            first = false
+            last = id
+        }
+        if (last == null) {
+            deviceTrouble("手表自带语音不会读" + missing.joinToString("、").ifEmpty { "这种语言" })
             return
         }
-        t.setSpeechRate(speed.toFloat())
-        utterance = "$gen:${seg.chap.i}:${seg.n}"
-        t.speak(seg.text, TextToSpeech.QUEUE_FLUSH, Bundle(), utterance)
-        status = ""
+        utterance = last
+        status = if (missing.isNotEmpty()) "手表语音没有${missing.joinToString("、")}，跳过了一部分" else ""
         publish()
     }
 
@@ -1009,26 +1021,6 @@ class ListenService : Service() {
         val server = if (serverError.isNotEmpty() && !deviceOnly) "书库语音：$serverError；" else ""
         useDevice = false
         pauseAt(server + why)
-    }
-
-    private fun localeOf(text: String): Locale {
-        var han = 0
-        var kana = 0
-        var hangul = 0
-        for (c in text) {
-            when (Character.UnicodeScript.of(c.code)) {
-                Character.UnicodeScript.HAN -> han++
-                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana++
-                Character.UnicodeScript.HANGUL -> hangul++
-                else -> {}
-            }
-        }
-        return when {
-            kana > 0 -> Locale.JAPANESE
-            hangul > han -> Locale.KOREAN
-            han > 0 -> Locale.SIMPLIFIED_CHINESE
-            else -> Locale.US
-        }
     }
 
     // ---------- 语速、定时、离线准备 ----------
