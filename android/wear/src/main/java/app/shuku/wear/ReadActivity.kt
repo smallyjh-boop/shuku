@@ -238,6 +238,16 @@ class ReadActivity : Activity() {
             Ui.action(this, R.drawable.ic_a_list, "目录") { toc() },
             Ui.action(this, R.drawable.ic_a_jump, "跳章") { seekChapter() },
             Ui.action(this, null, "字号") { cycleFont() }.apply { text("Aa") }), Ui.lp(this, 10f))
+        // 听书的读法：书库在线合成 / 手表自带语音（听书页里也能换）
+        val voice = Ui.action(this, R.drawable.ic_a_headset, "") {}
+        fun showVoice() {
+            val dev = ListenService.voiceSource() == "device"
+            voice.caption(if (dev) "手表语音" else "书库语音")
+            voice.on(dev)
+        }
+        voice.circle.setOnClickListener { ListenActivity.pickVoice(this) { showVoice() } }
+        showVoice()
+        col.addView(Ui.actions(this, voice), Ui.lp(this, 6f))
         if (ch.optBoolean("_offline")) col.addView(Ui.text(this, "没联网，这一章是手表上存的", 10f, Ui.INK2, center = true), Ui.lp(this, 8f))
         // 浮在屏幕下方的“从这里听”，点一下正文出来，几秒后自己收起
         val root = s.parent as FrameLayout

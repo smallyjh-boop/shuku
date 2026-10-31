@@ -30,6 +30,7 @@ class ShukuApp : Application() {
         super.onCreate()
         app = this
         Http.userAgent = "ShukuApp/${BuildConfig.VERSION_NAME} (Android ${Build.VERSION.RELEASE}; ${Build.MODEL})"
+        Diag.init(this)
         config = Config(this)
         link = ServerLink(config)
         store = OfflineStore(this)
@@ -59,8 +60,8 @@ class ShukuApp : Application() {
     private fun watchNetwork() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = changed()
-            override fun onLost(network: Network) = changed()
+            override fun onAvailable(network: Network) { Diag.log("网络连上了"); changed() }
+            override fun onLost(network: Network) { Diag.log("网络断了"); changed() }
         })
     }
 
@@ -69,7 +70,7 @@ class ShukuApp : Application() {
         pending?.let { main.removeCallbacks(it) }
         val r = Runnable {
             io.execute {
-                if (config.configured) link.probe()
+                if (config.configured && link.probe() != null) MainActivity.current?.get()?.onOnline()
                 Events.emit("network", "{}")
                 progress.flush()
                 downloads.autoDownload()

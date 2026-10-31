@@ -553,6 +553,11 @@ export class Engine {
   goToFraction(f) { return this.view?.goToFraction(f) }
   restart() { return this.view?.goToTextStart().catch(() => this.view.goToFraction(0)) }
 
+  // 这一页有多少字（自动翻页按字数算这一页该停多久）
+  pageChars() {
+    try { return (this.last?.range?.toString() || '').replace(/\s+/g, '').length } catch { return 0 }
+  }
+
   excerpt() {
     try { return this.last?.range?.toString().trim().slice(0, 120) } catch { return '' }
   }

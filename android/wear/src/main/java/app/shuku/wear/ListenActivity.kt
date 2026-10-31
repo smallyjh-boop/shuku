@@ -41,6 +41,8 @@ class ListenActivity : Activity() {
     private lateinit var timerButton: Ui.Action
     private lateinit var volumeButton: Ui.Action
     private lateinit var offlineView: TextView
+    private lateinit var voiceButton: Ui.Action
+    private lateinit var voiceRow: View
     private lateinit var iconRow: LinearLayout
     private lateinit var moreButton: Ui.Action
     private lateinit var backButton: TextView
@@ -194,6 +196,10 @@ class ListenActivity : Activity() {
                 finish()
             })
         col.addView(iconRow, Ui.lp(this, 10f))
+        // 读法：书库在线合成，还是手表自带语音（不联网也能读）
+        voiceButton = Ui.action(this, R.drawable.ic_a_headset, "读法") { pickVoice(this) { update() } }
+        voiceRow = Ui.actions(this, voiceButton)
+        col.addView(voiceRow, Ui.lp(this, 10f))
         backButton = Ui.button(this, "返回") { finish() }.apply { visibility = View.GONE }
         col.addView(backButton, Ui.lp(this, 10f, matchWidth = false))
     }
@@ -214,6 +220,7 @@ class ListenActivity : Activity() {
             options.visibility = View.GONE
             offlineView.visibility = View.GONE
             iconRow.visibility = View.GONE
+            voiceRow.visibility = View.GONE
             backButton.visibility = View.VISIBLE
             return
         }
@@ -223,6 +230,9 @@ class ListenActivity : Activity() {
         hintView.visibility = if (s.chapterCount > 1 && app.config.prefs.getInt("seek_hint", 0) < 5) View.VISIBLE else View.GONE
         options.visibility = View.VISIBLE
         iconRow.visibility = View.VISIBLE
+        voiceRow.visibility = View.VISIBLE
+        voiceButton.caption(if (ListenService.voiceSource() == "device") "手表语音" else "书库语音")
+        voiceButton.on(ListenService.voiceSource() == "device")
         backButton.visibility = View.GONE
         titleView.text = s.title
         chapterView.text = if (s.chapterCount > 1) "${s.chapterIndex + 1}/${s.chapterCount}　${s.chapter}" else s.chapter
@@ -318,6 +328,17 @@ class ListenActivity : Activity() {
     }
 
     companion object {
+        /** 选读法（听书页、阅读页共用）：书库在线合成 / 手表自带语音 */
+        fun pickVoice(a: android.app.Activity, done: () -> Unit = {}) {
+            val opts = listOf("server", "device")
+            val names = listOf("书库语音（在线合成，更自然）", "手表语音（不联网也能读）")
+            Pick.choose(a, "读法", names, opts.indexOf(ListenService.voiceSource())) {
+                ListenService.setVoiceSource(opts[it])
+                Toast.makeText(a, if (opts[it] == "device") "改用手表自带语音" else "改用书库在线合成", Toast.LENGTH_SHORT).show()
+                done()
+            }
+        }
+
         /** “继续听”：书的 ID，-1 表示 Tile 上现在显示的那本 */
         const val EXTRA_RESUME = "resume"
     }

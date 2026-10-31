@@ -35,7 +35,11 @@ class Bridge(private val activity: MainActivity) {
     // ---------- 存储（替代 localStorage，内网、Tailscale 两个地址共用） ----------
 
     @JavascriptInterface fun storageGet(key: String): String? = store.getString(key, null)
-    @JavascriptInterface fun storageSet(key: String, value: String) { store.edit().putString(key, value).apply() }
+    @JavascriptInterface fun storageSet(key: String, value: String) {
+        // 没变就不写：每次 apply 都要把整个文件重写一遍，App 退到后台时主线程还要等这些写完（老平板上慢）
+        if (store.getString(key, null) == value) return
+        store.edit().putString(key, value).apply()
+    }
     @JavascriptInterface fun storageRemove(key: String) { store.edit().remove(key).apply() }
     @JavascriptInterface fun storageKeys(): String = JSONArray(store.all.keys.toList()).toString()
 
@@ -65,6 +69,9 @@ class Bridge(private val activity: MainActivity) {
     @JavascriptInterface fun setThemeColor(color: String, dark: Boolean) = activity.runOnUiThread { activity.applyBars(color, dark) }
 
     @JavascriptInterface fun setReaderMode(on: Boolean) = activity.runOnUiThread { activity.setReaderMode(on) }
+
+    /** 自动翻页开着时：阅读页一直亮着（平时 10 分钟没摸屏幕就交给系统锁屏） */
+    @JavascriptInterface fun keepAwake(on: Boolean) = activity.runOnUiThread { activity.setHoldAwake(on) }
 
     @JavascriptInterface fun saveProgress(bookId: Int, body: String) = app.progress.save(bookId, body)
 
@@ -156,7 +163,27 @@ class Bridge(private val activity: MainActivity) {
 
     @JavascriptInterface fun configured(): Boolean = app.config.configured
 
-    /** 首次设置页面：用配对码或密码连接书库 */
+    /** 诊断记录（设置 → 手机 App 里看，排查卡死、打不开用） */
+    @JavascriptInterface fun diagLog(): String = Diag.read()
+
+    @JavascriptInterface fun clearDiagLog() = Diag.clear()
+
+    /**
+     * 连接页用：在后台连接，结果用 window.onConnectResult({ok, error}) 告诉网页。
+     * 以前的 connect() 在网页的线程里等网络（最多二十几秒），旧的网页组件（单进程）会连 App 的界面一起卡住
+     */
+    @JavascriptInterface fun connectAsync(address: String, code: String, password: String) {
+        app.io.execute {
+            val err = try { app.link.connect(address, code, password, deviceName()) } catch (e: Exception) { "连接失败：${e.message ?: e.javaClass.simpleName}" }
+            val res = JSONObject().put("ok", err == null).put("error", err ?: "").toString()
+            activity.runOnUiThread {
+                if (err == null) activity.start()
+                else activity.web.evaluateJavascript("window.onConnectResult && window.onConnectResult($res)", null)
+            }
+        }
+    }
+
+    /** 首次设置页面（旧的写法，同步等结果）：用配对码或密码连接书库 */
     @JavascriptInterface fun connect(address: String, code: String, password: String): String {
         val err = app.link.connect(address, code, password, deviceName())
         if (err == null) activity.runOnUiThread { activity.start() }

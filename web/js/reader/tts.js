@@ -121,6 +121,32 @@ export function voiceFor(prefs, info, code) {
   return info.defaults[code] || info.default || ''
 }
 
+// ---------- 读法：在线合成（书库）还是本机语音，每台设备自己选 ----------
+
+const ENGINE_NOTE = {
+  server: '书库在线合成（微软自然语音等），声音更自然，要能连上书库。',
+  device: '用这台设备自带的语音，不经过书库，断网也能读。',
+}
+
+// 阅读设置里的“读法”切换（两个按钮，和别的阅读设置一样的样式）
+function engineSeg(cur, onPick) {
+  return h('div', { class: 'seg', role: 'group', 'aria-label': '读法', style: { marginBottom: '6px' } },
+    [['server', '在线合成'], ['device', '本机语音']].map(([v, l]) => h('button', {
+      type: 'button', class: cur === v ? 'on' : '', 'aria-pressed': cur === v ? 'true' : 'false', onclick: () => onPick(v),
+    }, l)))
+}
+
+const smallNote = (t) => h('small', { style: { display: 'block', fontSize: '12px', opacity: .7, marginBottom: '6px' } }, t)
+
+// 浏览器自带的语音（有的浏览器第一次取是空的，要等 voiceschanged）
+const BCP = { zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR', th: 'th-TH', ru: 'ru-RU', ar: 'ar-SA', en: 'en-US', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', vi: 'vi-VN', it: 'it-IT', pt: 'pt-BR' }
+function browserVoices(code) {
+  const ss = window.speechSynthesis
+  if (!ss) return []
+  const lang = (BCP[code] || code || 'zh').slice(0, 2)
+  try { return ss.getVoices().filter(v => String(v.lang).replace('_', '-').slice(0, 2) === lang) } catch { return [] }
+}
+
 // 阅读设置里的声音下拉框：只列这种语言的（和多语言的），选了记在这种语言下
 function voiceSelect(info, code, cur, onChange) {
   let list = info.voices || []
@@ -181,7 +207,26 @@ export class Narrator {
 
   get voice() { return voiceFor(this.prefs, this.info, this.code) }
 
-  get mode() { return this.forceBrowser || this.info?.engine === 'browser' ? 'browser' : 'server' }
+  // 读法：书库设置成“设备自带语音”、这台设备选了“本机语音”、书库语音暂时用不了（forceBrowser）时用浏览器的语音
+  get engineChoice() { return this.prefs.engine === 'device' ? 'device' : 'server' }
+  get serverUsable() { return this.info?.engine !== 'browser' }
+  get mode() { return this.forceBrowser || !this.serverUsable || this.engineChoice === 'device' ? 'browser' : 'server' }
+
+  setEngine(v) {
+    if (v === 'device' && !window.speechSynthesis) { toast('这个浏览器没有自带的语音，只能用在线合成', { error: true }); return }
+    this.prefs.engine = v === 'device' ? 'device' : 'server'
+    save(PREFS_KEY, this.prefs)
+    this.forceBrowser = false // 自己选了在线合成：书库语音重新试
+    toast(v === 'device' ? '改用本机语音朗读' : '改用书库在线合成', { duration: 1500 })
+    this.restartCurrent()
+  }
+
+  setDeviceVoice(name) {
+    const code = segLang('', this.code)
+    this.prefs.deviceVoices = Object.assign({}, this.prefs.deviceVoices, { [code || 'zh']: name })
+    save(PREFS_KEY, this.prefs)
+    this.restartCurrent()
+  }
 
   buildUI() {
     this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
@@ -361,16 +406,17 @@ export class Narrator {
 
   speakBrowser(seg) {
     this.setState('')
+    if (!window.speechSynthesis) { this.pause(); this.setState('朗读失败'); toast('这个浏览器没有自带的语音', { error: true }); return }
     speechSynthesis.cancel()
     const u = new SpeechSynthesisUtterance(seg.text)
-    const BCP = { zh: 'zh-CN', ja: 'ja-JP', ko: 'ko-KR', th: 'th-TH', ru: 'ru-RU', ar: 'ar-SA', en: 'en-US', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', vi: 'vi-VN', it: 'it-IT', pt: 'pt-BR' }
     // 文字是哪种就用哪种语言读；拉丁字母按书的语言（英、法、德……），中文书里的英文句子用英语
     const code = segLang(seg.text, this.code)
     const lang = BCP[code] || code
     u.lang = lang
-    const voices = speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-').startsWith(lang.slice(0, 2)))
-    // 优先选“自然”“增强”的声音（Edge 的 Natural、苹果的 Enhanced / Premium）
-    const pick = voices.find(v => /natural|neural|enhanced|premium|siri/i.test(v.name)) || voices.find(v => v.lang.replace('_', '-') === lang) || voices[0]
+    const voices = browserVoices(code)
+    // 自己在阅读设置里选过的 → “自然”“增强”的声音（Edge 的 Natural、苹果的 Enhanced / Premium）→ 这种语言的第一个
+    const mine = this.prefs.deviceVoices?.[code]
+    const pick = voices.find(v => v.name === mine) || voices.find(v => /natural|neural|enhanced|premium|siri/i.test(v.name)) || voices.find(v => v.lang.replace('_', '-') === lang) || voices[0]
     if (pick) u.voice = pick
     u.rate = this.speed
     const token = (this.token = {})
@@ -412,6 +458,7 @@ export class Narrator {
     for (const p of this.cache.values()) p.then(u => URL.revokeObjectURL(u)).catch(() => {})
     this.cache.clear()
     if (this.playing) { this.halt(); this.playing = true; this.speakCurrent() }
+    else window.speechSynthesis?.cancel() // 暂停着换了读法、音色：继续时从这句重新读
   }
 
   cycleTimer() {
@@ -442,16 +489,42 @@ export class Narrator {
     set('stop', () => this.stop())
   }
 
-  // 阅读设置里的“听书”部分
+  // 阅读设置里的“听书”部分：读法（在线合成 / 本机语音）、音色
   async sheetSection() {
     const info = await this.engineInfo()
     const parts = [h('h4', null, '听书')]
-    if (info.engine === 'browser' || this.forceBrowser) {
-      parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7 } }, '正在使用设备自带语音。在“设置 → 听书”里可以换成更自然的微软语音。'))
-    } else if (info.voices?.length) {
-      if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
-      parts.push(voiceSelect(info, this.code, this.voice, v => this.setVoice(v)))
+    const box = h('div')
+    parts.push(box)
+    if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+    const draw = () => {
+      const items = []
+      if (!this.serverUsable) {
+        items.push(smallNote('书库设置成了“设备自带语音”，现在用这台设备的语音朗读。管理员可以在“设置 → 听书”里换成在线合成。'))
+      } else {
+        const cur = this.engineChoice
+        items.push(engineSeg(cur, v => { this.setEngine(v); draw() }))
+        items.push(smallNote(this.forceBrowser && cur === 'server' ? '书库语音暂时用不了，现在临时用本机语音；点“在线合成”重新试。' : ENGINE_NOTE[cur]))
+      }
+      if (this.mode === 'server') {
+        if (info.voices?.length) items.push(voiceSelect(info, this.code, this.voice, v => this.setVoice(v)))
+      } else {
+        const code = segLang('', this.code)
+        const list = browserVoices(code)
+        if (list.length) {
+          const mine = this.prefs.deviceVoices?.[code]
+          const sel = h('select', { class: 'input', 'aria-label': '本机音色' },
+            h('option', { value: '', selected: !mine }, '自动挑选'),
+            list.map(v => h('option', { value: v.name, selected: v.name === mine }, v.name + (v.localService === false ? '（联网）' : ''))))
+          sel.onchange = () => this.setDeviceVoice(sel.value)
+          items.push(sel)
+        } else if (window.speechSynthesis) {
+          // 有的浏览器声音列表要过一会儿才有
+          speechSynthesis.addEventListener?.('voiceschanged', () => { if (box.isConnected) draw() }, { once: true })
+        }
+      }
+      fill(box, ...items)
     }
+    draw()
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
       h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
     return parts
@@ -555,7 +628,8 @@ export class NativeNarrator {
     if (this.voiceInfo) for (const c of new Set(['zh', 'en', 'th', 'ja', 'ko', 'ru', 'fr', 'de', 'es', 'vi', this.code])) byLang[c] = voiceFor(this.prefs, voices, c)
     call('tts', 'start', {
       book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
-      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), voices: byLang, lang: this.code, speed: this.speed, segments: this.pack(unit),
+      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), voices: byLang,
+      deviceVoice: this.prefs.deviceVoice || '', // 手机自带语音选的音色（旧版 App 不认，用 voice） lang: this.code, speed: this.speed, segments: this.pack(unit),
       // 打开这本书时书库进度的版本：App 自己存进度时带上，别的设备读到了后面就不直接覆盖
       progressBase: this.shell.base ?? null,
     })
@@ -570,6 +644,7 @@ export class NativeNarrator {
         this.playing = !!e.playing
         if (e.timer !== undefined) this.timerMin = e.timer
         if (e.speed) { this.prefs.speed = e.speed; save(PREFS_KEY, this.prefs) }
+        if (e.engine) this.engineNow = e.engine // 正在用的读法（连不上书库时 App 会临时改用手机语音）
         this.setState(e.status || '')
         this.updateUI()
         return
@@ -646,10 +721,10 @@ export class NativeNarrator {
   }
 
   setVoice(v, device) {
-    if (device) this.prefs.voice = v // 手机自带语音：不分语言
+    if (device) this.prefs.deviceVoice = v // 手机自带语音：不分语言，和书库的声音分开记
     else rememberVoice(this.prefs, this.code, v)
     save(PREFS_KEY, this.prefs)
-    call('tts', 'voice', v)
+    call('tts', device ? 'deviceVoice' : 'voice', v)
   }
 
   setState(t) { this.stateEl.textContent = t || '' }
@@ -670,28 +745,40 @@ export class NativeNarrator {
 
   destroy() { if (this.active) call('tts', 'stop', ''); this.cleanup(); this.off(); this.el.remove() }
 
+  // 换读法：记在 App 里（“设置 → 手机 App”里也是这一项），正在听的话马上换
+  setEngine(v) {
+    call('setPref', 'tts_engine', v)
+    if (this.active) { this.engineNow = v; call('tts', 'engine', v) }
+    toast(v === 'device' ? '改用手机自带语音朗读' : '改用书库在线合成', { duration: 1500 })
+  }
+
   async sheetSection() {
     const parts = [h('h4', null, '听书')]
-    const app = callJSON('prefs') || {}
-    if (app.tts_engine === 'device') {
-      const voices = callJSON('ttsVoices') || []
-      parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7, marginBottom: '6px' } }, '正在用手机自带语音。在“设置 → 手机 App”里可以换成书库的微软自然语音。'))
-      if (voices.length) {
-        const sel = h('select', { class: 'input', 'aria-label': '音色' }, voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.voice }, v.name)))
-        sel.onchange = () => this.setVoice(sel.value, true)
-        parts.push(sel)
-      }
-    } else {
-      try {
-        const r = await voiceInfo()
-        if (r.voices?.length) {
-          if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
-          parts.push(voiceSelect(r, this.code, voiceFor(this.prefs, r, this.code), v => this.setVoice(v)))
+    const box = h('div')
+    parts.push(box)
+    let info = null
+    try { info = await voiceInfo() } catch {}
+    if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+    const draw = () => {
+      const app = callJSON('prefs') || {}
+      const cur = app.tts_engine === 'device' ? 'device' : 'server'
+      const items = [engineSeg(cur, v => { this.setEngine(v); draw() })]
+      if (cur === 'server' && this.active && this.engineNow === 'device') items.push(smallNote('书库语音暂时用不了，现在临时用手机语音；网络好了点“在线合成”重新试。'))
+      else if (cur === 'server' && !info && net.route === 'offline') items.push(smallNote('现在连不上书库，听书时先用手机自带语音。'))
+      else items.push(smallNote(ENGINE_NOTE[cur] + (cur === 'device' ? '' : '锁屏、切到别的 App 也会继续读。')))
+      if (cur === 'device') {
+        const voices = callJSON('ttsVoices') || []
+        if (voices.length) {
+          const sel = h('select', { class: 'input', 'aria-label': '音色' }, voices.map(v => h('option', { value: v.id, selected: v.id === this.prefs.deviceVoice }, v.name)))
+          sel.onchange = () => this.setVoice(sel.value, true)
+          items.push(sel)
         }
-      } catch {
-        if (net.route === 'offline') parts.push(h('small', { style: { display: 'block', fontSize: '12px', opacity: .7 } }, '离线时用手机自带语音朗读。'))
+      } else if (info?.voices?.length) {
+        items.push(voiceSelect(info, this.code, voiceFor(this.prefs, info, this.code), v => this.setVoice(v)))
       }
+      fill(box, ...items)
     }
+    draw()
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
       h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
     return parts
