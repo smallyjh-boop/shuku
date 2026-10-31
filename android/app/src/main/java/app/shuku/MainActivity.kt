@@ -59,8 +59,18 @@ class MainActivity : Activity() {
     private var lastGone = 0L
     private var reopenUrl: String? = null
 
+    /** 阅读时屏幕常亮：最后一次摸屏幕、按键的时间；网页要求一直亮着（自动翻页）*/
+    private var lastTouch = SystemClock.uptimeMillis()
+    private var holdAwake = false
+    private val idleCheck = Runnable { refreshKeepScreen() }
+    /** 退到后台的时间（诊断记录用） */
+    private var stoppedAt = 0L
+    /** 因为连不上显示着“连不上书库”的连接页：网络恢复、能连上书库时自动重新打开 */
+    private var showingOffline = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = java.lang.ref.WeakReference(this)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         bridge = Bridge(this)
         web = WebView(this)
@@ -85,7 +95,12 @@ class MainActivity : Activity() {
         super.onStart()
         started = true
         visibleCount++
+        if (stoppedAt > 0) Diag.log("回到前台（在后台 ${(SystemClock.elapsedRealtime() - stoppedAt) / 60000} 分钟）")
+        stoppedAt = 0
+        web.resumeTimers()
         web.onResume()
+        lastTouch = SystemClock.uptimeMillis()
+        refreshKeepScreen()
         // 网页在后台时崩溃重建过：现在才打开（在后台就重新打开大 PDF、漫画，多半又会崩）
         reopenUrl?.let { u ->
             reopenUrl = null
@@ -94,6 +109,7 @@ class MainActivity : Activity() {
         if (app.config.configured) app.io.execute {
             val was = app.link.base
             if (app.link.probe() != was) Events.emit("network", "{}")
+            if (app.link.online) onOnline()
             app.progress.flush()
             if (app.link.online) Updater.checkQuietly(this)
         }
@@ -109,11 +125,19 @@ class MainActivity : Activity() {
         super.onStop()
         started = false
         visibleCount--
-        // 听书时网页还要继续给后台服务供句子，不能暂停
-        if (NarrationService.instance == null) web.onPause()
+        stoppedAt = SystemClock.elapsedRealtime()
+        // 听书时网页还要继续给后台服务供句子，不能暂停。
+        // 不在听书：连网页里的计时器也停掉（onPause 停不了 JS 的定时器，书架每 6 秒问一次书库、阅读器每秒计时，
+        // 老平板放一夜就是几千次请求；断网时每次还要重新探测线路）。回到前台时 resumeTimers
+        if (NarrationService.instance == null) {
+            web.onPause()
+            web.pauseTimers()
+        }
+        Diag.log("退到后台" + if (NarrationService.instance != null) "（在听书）" else "")
     }
 
     override fun onDestroy() {
+        app.main.removeCallbacks(idleCheck)
         Events.detach(web)
         voicesTts?.shutdown()
         web.destroy()
@@ -123,6 +147,7 @@ class MainActivity : Activity() {
     // ---------- 打开书库 ----------
 
     fun start() {
+        showingOffline = false
         if (!app.config.configured) {
             pageOrigin = null
             web.loadUrl("file:///android_asset/setup.html")
@@ -135,6 +160,7 @@ class MainActivity : Activity() {
                 pageOrigin = originOf(target)
                 web.loadUrl("$target/")
             }
+            Diag.log("打开书库：" + (if (base != null) "连上了 ${app.link.route}" else "连不上，用手机上缓存的网页"))
             if (base != null) {
                 app.config.lastBase = base
                 app.progress.flush()
@@ -176,7 +202,10 @@ class MainActivity : Activity() {
         s.userAgentString = s.userAgentString + " ShukuApp/" + BuildConfig.VERSION_NAME + (if (EInk.detected) " ShukuEInk" else "")
         // 墨水屏：不要拉到头时的光晕动画（墨水屏上是一片残影）
         if (EInk.detected) web.overScrollMode = View.OVER_SCROLL_NEVER
-        web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        // 网页进程的优先级：一般设备上退到后台也保持“重要”（后台听书时网页还要供句子）；
+        // 内存小的老设备（armv7 平板等）退到后台就放开，内存不够时系统可以先回收它（后台听书没网页也能自己接着读），
+        // 不然系统只好去挤别的进程，整台设备卡住
+        web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, Diag.lowEnd)
         web.addJavascriptInterface(bridge, "ShukuNative")
         Events.attach(web)
 
@@ -205,7 +234,11 @@ class MainActivity : Activity() {
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 // 第一次打开就没网、手机上还没有缓存：显示连接页，可以重试
-                if (view === web && request.isForMainFrame && request.url.scheme != "file") web.loadUrl("file:///android_asset/setup.html#offline")
+                if (view === web && request.isForMainFrame && request.url.scheme != "file") {
+                    Diag.log("网页打不开（${error.errorCode} ${error.description}）：${request.url}")
+                    web.loadUrl("file:///android_asset/setup.html#offline")
+                    showingOffline = app.config.configured
+                }
             }
 
             /**
@@ -213,6 +246,7 @@ class MainActivity : Activity() {
              * 后台听书也会停。这里换一个新的 WebView 重新打开当前页，返回 true 表示处理好了
              */
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                Diag.log("网页进程没了（" + (if (detail.didCrash()) "崩溃" else "被系统回收，多半是内存不够") + "）" + if (started) "" else "，App 在后台")
                 if (view === web) recreateWeb(view)
                 return true
             }
@@ -341,7 +375,20 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() = goBack()
 
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        touched()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /** 摸了屏幕、按了键：阅读时屏幕常亮从现在起再算 */
+    private fun touched() {
+        val wasIdle = readerMode && SystemClock.uptimeMillis() - lastTouch >= KEEP_AWAKE_MS
+        lastTouch = SystemClock.uptimeMillis()
+        if (wasIdle) refreshKeepScreen()
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) touched()
         // 墨水屏阅读器、翻页笔的翻页键
         val page = event.keyCode == KeyEvent.KEYCODE_PAGE_DOWN || event.keyCode == KeyEvent.KEYCODE_PAGE_UP
         if (page && readerMode) {
@@ -363,13 +410,29 @@ class MainActivity : Activity() {
 
     fun setReaderMode(on: Boolean) {
         readerMode = on
+        if (!on) holdAwake = false
+        lastTouch = SystemClock.uptimeMillis()
+        refreshKeepScreen()
+    }
+
+    /** 网页要求阅读时一直亮着（自动翻页开着的时候），不按“多久没摸屏幕”熄屏 */
+    fun setHoldAwake(on: Boolean) {
+        holdAwake = on
+        lastTouch = SystemClock.uptimeMillis()
         refreshKeepScreen()
     }
 
     fun refreshKeepScreen() {
-        // 墨水屏不用常亮（画面本来就留着），常亮反而让设备不休眠、费电：默认关
-        if (readerMode && app.config.bool("keep_screen_on", !EInk.detected)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        app.main.removeCallbacks(idleCheck)
+        // 墨水屏不用常亮（画面本来就留着），常亮反而让设备不休眠、费电：默认关。
+        // 常亮也只在最近 10 分钟摸过屏幕（或者自动翻页开着）时：以前停在书里不管，屏幕会亮一整夜，
+        // 老平板一晚上不休眠，第二天再打开容易卡死。超过 10 分钟交给系统的自动锁屏
+        val want = readerMode && app.config.bool("keep_screen_on", !EInk.detected)
+        val idle = SystemClock.uptimeMillis() - lastTouch
+        if (want && (holdAwake || idle < KEEP_AWAKE_MS)) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (!holdAwake) app.main.postDelayed(idleCheck, KEEP_AWAKE_MS - idle + 500)
+        } else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     // ---------- 状态栏、导航栏颜色跟着网页 ----------
@@ -459,11 +522,23 @@ class MainActivity : Activity() {
         return if (voicesReady) voicesTts else null
     }
 
+    /** 网络变了、书库连得上了（ShukuApp 在后台线程调用） */
+    fun onOnline() = runOnUiThread {
+        if (showingOffline && !isFinishing && !isDestroyed) {
+            Diag.log("网络恢复，重新打开书库")
+            start()
+        }
+    }
+
     fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
     companion object {
         private const val REQ_FILE = 11
         private const val REQ_NOTIFY = 12
+        /** 阅读时多久没摸屏幕就不再保持常亮 */
+        private const val KEEP_AWAKE_MS = 10 * 60_000L
+
+        @Volatile var current: java.lang.ref.WeakReference<MainActivity>? = null
 
         /** 书库 App 的界面在前台（看得见）。只在主线程改 */
         @Volatile private var visibleCount = 0

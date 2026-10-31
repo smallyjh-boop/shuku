@@ -67,6 +67,7 @@ const P = {
   logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11"/>',
   pages: '<rect x="3" y="4" width="8" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/>',
   play: '<path d="M7 4.5v15l13-7.5z"/>',
+  autoturn: '<path d="M5 3.5h9l5 5V20.5H5z"/><path d="M14 3.5v5h5"/><path d="M10 11v6.5l5-3.25z"/>',
   pause: '<path d="M7 4.5v15M17 4.5v15"/>',
   volume: '<path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   headphones: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4.5" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4.5" height="6.5" rx="1.5"/>',

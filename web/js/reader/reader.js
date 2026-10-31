@@ -8,6 +8,7 @@ import { putProgress, queueProgress, takeQueued, rememberUser, setActiveBook } f
 import { Notes } from './notes.js'
 import { placePopup } from './dict.js'
 import { targetLang, setTargetLang, loadDefaultLang, langOptions, translateTexts, needsTranslation } from './translate.js'
+import { AutoTurn } from './autoturn.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -207,6 +208,7 @@ class Reader {
     }
     if (this.destroyed) return
     this.loading.remove()
+    this.auto = new AutoTurn(this)
     this.applyPrefs()
     this.drawPanel()
     this.ttsBtn.hidden = this.ttsTool.hidden = !this.engine.ttsSegments // 漫画没有文字，不显示听书
@@ -284,6 +286,7 @@ class Reader {
         tool('back', '上一页', () => this.engine?.prev()),
         tool('next', '下一页', () => this.engine?.next()),
         (this.ttsTool = tool('headphones', '听书', () => this.toggleNarration())),
+        (this.autoTool = tool('autoturn', '自动翻页', () => this.toggleAuto())),
         (this.trTool = tool('translate', '翻译', () => this.toggleTranslate())),
         // 快速排版：三档字号（PDF 是三档缩放），点一下就换，不用进设置调细节。原来的“全屏”按钮用处不大，换成这个（F 键还能全屏）
         (this.quickTool = tool('textsize', '字号', () => this.toggleQuick())),
@@ -382,6 +385,7 @@ class Reader {
 
   // ---------- 听书 ----------
   async toggleNarration() {
+    this.auto?.stop() // 听书自己会翻页
     if (!this.narrator) await this.makeNarrator()
     if (this.narrator.active) this.narrator.toggle()
     else { this.showUI(false); this.narrator.start() }
@@ -395,6 +399,16 @@ class Reader {
   }
 
   afterUserNav = debounce(() => this.narrator?.active && this.narrator.jumpToView(), 600)
+
+  // ---------- 自动翻页（按这个人平时的阅读速度，见 autoturn.js） ----------
+  toggleAuto() {
+    if (!this.auto) return
+    this.closeOverlays()
+    this.auto.toggle()
+    this.syncAutoTool()
+  }
+
+  syncAutoTool() { this.autoTool?.classList.toggle('on', !!this.auto?.on) }
 
   // ---------- 翻译本页 ----------
   // EPUB、TXT 这类：译文显示在书里每段原文后面（引擎自己做，翻页时接着翻）；
@@ -533,6 +547,7 @@ class Reader {
     this.notes?.destroy()
     this.saveProgress(true)
     this.narrator?.destroy()
+    this.auto?.destroy()
     this.engine?.destroy()
     for (const c of this.cleanups) c()
     this.root.remove()
@@ -629,6 +644,7 @@ class Reader {
     else if (k === 'f') this.fullscreen()
     else if (k === 'Enter') this.showUI(!this.root.classList.contains('ui'))
     else if (k === 'r') this.toggleNarration()
+    else if (k === 'a') this.toggleAuto()
     if (['ArrowRight', 'ArrowLeft', 'PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp'].includes(k)) this.afterUserNav()
   }
 
@@ -644,6 +660,7 @@ class Reader {
     // 是不是自己翻的页（刚有过操作）：是的话，以后存进度时以这台为准
     const moved = !!this.loc && String(location) !== String(this.loc.location)
     if (moved && Date.now() - (this.lastAct || 0) < 15000) this.userMoved = true
+    const act = this.lastAct // 翻页前最后一次操作（自动翻页看这次是不是自己翻的）
     this.markActivity()
     this.loc = { location, fraction }
     this.slider.value = Math.round((fraction || 0) * 1000)
@@ -660,6 +677,7 @@ class Reader {
     this.showTimeLeft(units)
     if (moved) this.chipTick()
     if (fraction >= 0.995) this.onEnd()
+    if (moved || !this.auto?.page) this.auto?.onPage({ fraction, units }, act)
     // PDF 的翻译面板开着：翻到别的页时跟着换
     if (this.trOpen && this.engine?.translateKey?.() !== this.trKey) this.drawTranslateSoon()
   }
@@ -1085,6 +1103,16 @@ class Reader {
         if (!this.narrator) await this.makeNarrator()
         fill(ttsBox, ...(await this.narrator.sheetSection()))
       })()
+    }
+    if (this.auto) {
+      const a = this.auto
+      const btn = (label, fn) => h('button', { class: 'btn small', type: 'button', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: fn }, label)
+      parts.push(h('h4', null, '自动翻页'),
+        h('div', { class: 'row', style: { gap: '8px' } },
+          btn(a.on ? '关掉自动翻页' : '开始自动翻页', () => this.toggleAuto()),
+          btn('重新学习', () => { a.forget(); this.drawSheet() })),
+        h('small', { style: { display: 'block', marginTop: '6px', fontSize: '12px', opacity: .7 } },
+          '照你平时翻页的速度自动翻，字多的页停久一点。自己翻页时会一直学；开着时嫌慢自己翻、太快翻回去，它都会跟着改。' + a.summary() + '。'))
     }
     if (this.engine) {
       parts.push(h('h4', null, '进度'), h('div', { class: 'row', style: { gap: '8px' } },

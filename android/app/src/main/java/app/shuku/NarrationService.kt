@@ -74,6 +74,7 @@ class NarrationService : Service() {
     private var progressBase = -1L // 书库进度的版本（网页给的），-1：旧版网页没给，不带
     private var cover: Bitmap? = null
     private var voice = ""
+    private var deviceVoice = ""     // 手机自带语音的音色（阅读设置里选的），空的话按语言挑
     private var lang = ""            // 书的语言（zh、en、th…）：手机自带语音读拉丁字母时按它选
     private val voices = HashMap<String, String>() // 每种语言用哪个声音（网页给的）：从书库取的句子按文字挑
     private var speed = 1.0
@@ -188,6 +189,7 @@ class NarrationService : Service() {
                 listenMs = 0
                 lastSave = SystemClock.elapsedRealtime()
                 voice = j.optString("voice")
+                deviceVoice = j.optString("deviceVoice")
                 lang = j.optString("lang")
                 voices.clear()
                 j.optJSONObject("voices")?.let { o -> o.keys().forEach { k -> o.optString(k).takeIf { it.isNotEmpty() }?.let { voices[k] = it } } }
@@ -245,6 +247,20 @@ class NarrationService : Service() {
                 restartCurrent()
             }
             "timer" -> setTimer(arg.toIntOrNull() ?: 0)
+            "deviceVoice" -> {
+                deviceVoice = arg
+                if (useDevice) restartCurrent()
+            }
+            "engine" -> {
+                // 阅读页里换读法：device 手机自带语音，server 书库在线合成。记住，下次听书也用它
+                val dev = arg == "device"
+                app.config.prefs.edit().putString("tts_engine", if (dev) "device" else "server").apply()
+                deviceBroken = false
+                netFails = 0
+                handler.removeCallbacks(retryTask)
+                useDevice = dev || !app.link.online
+                restartCurrent()
+            }
         }
         publish()
     }
@@ -684,7 +700,8 @@ class NarrationService : Service() {
             return
         }
         val loc = localeFor(seg.text)
-        val picked = if (voice.isNotEmpty()) t.voices?.firstOrNull { it.name == voice && it.locale.language == loc.language } else null
+        val want = deviceVoice.ifEmpty { voice }
+        val picked = if (want.isNotEmpty()) t.voices?.firstOrNull { it.name == want && it.locale.language == loc.language } else null
         if (picked != null) t.voice = picked else if (t.voice?.locale?.language != loc.language) t.language = loc
         t.setSpeechRate(speed.toFloat())
         utterance = seg.id
@@ -805,6 +822,7 @@ class NarrationService : Service() {
     // ---------- 状态：网页、锁屏、通知栏、手表 ----------
 
     private fun stateJson(): JSONObject = JSONObject().put("active", true).put("playing", playing).put("speed", speed).put("timer", timerMin)
+        .put("engine", if (useDevice) "device" else "server")
         .put("status", status).put("title", book.optString("title")).put("author", book.optString("author"))
         .put("text", queue.getOrNull(index)?.text ?: "").put("volume", volumePercent())
 

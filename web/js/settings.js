@@ -839,7 +839,7 @@ function appSection(ctx) {
     return h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, label), hint ? h('div', { class: 'h' }, hint) : null), h('label', { class: 'switch' }, input, h('i')))
   }
   const ttsSel = h('select', { class: 'input', style: { width: 'auto' } },
-    [['server', '书库的语音（微软自然语音等）'], ['device', '手机自带语音（不联网也能用）']].map(([v, l]) => h('option', { value: v, selected: (prefs.tts_engine || 'server') === v }, l)))
+    [['server', '在线合成（书库的微软自然语音等）'], ['device', '本机语音（手机自带，不联网也能用）']].map(([v, l]) => h('option', { value: v, selected: (prefs.tts_engine || 'server') === v }, l)))
   ttsSel.onchange = () => call('setPref', 'tts_engine', ttsSel.value)
   const limitMb = +(prefs.download_limit_mb || 0)
   const limitOpts = [...new Map([...DL_LIMITS, [limitMb, `${limitMb} MB`]])].sort((a, b) => a[0] - b[0])
@@ -875,7 +875,7 @@ function appSection(ctx) {
   return sec('手机 App', `书库 App ${call('version') || ''}。`,
     h('div', { class: 'stack', style: { gap: '4px' } },
       sw('volume_keys', '音量键翻页', '阅读时按音量键上一页、下一页'),
-      sw('keep_screen_on', '阅读时屏幕常亮'),
+      sw('keep_screen_on', '阅读时屏幕常亮', '10 分钟没碰屏幕就交给系统自动锁屏；自动翻页时一直亮着'),
       sw('auto_download', '自动下载在读的书', '连着内网时，把“在读”里的书下载到手机'),
       sw('auto_clean_finished', '读完的书自动从手机删掉', '只删下载以后才读完的书（打开 App、连上书库时检查）；以前就读完、专门下回来重温的书不会删'),
       h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '下载到手机最多占用'), h('div', { class: 'h' }, '超过时先删最早下载、已经读完的书')), limitSel),
@@ -884,5 +884,20 @@ function appSection(ctx) {
         h('button', { class: 'btn', onclick: e => syncWatch(e.currentTarget) }, icon('watch'), '连接手表'),
         h('button', { class: 'btn quiet', onclick: async () => { if (await confirmDialog({ title: '断开这台手机？', message: '下载到手机的书会保留。之后需要重新扫码或输入配对码。', ok: '断开' })) call('logout') } }, '断开并重新配对')),
       h('div', { class: 'sub-title', style: { margin: '6px 0 6px' } }, '下载到手机的书'),
-      dl))
+      dl,
+      diagBox()))
+}
+
+// 诊断记录：App 记下的回到前台、网页打不开、主线程卡住等（出问题时拍下来发给作者）
+function diagBox() {
+  if (typeof window.ShukuNative?.diagLog !== 'function') return null
+  const pre = h('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 'calc(11.5px * var(--ui-scale, 1))', maxHeight: '320px', overflow: 'auto', margin: '8px 0' } })
+  const show = () => { pre.textContent = call('diagLog') || '（没有记录）'; pre.scrollTop = pre.scrollHeight }
+  const box = h('details', { style: { marginTop: '14px' } },
+    h('summary', null, '诊断记录（App 卡住、打不开时看这里）'), pre,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn small', type: 'button', onclick: show }, '刷新'),
+      h('button', { class: 'btn small quiet', type: 'button', onclick: () => { call('clearDiagLog'); show() } }, '清空')))
+  box.addEventListener('toggle', () => { if (box.open) show() })
+  return box
 }

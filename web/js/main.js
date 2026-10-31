@@ -284,6 +284,8 @@ async function route() {
 }
 
 addEventListener('hashchange', route)
+// 回到前台马上问一次（后台时没问）
+document.addEventListener('visibilitychange', () => { if (!document.hidden && pollTimer) pollStatus() })
 
 // ---------- 后台动态：入库完成后提示并刷新 ----------
 
@@ -328,7 +330,8 @@ function showEvents(evs) {
 }
 
 async function pollStatus() {
-  if (!ctx.user) return
+  // 页面在后台（熄屏、切到别的 App）时不问：一夜就是几千次请求，断网时每次还要重新探测线路
+  if (!ctx.user || document.hidden) return
   try {
     const s = await api('/api/status')
     const busy = !!(s.inbox.pending || s.scan.running)

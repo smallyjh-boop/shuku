@@ -302,6 +302,8 @@ class ListenService : Service() {
             serverError = ""
             more = false
         }
+        // 自己选了“手表语音”：一直用手表自带语音，不再试书库语音
+        if (userDevice()) { useDevice = true; deviceOnly = true }
         bookId = id
         title = bookTitle
         val f = BookFiles(this, id)
@@ -434,14 +436,16 @@ class ListenService : Service() {
         acquireLock()
         moreText()
         // 已经合成好的（包括提前准备的离线听书）：直接放
-        readyClip(seg)?.takeIf { it.file.exists() }?.let {
+        // 选了手表语音就一直用手表语音（不放之前合成好的书库语音，免得声音换来换去）
+        val mine = userDevice()
+        if (!mine) readyClip(seg)?.takeIf { it.file.exists() }?.let {
             startPlayer(seg, it.file)
             prefetch()
             return
         }
         if (useDevice) {
             // 书库语音用不了：离线听书包里有这一句（包括别的语速的）就放它，没有就用手表自带语音读
-            val f = packFile(seg)
+            val f = if (mine) null else packFile(seg)
             if (f != null) {
                 startPlayer(seg, f)
                 prefetch()
@@ -997,6 +1001,11 @@ class ListenService : Service() {
 
     /** 两种语音都用不了 */
     private fun deviceTrouble(why: String) {
+        if (userDevice()) {
+            // 自己选的手表语音用不了：不偷偷换回书库语音，告诉用户可以换读法
+            pauseAt("$why。可以把读法换成“书库语音”")
+            return
+        }
         val server = if (serverError.isNotEmpty() && !deviceOnly) "书库语音：$serverError；" else ""
         useDevice = false
         pauseAt(server + why)
@@ -1037,6 +1046,30 @@ class ListenService : Service() {
         clearAudio()
         releasePlayer()
         farBlockedUntil = 0
+        if (playing) {
+            tts?.stop()
+            playCurrent()
+        } else prefetch()
+        publish()
+    }
+
+    /** 读法：用户选了手表自带语音（不经过书库合成） */
+    private fun userDevice() = app.config.str(VOICE_KEY, "server") == "device"
+
+    /** 换了读法（听书页、阅读页里选的）：马上按新的读法读这一句 */
+    private fun applyVoiceSource() {
+        if (userDevice()) {
+            useDevice = true
+            deviceOnly = true
+        } else {
+            useDevice = false
+            deviceOnly = false
+            deviceCount = 0
+            serverError = ""
+            errorsInRow = 0
+            farBlockedUntil = 0
+        }
+        releasePlayer()
         if (playing) {
             tts?.stop()
             playCurrent()
@@ -1349,6 +1382,16 @@ class ListenService : Service() {
         fun cycleSpeed() { instance?.cycleSpeed() }
         fun cycleTimer() { instance?.cycleTimer() }
         fun setMore(on: Boolean) { instance?.setMore(on) }
+
+        /** 读法：server 书库在线合成，device 手表自带语音。记住，下次听书也用它 */
+        const val VOICE_KEY = "listen_voice"
+
+        fun voiceSource(): String = if (WearApp.app.config.str(VOICE_KEY, "server") == "device") "device" else "server"
+
+        fun setVoiceSource(v: String) {
+            WearApp.app.config.prefs.edit().putString(VOICE_KEY, if (v == "device") "device" else "server").apply()
+            instance?.applyVoiceSource()
+        }
 
         /** 用户同意用手表扬声器读 */
         fun useSpeaker() {

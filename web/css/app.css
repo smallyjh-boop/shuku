@@ -1066,6 +1066,23 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
 .r-backchip[hidden] { display: none; }
 .reader.ui .r-backchip { bottom: calc(126px + var(--safe-b)); }
 
+/* 自动翻页开着时：上方一条小提示（这页大约几秒、慢一点、快一点、暂停、关掉） */
+.r-auto {
+  position: absolute; left: 50%; top: calc(8px + var(--safe-t)); z-index: 34; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 2px; max-width: calc(100% - 24px); height: 36px; padding: 0 4px 0 12px; border-radius: 18px;
+  border: 1px solid var(--r-rule); background: var(--r-ui); color: var(--r-ui-fg); font-size: calc(12.5px * var(--ui-scale, 1));
+  white-space: nowrap; font-variant-numeric: tabular-nums; box-shadow: 0 8px 22px -12px rgba(0,0,0,.45); transition: top .22s;
+}
+.r-auto > svg { width: 16px; height: 16px; flex: none; margin-right: 6px; }
+.r-auto > span { overflow: hidden; text-overflow: ellipsis; margin-right: 4px; }
+.r-auto .icon-btn { width: 32px; height: 32px; flex: none; }
+.r-auto .icon-btn svg { width: 16px; height: 16px; }
+.r-auto[hidden] { display: none; }
+.reader.ui .r-auto { top: calc(62px + var(--safe-t)); }
+html.eink .r-auto { box-shadow: none; border: 2px solid var(--r-rule); }
+/* 底栏八个按钮：窄屏手机上挤一挤 */
+@media (max-width: 420px) { .r-tools .icon-btn { padding: 0 7px; } }
+
 /* 读完：下一卷 */
 .r-end {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(30px + var(--safe-b)); z-index: 36; width: 420px; max-width: calc(100vw - 32px); width: min(420px, calc(100vw - 32px));

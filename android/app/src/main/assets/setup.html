@@ -46,7 +46,7 @@
   <section class="card offline" id="offline">
     <h2>连不上书库</h2>
     <p>手机现在连不上书库，手机上也还没有可以离线看的内容。请确认在家里的 Wi-Fi 下，或者已经打开 Tailscale。</p>
-    <button class="btn" onclick="ShukuNative.retry()">重试</button>
+    <button class="btn" id="retry">重试</button>
   </section>
 
   <section class="card">
@@ -72,7 +72,10 @@
 </main>
 <script>
   var usePw = false
-  if (location.hash === '#offline' && window.ShukuNative && ShukuNative.configured()) document.getElementById('offline').style.display = 'block'
+  if (location.hash === '#offline' && window.ShukuNative && ShukuNative.configured()) {
+    document.getElementById('offline').style.display = 'block'
+  }
+  document.getElementById('retry').onclick = function () { this.disabled = true; this.textContent = '正在重试…'; ShukuNative.retry() }
   document.getElementById('switch').onclick = function () {
     usePw = !usePw
     document.getElementById('codeRow').hidden = usePw
@@ -90,11 +93,15 @@
     if (!addr) { err.textContent = '请填写书库地址'; return }
     if (!usePw && code.length < 8) { err.textContent = '配对码是 8 位'; return }
     btn.disabled = true; btn.textContent = '正在连接…'
+    var done = function (r) { if (!r.ok) { err.textContent = r.error; btn.disabled = false; btn.textContent = '连接' } }
+    // 在后台连接（不让网页、App 的界面跟着等网络），连上了 App 直接打开书库，连不上回调 onConnectResult
+    if (ShukuNative.connectAsync) {
+      window.onConnectResult = done
+      ShukuNative.connectAsync(addr, code, pw)
+      return
+    }
     // 连接要访问网络，放到下一帧，先让按钮状态显示出来
-    setTimeout(function () {
-      var r = JSON.parse(ShukuNative.connect(addr, code, pw))
-      if (!r.ok) { err.textContent = r.error; btn.disabled = false; btn.textContent = '连接' }
-    }, 30)
+    setTimeout(function () { done(JSON.parse(ShukuNative.connect(addr, code, pw))) }, 30)
   }
 </script>
 </body>
