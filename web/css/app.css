@@ -100,8 +100,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .icon-btn.on { color: var(--accent); }
 
 .field { display: grid; gap: 6px; }
-.field > span { font-size: calc(13px * var(--ui-scale, 1)); color: var(--ink-2); }
-.field small { color: var(--ink-3); font-size: calc(12.5px * var(--ui-scale, 1)); line-height: 1.5; }
+.field > span { font-size: calc(15px * var(--ui-scale, 1)); font-weight: 500; color: var(--ink); }
+.field small { color: var(--ink-3); font-size: calc(13.5px * var(--ui-scale, 1)); line-height: 1.5; }
 .input, select.input, textarea.input {
   width: 100%; height: 38px; padding: 0 11px;
   border: 1px solid var(--rule-strong); border-radius: var(--radius);
@@ -353,7 +353,7 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .files li b { width: 52px; font-weight: 600; font-size: calc(12.5px * var(--ui-scale, 1)); letter-spacing: .03em; }
 .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 14px; }
 .form-grid .full { grid-column: 1 / -1; }
-.sub-title { font-size: calc(14px * var(--ui-scale, 1)); font-weight: 600; margin: 26px 0 12px; color: var(--ink-2); }
+.sub-title { font-size: calc(15.5px * var(--ui-scale, 1)); font-weight: 600; margin: 26px 0 12px; color: var(--ink); }
 
 /* ---------- 整理页 ---------- */
 
@@ -386,12 +386,13 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .settings { max-width: 760px; }
 .set-sec { padding: 24px 0 28px; border-bottom: 1px solid var(--rule); }
 .set-sec:first-child { padding-top: 0; }
-.set-sec h2 { font-family: var(--serif); font-size: calc(19px * var(--ui-scale, 1)); margin-bottom: 4px; }
-.set-sec > p { margin: 0 0 18px; color: var(--ink-3); font-size: calc(13.5px * var(--ui-scale, 1)); }
+.set-sec h2 { font-family: var(--serif); font-size: calc(21px * var(--ui-scale, 1)); margin-bottom: 4px; }
+.set-sec > p { margin: 0 0 18px; color: var(--ink-3); font-size: calc(14.5px * var(--ui-scale, 1)); }
 .set-row { display: flex; align-items: center; gap: 16px; padding: 10px 0; }
 .set-row > div:first-child { flex: 1; }
-.set-row .l { font-size: calc(14.5px * var(--ui-scale, 1)); }
-.set-row .h { font-size: calc(12.5px * var(--ui-scale, 1)); color: var(--ink-3); }
+.set-row .l { font-size: calc(16px * var(--ui-scale, 1)); font-weight: 500; }
+.set-row .h { font-size: calc(13.5px * var(--ui-scale, 1)); color: var(--ink-3); }
+.set-sec .seg button { height: 36px; font-size: calc(14.5px * var(--ui-scale, 1)); }
 .stack { display: grid; gap: 14px; }
 .lib { border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; background: var(--surface); display: grid; gap: 12px; }
 .lib .head { display: flex; gap: 10px; align-items: center; }
@@ -621,24 +622,28 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 .r-sheet-hd .grab { display: none; }
 .r-scrim { position: absolute; inset: 0; z-index: 29; display: none; }
 .reader.overlay .r-scrim { display: block; }
-.r-sheet h4 { margin: 14px 0 8px; font-size: calc(12.5px * var(--ui-scale, 1)); font-weight: 500; color: var(--r-dim); }
+/* 分区标题（主题、排版、听书……）：大一点、深一点，一眼找到；下拉框和别的选项一样大 */
+.r-sheet h4 { margin: 18px 0 10px; font-size: calc(15.5px * var(--ui-scale, 1)); font-weight: 600; color: var(--r-ui-fg); }
 .r-sheet h4:first-child { margin-top: 0; }
 .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
 .swatches button { width: 44px; height: 44px; border-radius: 50%; cursor: pointer; border: 1px solid var(--r-rule); position: relative; font-family: var(--serif); font-weight: 600; font-size: calc(14px * var(--ui-scale, 1)); }
 .swatches button.on { box-shadow: 0 0 0 2px var(--r-bg), 0 0 0 4px var(--r-acc); }
 .swatches + small { display: block; margin-top: 6px; font-size: calc(12px * var(--ui-scale, 1)); color: var(--r-dim); }
 .r-sheet .seg { border-color: var(--r-rule); width: 100%; }
-.r-sheet .seg button { flex: 1; color: var(--r-dim); padding: 0 6px; }
+.r-sheet .seg button { flex: 1; color: var(--r-ui-fg); padding: 0 6px; height: 38px; font-size: calc(14.5px * var(--ui-scale, 1)); }
 .r-sheet .seg button + button { border-color: var(--r-rule); }
 .r-sheet .seg button.on { background: var(--r-rule); color: var(--r-acc); }
 .stepper { display: flex; align-items: center; gap: 8px; }
-.stepper .lbl { width: 64px; font-size: calc(13.5px * var(--ui-scale, 1)); }
+.stepper .lbl { width: 64px; font-size: calc(14.5px * var(--ui-scale, 1)); }
 .stepper input[type=range] { flex: 1; accent-color: var(--r-acc); }
 .stepper .val { width: 42px; text-align: right; font-size: calc(12.5px * var(--ui-scale, 1)); color: var(--r-dim); font-variant-numeric: tabular-nums; }
 .stepper + .stepper { margin-top: 8px; }
 .r-sheet .set-row { padding: 6px 0; }
-.r-sheet .set-row .l { font-size: calc(13.5px * var(--ui-scale, 1)); }
-.r-sheet .input { background: transparent; border-color: var(--r-rule); height: 32px; color: inherit; }
+.r-sheet .set-row .l { font-size: calc(15px * var(--ui-scale, 1)); }
+.r-sheet .input { background: transparent; border-color: var(--r-rule); height: 38px; color: inherit; font-size: calc(14.5px * var(--ui-scale, 1)); }
+.r-sheet .btn.small { height: 38px; font-size: calc(14.5px * var(--ui-scale, 1)); }
+/* 说明文字（写在元素上的 12px）跟着界面字号走，也稍微大一点 */
+.r-sheet small, .r-sheet .set-row .h { font-size: calc(13px * var(--ui-scale, 1)) !important; line-height: 1.5; }
 .r-sheet .time-row { display: flex; gap: 8px; align-items: center; font-size: calc(13px * var(--ui-scale, 1)); margin-top: 8px; }
 .r-sheet .time-row input { width: 96px; }
 
@@ -743,6 +748,15 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
   transition: bottom .22s;
 }
 .reader.ui .r-player { bottom: calc(118px + var(--safe-b)); }
+.r-player { max-width: calc(100% - 12px); }
+.r-player .speed.voice { min-width: 48px; }
+@media (max-width: 420px) {
+  .r-player { padding: 5px 4px; gap: 0; }
+  .r-player .icon-btn { width: 36px; height: 36px; }
+  .r-player .speed { min-width: 44px; }
+  .r-player .state:empty, .r-player .timer:empty { display: none; }
+  .r-player .state { max-width: 70px; padding: 0 4px; }
+}
 .r-player .icon-btn { width: 40px; height: 40px; border-radius: 20px; }
 .r-player .play { background: var(--r-acc); color: var(--r-bg); }
 .r-player .play:hover { background: var(--r-acc); filter: brightness(1.08); }
@@ -881,6 +895,9 @@ body:has(.sel-bar) #toasts { bottom: calc(92px + var(--safe-b)); }
   opacity: 0; transform: scale(.98); transform-origin: top left; transition: opacity .12s, transform .12s;
 }
 .ctx-menu.show { opacity: 1; transform: none; }
+/* 选项多（比如听书的音色）时菜单里面滚动，不超出屏幕 */
+.ctx-menu { max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain; }
+.ctx-menu.sheet { max-height: 75vh; }
 .ctx-menu.sheet {
   left: 0; right: 0; bottom: 0; max-width: none; border-radius: 14px 14px 0 0; padding: 8px 8px calc(10px + var(--safe-b));
   transform: translateY(16px);

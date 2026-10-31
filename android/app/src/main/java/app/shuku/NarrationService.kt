@@ -80,6 +80,7 @@ class NarrationService : Service() {
     private var speed = 1.0
     private var timerMin = 0
     private var useDevice = false
+    private var playTok = 0          // 每次开始读一句（或重新读）加一，晚到的合成结果按它作废
     private var pausedByFocus = false
     private var stopped = false
 
@@ -258,7 +259,8 @@ class NarrationService : Service() {
                 deviceBroken = false
                 netFails = 0
                 handler.removeCallbacks(retryTask)
-                useDevice = dev || !app.link.online
+                useDevice = dev
+                status = ""
                 restartCurrent()
             }
         }
@@ -304,10 +306,12 @@ class NarrationService : Service() {
         val job = audioFor(seg)
         if (!job.isDone) { status = "合成中…"; publish(); handler.removeCallbacks(slowTask); handler.postDelayed(slowTask, 8000) }
         prefetch()
+        val tok = ++playTok
         pool.execute {
             val file = try { job.get() } catch (e: Exception) { null }
             handler.post {
-                if (queue.getOrNull(index)?.id != seg.id || !playing) return@post
+                // 等合成期间换了读法、语速、音色（重新开始读这一句）：这次的结果不要了，免得两种声音一起出来
+                if (tok != playTok || useDevice || queue.getOrNull(index)?.id != seg.id || !playing) return@post
                 handler.removeCallbacks(slowTask)
                 if (file == null) synthFailed() else { netFails = 0; startPlayer(seg, file) }
             }
@@ -510,8 +514,14 @@ class NarrationService : Service() {
     }
 
     private fun restartCurrent() {
+        playTok++
+        handler.removeCallbacks(retryTask)
+        handler.removeCallbacks(slowTask)
         synchronized(audioJobs) { audioJobs.values.forEach { it.cancel(true) }; audioJobs.clear() }
-        if (playing) { releasePlayer(); tts?.stop(); playCurrent() }
+        // 暂停着换了也要放掉：不然点继续时接着放原来那段（旧的读法、语速、音色）
+        releasePlayer()
+        tts?.stop()
+        if (playing) playCurrent()
     }
 
     private fun pause() {

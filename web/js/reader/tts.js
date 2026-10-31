@@ -136,6 +136,31 @@ function engineSeg(cur, onPick) {
     }, l)))
 }
 
+// 播放条上的“声音”按钮：一点弹出菜单，读法（在线合成 / 本机语音）和音色直接选，不用进阅读设置
+function openVoiceMenu(e, { cur, serverOk = true, voices, curVoice, onEngine, onVoice }) {
+  const r = e.currentTarget.getBoundingClientRect()
+  const mark = on => on ? '　✓' : ''
+  const items = []
+  if (serverOk) items.push(
+    { label: '在线合成（书库，更自然）' + mark(cur === 'server'), run: () => onEngine('server') },
+    { label: '本机语音（不联网也能读）' + mark(cur === 'device'), run: () => onEngine('device') })
+  if (voices.length) {
+    if (items.length) items.push(null)
+    for (const v of voices.slice(0, 40)) items.push({ label: v.name + mark(v.id === curVoice), run: () => onVoice(v.id) })
+  }
+  openMenu(items, { x: r.left, y: r.top, above: true, title: cur === 'device' ? '声音 · 本机语音' : '声音 · 在线合成' })
+}
+
+// 书库的声音里这种语言的（和多语言的），给菜单用
+function serverVoices(info, code) {
+  let list = info?.voices || []
+  if (info?.defaults && code) {
+    const same = list.filter(v => v.code === code || v.multi)
+    if (same.some(v => v.code === code)) list = same
+  }
+  return list.map(v => ({ id: v.id, name: v.name + (v.gender ? '（' + v.gender + '）' : '') }))
+}
+
 const smallNote = (t) => h('small', { style: { display: 'block', fontSize: '12px', opacity: .7, marginBottom: '6px' } }, t)
 
 // 浏览器自带的语音（有的浏览器第一次取是空的，要等 voiceschanged）
@@ -221,6 +246,20 @@ export class Narrator {
     this.restartCurrent()
   }
 
+  async voiceMenu(e) {
+    const info = await this.engineInfo()
+    if (!this.code) this.code = bookCode(this.shell, this.queue)
+    const dev = this.mode === 'browser'
+    const code = segLang('', this.code)
+    openVoiceMenu(e, {
+      cur: dev ? 'device' : 'server', serverOk: this.serverUsable && !!window.speechSynthesis,
+      voices: dev ? browserVoices(code).map(v => ({ id: v.name, name: v.name })) : serverVoices(info, this.code),
+      curVoice: dev ? this.prefs.deviceVoices?.[code] : this.voice,
+      onEngine: v => { this.setEngine(v); this.updateUI() },
+      onVoice: v => dev ? this.setDeviceVoice(v) : this.setVoice(v),
+    })
+  }
+
   setDeviceVoice(name) {
     const code = segLang('', this.code)
     this.prefs.deviceVoices = Object.assign({}, this.prefs.deviceVoices, { [code || 'zh']: name })
@@ -231,6 +270,7 @@ export class Narrator {
   buildUI() {
     this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
     this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: e => pickSpeed(this, e) }, '1.0×')
+    this.voiceBtn = h('button', { class: 'speed voice', title: '声音：读法、音色', onclick: e => this.voiceMenu(e) }, '在线')
     this.timerBtn = h('button', { class: 'icon-btn', title: '睡眠定时', onclick: () => this.cycleTimer() }, icon('timer'))
     this.timerText = h('span', { class: 'timer' })
     this.stateEl = h('span', { class: 'state' })
@@ -238,7 +278,7 @@ export class Narrator {
       iconBtn('prevSent', '上一句', () => this.step(-1)),
       this.playBtn,
       iconBtn('nextSent', '下一句', () => this.step(1)),
-      this.speedBtn, this.timerBtn, this.timerText, this.stateEl,
+      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl,
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)
@@ -249,6 +289,7 @@ export class Narrator {
     this.playBtn.replaceChildren(icon(this.playing ? 'pause' : 'play'))
     this.playBtn.title = this.playing ? '暂停' : '继续'
     this.speedBtn.textContent = this.speed.toFixed(1) + '×'
+    this.voiceBtn.textContent = this.mode === 'browser' ? '本机' : '在线'
     this.timerBtn.classList.toggle('on', !!this.timerMin)
     this.timerText.textContent = this.timerMin === -1 ? '本章' : this.timerEnd ? Math.max(0, Math.ceil((this.timerEnd - Date.now()) / 60000)) + '分' : ''
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = this.playing ? 'playing' : 'paused'
@@ -557,6 +598,7 @@ export class NativeNarrator {
   buildUI() {
     this.playBtn = iconBtn('pause', '暂停', () => this.toggle(), { class: 'icon-btn play' })
     this.speedBtn = h('button', { class: 'speed', title: '语速', onclick: e => pickSpeed(this, e) }, '1.0×')
+    this.voiceBtn = h('button', { class: 'speed voice', title: '声音：读法、音色', onclick: e => this.voiceMenu(e) }, '在线')
     this.timerBtn = h('button', { class: 'icon-btn', title: '睡眠定时', onclick: () => this.cycleTimer() }, icon('timer'))
     this.timerText = h('span', { class: 'timer' })
     this.stateEl = h('span', { class: 'state' })
@@ -564,7 +606,7 @@ export class NativeNarrator {
       iconBtn('prevSent', '上一句', () => call('tts', 'prev', '')),
       this.playBtn,
       iconBtn('nextSent', '下一句', () => call('tts', 'next', '')),
-      this.speedBtn, this.timerBtn, this.timerText, this.stateEl,
+      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl,
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)
@@ -575,6 +617,7 @@ export class NativeNarrator {
     this.playBtn.replaceChildren(icon(this.playing ? 'pause' : 'play'))
     this.playBtn.title = this.playing ? '暂停' : '继续'
     this.speedBtn.textContent = this.speed.toFixed(1) + '×'
+    this.voiceBtn.textContent = this.engine === 'device' ? '本机' : '在线'
     this.timerBtn.classList.toggle('on', !!this.timerMin)
     this.timerText.textContent = this.timerMin === -1 ? '本章' : this.timerMin > 0 ? this.timerMin + '分' : ''
   }
@@ -745,11 +788,36 @@ export class NativeNarrator {
 
   destroy() { if (this.active) call('tts', 'stop', ''); this.cleanup(); this.off(); this.el.remove() }
 
+  // 现在用的读法：正在听时以 App 报来的为准（连不上书库时会临时用手机语音），不然看设置
+  get engine() {
+    if (this.active && this.engineNow) return this.engineNow
+    return (callJSON('prefs') || {}).tts_engine === 'device' ? 'device' : 'server'
+  }
+
   // 换读法：记在 App 里（“设置 → 手机 App”里也是这一项），正在听的话马上换
   setEngine(v) {
     call('setPref', 'tts_engine', v)
-    if (this.active) { this.engineNow = v; call('tts', 'engine', v) }
     toast(v === 'device' ? '改用手机自带语音朗读' : '改用书库在线合成', { duration: 1500 })
+    if (!this.active) { this.updateUI(); return }
+    this.engineNow = v
+    // 1.0.0.24 起的 App 能在听的时候直接换；更早的不认这个命令，停下来从这里重新开始读（开始时按新的读法）
+    if ((callJSON('appInfo') || {}).versionCode >= 24) call('tts', 'engine', v)
+    else { call('tts', 'stop', ''); this.cleanup(); this.start() }
+    this.updateUI()
+  }
+
+  async voiceMenu(e) {
+    const dev = this.engine === 'device'
+    let info = null
+    if (!dev) { try { info = await voiceInfo() } catch {} }
+    if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+    openVoiceMenu(e, {
+      cur: dev ? 'device' : 'server',
+      voices: dev ? (callJSON('ttsVoices') || []) : serverVoices(info, this.code),
+      curVoice: dev ? this.prefs.deviceVoice : voiceFor(this.prefs, info, this.code),
+      onEngine: v => this.setEngine(v),
+      onVoice: v => this.setVoice(v, dev),
+    })
   }
 
   async sheetSection() {
