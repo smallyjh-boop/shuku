@@ -1,4 +1,4 @@
-import { h, $, clear, fill, add, icon, iconBtn, toast, toastError, store, save, closeMenu, isEInk, applyEInk } from './ui.js'
+import { h, $, clear, fill, add, icon, iconBtn, toast, toastError, store, save, closeMenu, applyEInk, applyTone, TONE_BG } from './ui.js'
 import { api, auth, net, deviceName, setUnauthorizedHandler } from './api.js'
 import { renderLibrary } from './library.js'
 import { renderSeriesList } from './series.js'
@@ -42,22 +42,21 @@ function setUser(u) {
 // ---------- 深浅色 ----------
 
 const darkMQ = matchMedia('(prefers-color-scheme: dark)')
-// 阅读器里手动开了夜间模式（10 小时内有效）时，书架也用深色
-function readerNightOn() {
-  try { const o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null'); return !!(o && o.on && Date.now() - o.at < 10 * 3600e3) } catch { return false }
-}
+// 界面颜色（浅色 / 护眼 / 深色 / 夜读）、自动夜读、蓝光过滤：规则在 ui.js 的 uiTone，和阅读器共用夜间定时
 export function applyAppearance() {
-  const mode = ctx.appPrefs.appearance
-  // 墨水屏上“跟随系统”一律用浅色（深色只在自己选了“深色”时用）
-  const eink = isEInk()
-  const dark = (readerNightOn() && !eink) || mode === 'dark' || (mode === 'system' && !eink && darkMQ.matches)
-  document.documentElement.dataset.theme = dark ? 'dark' : 'light'
-  $('#theme-color').content = dark ? '#14181E' : '#F8F8F6'
-  if (!document.querySelector('.reader')) call('setThemeColor', dark ? '#14181E' : '#F8F8F6', dark)
+  const tone = applyTone(ctx.appPrefs)
+  const bg = TONE_BG[tone] || TONE_BG.light
+  $('#theme-color').content = bg
+  if (!document.querySelector('.reader')) call('setThemeColor', bg, tone === 'dark' || tone === 'night')
 }
 darkMQ.addEventListener('change', applyAppearance)
 ctx.setAppearance = (mode) => { ctx.appPrefs.appearance = mode; save('shuku.app', ctx.appPrefs); applyAppearance() }
 // 墨水屏模式（auto / on / off）、界面字号（auto 或倍数）
+// 护眼、夜读的其他设置（蓝光过滤、夜读时自动过滤、休息提醒）
+ctx.rerenderTone = () => applyAppearance()
+ctx.setTonePref = (k, v) => { ctx.appPrefs[k] = v; save('shuku.app', ctx.appPrefs); applyAppearance() }
+// 定时夜读：到点换颜色（每分钟看一次）
+setInterval(() => applyAppearance(), 60000)
 ctx.setDisplay = (k, v) => { ctx.appPrefs[k] = v; save('shuku.app', ctx.appPrefs); applyEInk(ctx.appPrefs); applyAppearance() }
 
 // ---------- 登录 ----------

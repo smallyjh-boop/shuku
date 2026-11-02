@@ -51,16 +51,37 @@
   } catch (e) {}
 })();
 
-// 在页面绘制前确定深浅色，避免夜里打开时闪一下白屏。墨水屏上“跟随系统”一律用浅色
+// 在页面绘制前确定界面颜色（浅色 / 护眼 / 深色 / 夜读纯黑），避免夜里打开时闪一下白屏。
+// 规则和 web/js/ui.js 的 uiTone 一样：手动切换的夜间（10 小时内）> 自动夜读（跟随系统 / 定时，和阅读器共用）> 选的颜色；
+// 墨水屏上只有选了深色、夜读才用深色
 (function () {
   try {
+    var root = document.documentElement
     var p = JSON.parse(localStorage.getItem('shuku.app') || '{}')
-    var mode = p.appearance || 'system'
-    var eink = document.documentElement.classList.contains('eink')
-    var dark = mode === 'dark' || (mode === 'system' && !eink && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)
+    var r = JSON.parse(localStorage.getItem('shuku.reader') || '{}')
+    var a = p.appearance || 'system'
+    var eink = root.classList.contains('eink')
+    var osDark = !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)
+    var night = null
     var o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null')
-    if (o && o.on && Date.now() - o.at < 36e6 && !eink) dark = true
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    if (o && Date.now() - o.at < 36e6) night = !!o.on
+    if (night === null) {
+      var mode = r.nightMode || 'system'
+      if (mode === 'system') night = osDark
+      else if (mode === 'time') {
+        var now = new Date(), m = now.getHours() * 60 + now.getMinutes()
+        var s1 = String(r.nightStart || '21:30').split(':'), s2 = String(r.nightEnd || '07:00').split(':')
+        var x = +s1[0] * 60 + +s1[1], y = +s2[0] * 60 + +s2[1]
+        night = x <= y ? (m >= x && m < y) : (m >= x || m < y)
+      } else night = false
+    }
+    var tone
+    if (eink) tone = a === 'dark' || a === 'night' ? 'dark' : 'light'
+    else if (a === 'night' || night) tone = 'night'
+    else if (a === 'system') tone = osDark ? 'dark' : 'light'
+    else tone = a === 'eyecare' || a === 'dark' ? a : 'light'
+    root.setAttribute('data-theme', tone === 'night' || tone === 'dark' ? 'dark' : 'light')
+    root.setAttribute('data-tone', tone)
   } catch (e) {}
 })();
 
