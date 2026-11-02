@@ -1,4 +1,4 @@
-import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog, debounce, fmtTime, fmtBytes, fmtDateTime, coverEl, einkDetected, autoUIScale, isEInk } from './ui.js'
+import { h, clear, fill, add, icon, toast, toastError, confirmDialog, formDialog, debounce, fmtTime, fmtBytes, fmtDateTime, coverEl, einkDetected, autoUIScale, isEInk, store, nightSchedule, setNightSchedule } from './ui.js'
 import { api, apiUrl, auth, net } from './api.js'
 import { isNative, call, callJSON, onNative, refreshDownloads } from './native.js'
 import { downloadToPhone } from './library.js'
@@ -51,21 +51,62 @@ function appearance(ctx) {
     draw()
     return seg
   }
-  const colors = segOf([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']], () => p.appearance, v => ctx.setAppearance(v))
+  // 选了护眼：阅读器白天的主题换成“纸”；选了夜读：阅读器夜间主题换成“夜读”（以后在阅读器里还能换）
+  const pickColor = v => {
+    ctx.setAppearance(v)
+    const r = store('shuku.reader', {})
+    if (v === 'eyecare' && (!r.theme || r.theme === 'white')) setNightSchedule({ theme: 'paper' })
+    if (v === 'night') setNightSchedule({ nightTheme: 'oled' })
+  }
+  const colors = segOf([['system', '跟随系统'], ['light', '浅色'], ['eyecare', '护眼'], ['dark', '深色'], ['night', '夜读']], () => p.appearance || 'system', pickColor)
+  // 自动夜读：和阅读器的“自动夜间模式”是同一项
+  const timeBox = h('div', { class: 'time-row', style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '8px' } })
+  const drawTime = () => {
+    const sc = nightSchedule()
+    if (sc.mode !== 'time') { fill(timeBox); timeBox.hidden = true; return }
+    timeBox.hidden = false
+    const a = h('input', { class: 'input', type: 'time', value: sc.start, style: { width: '120px' }, 'aria-label': '夜读开始' })
+    const b = h('input', { class: 'input', type: 'time', value: sc.end, style: { width: '120px' }, 'aria-label': '夜读结束' })
+    a.onchange = () => { setNightSchedule({ nightStart: a.value }); ctx.rerenderTone() }
+    b.onchange = () => { setNightSchedule({ nightEnd: b.value }); ctx.rerenderTone() }
+    fill(timeBox, a, '到', b)
+  }
+  const auto = segOf([['system', '跟随系统'], ['time', '定时'], ['off', '关']], () => nightSchedule().mode, v => {
+    try { localStorage.removeItem('shuku.nightOverride') } catch {}
+    setNightSchedule({ nightMode: v }); drawTime(); ctx.rerenderTone()
+  })
+  drawTime()
+  const filter = segOf([['0', '关'], ['1', '轻'], ['2', '中'], ['3', '强']], () => String(+p.blueFilter || 0), v => ctx.setTonePref('blueFilter', +v))
+  const nightFilter = h('input', { type: 'checkbox', checked: p.nightFilter !== false })
+  nightFilter.onchange = () => ctx.setTonePref('nightFilter', nightFilter.checked)
+  const rest = segOf([['0', '关'], ['20', '20 分钟'], ['30', '30 分钟'], ['45', '45 分钟']], () => String(+p.rest || 0), v => ctx.setTonePref('rest', +v))
   // 墨水屏阅读器（墨案、文石等）：黑白、没有动画和阴影，阅读时按页翻
   const eink = segOf([['auto', '自动'], ['on', '开'], ['off', '关']], () => p.eink || 'auto', v => ctx.setDisplay('eink', v))
   const scale = segOf([['auto', '自动'], ['0.9', '小'], ['1', '标准'], ['1.15', '大'], ['1.3', '特大']], () => p.uiScale || 'auto', v => ctx.setDisplay('uiScale', v))
+  const colorHint = h('div', { class: 'h' })
   const einkHint = h('div', { class: 'h' })
   const scaleHint = h('div', { class: 'h' })
+  const colorRows = []
   function drawHints() {
+    colorHint.textContent = isEInk() ? '墨水屏只有黑白：选深色、夜读时用黑底白字，其他都是白底黑字'
+      : { system: '跟着手机、电脑的深浅色', light: '冷白底', eyecare: '暖米黄底、深棕灰字，白天看久了不累眼', dark: '深蓝灰底', night: '纯黑底、暖米灰字：OLED 屏省电，夜里不晃眼' }[p.appearance || 'system']
     einkHint.textContent = (einkDetected() ? '这台设备是墨水屏阅读器，' : '没认出是墨水屏阅读器，') + (isEInk() ? '现在开着' : '现在关着') + '。黑白显示、没有动画，阅读时按页翻'
     scaleHint.textContent = '自动：' + (isEInk() ? `墨水屏按屏幕尺寸放大到 ${Math.round(autoUIScale(true) * 100)}%` : '标准大小') + '。只改书库界面的字，书里的字号在阅读器的“Aa”里调'
+    // 墨水屏上蓝光过滤没有用，不显示
+    for (const r of colorRows) r.hidden = isEInk()
   }
+  const row = (label, hint, ctl, cls) => h('div', { class: 'set-row' + (cls ? ' ' + cls : '') }, h('div', null, h('div', { class: 'l' }, label), hint ? (typeof hint === 'string' ? h('div', { class: 'h' }, hint) : hint) : null), ctl)
+  const autoRow = h('div', null, row('自动夜读', '到了晚上，书库界面和阅读器一起换成纯黑夜读（阅读器里的“自动夜间模式”也是这一项）', auto, 'wrap-sm'), timeBox)
+  const filterRow = row('蓝光过滤', '给整个屏幕加一层暖色，减少蓝光，晚上看更舒服', filter, 'wrap-sm')
+  const nightFilterRow = row('夜读时自动过滤蓝光', '上面没开时，夜读时用“中”', h('label', { class: 'switch' }, nightFilter, h('i')))
+  colorRows.push(filterRow, nightFilterRow)
   drawHints()
-  return sec('外观', '书库界面的深浅色、字的大小，墨水屏阅读器的显示方式。阅读时的夜间模式在阅读器的“Aa”里单独设置，可以按时间自动切换。',
-    h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '界面颜色')), colors),
-    h('div', { class: 'set-row wrap-sm' }, h('div', null, h('div', { class: 'l' }, '界面字号'), scaleHint), scale),
-    h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, '墨水屏模式'), einkHint), eink))
+  return sec('外观', '书库界面和阅读器的颜色、护眼、字的大小，墨水屏阅读器的显示方式。',
+    row('界面颜色', colorHint, colors, 'wrap-sm'),
+    autoRow, filterRow, nightFilterRow,
+    row('休息提醒', '连续阅读这么久，提醒你看看远处、休息一下眼睛', rest, 'wrap-sm'),
+    row('界面字号', scaleHint, scale, 'wrap-sm'),
+    row('墨水屏模式', einkHint, eink))
 }
 
 // ---------- 网络 ----------

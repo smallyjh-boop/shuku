@@ -1,7 +1,7 @@
 // 阅读器外壳：工具栏、目录/书签/笔记/搜索侧栏、阅读设置、夜间模式、进度同步、剩余时间
 // 具体渲染交给 engines：flow（EPUB/MOBI/AZW3/FB2/TXT）、pdf、comic
 
-import { h, clear, fill, icon, iconBtn, toast, toastError, store, save, debounce, pct, confirmDialog, isEInk, einkFontSize } from '../ui.js'
+import { h, clear, fill, icon, iconBtn, toast, toastError, store, save, debounce, pct, confirmDialog, isEInk, einkFontSize, nightOverride, inTimeRange, applyTone } from '../ui.js'
 import { api, deviceName, net } from '../api.js'
 import { isNative, call, callJSON, onNative } from '../native.js'
 import { putProgress, queueProgress, takeQueued, rememberUser, setActiveBook } from './sync.js'
@@ -17,6 +17,8 @@ export const THEMES = [
   { id: 'gray', name: '灰', bg: '#1E1F21', fg: '#C9C7C2', dark: true },
   { id: 'black', name: '黑', bg: '#000000', fg: '#A9A9A6', dark: true },
   { id: 'amber', name: '暖', bg: '#19130E', fg: '#CDAE80', dark: true },
+  // 夜读：OLED 纯黑底、暖米灰字（和书库界面的夜读一样）
+  { id: 'oled', name: '夜读', bg: '#000000', fg: '#BDB4A4', dark: true },
 ]
 const themeById = id => THEMES.find(t => t.id === id) || THEMES[0]
 
@@ -25,7 +27,7 @@ export const FONTS = [
 ]
 
 const DEFAULTS = {
-  theme: 'white', nightTheme: 'gray', nightMode: 'system', nightStart: '21:30', nightEnd: '07:00',
+  theme: 'white', nightTheme: 'oled', nightMode: 'system', nightStart: '21:30', nightEnd: '07:00',
   font: 'serif', fontSize: 19, lineHeight: 1.85, paraSpace: 0.5, margin: 1, width: 720,
   flow: 'paginated', columns: 'auto', indent: true, justify: true, animated: true, dict: true,
   brightness: 1, warm: false,
@@ -89,23 +91,11 @@ export async function openReader(bookId, { ctx, params, back }) {
   await current.start()
 }
 
-// 夜间判断：手动覆盖 > 定时 / 跟随系统
-function nightOverride() {
-  try {
-    const o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null')
-    if (o && Date.now() - o.at < 10 * 3600e3) return o.on
-  } catch {}
-  return null
-}
-function inTimeRange(start, end) {
-  const now = new Date(), m = now.getHours() * 60 + now.getMinutes()
-  const [sh, sm] = start.split(':').map(Number), [eh, em] = end.split(':').map(Number)
-  const s = sh * 60 + sm, e = eh * 60 + em
-  return s <= e ? m >= s && m < e : m >= s || m < e
-}
+// 夜间判断：手动覆盖 > 定时 / 跟随系统（和书库界面的自动夜读同一套，见 ui.js）；书库界面选了“夜读”时阅读也一直是夜间
 export function isNight(p) {
   const o = nightOverride()
   if (o !== null) return o
+  if (store('shuku.app', {}).appearance === 'night') return true
   if (p.nightMode === 'system') return matchMedia('(prefers-color-scheme: dark)').matches
   if (p.nightMode === 'time') return inTimeRange(p.nightStart, p.nightEnd)
   return false
@@ -128,6 +118,8 @@ class Reader {
     // 本机记的东西（位置、按书设置、阅读速度）按人分开：一台平板几个人轮流登录不会串
     this.uid = rememberUser(ctx)
     this.g = store('shuku.reader', isEInk() ? { ...DEFAULTS, ...einkDefaults() } : DEFAULTS) // 全局设置
+    // 1.0.0.27：夜间主题默认换成“夜读”（OLED 纯黑、暖米灰字）；以前没改过、还是默认“灰”的换一次
+    if (!this.g.nightV2) { if (this.g.nightTheme === 'gray') this.g.nightTheme = 'oled'; this.g.nightV2 = 1; save('shuku.reader', this.g) }
     this.b = {}                                // 这本书自己的设置
     this.prefs = einkPaged({ ...this.g })
     this.loc = null
@@ -371,7 +363,8 @@ class Reader {
     this.markActivity()
     const tick = setInterval(() => {
       if (document.hidden && !this.narrator?.playing) return
-      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) { this.readSecs++; this.activeSecs++ }
+      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) { this.readSecs++; this.activeSecs++; this.restTick() }
+      else this.restSecs = 0 // 停下来 5 分钟以上不算连续阅读
     }, 1000)
     // 一直停在同一页（比如在看一大页 PDF）：攒够 5 分钟也传一次阅读时长
     const flushT = setInterval(() => { if (this.readSecs >= 300) this.saveProgress() }, 60000)
@@ -381,6 +374,16 @@ class Reader {
       clearInterval(tick); clearInterval(flushT)
       for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) removeEventListener(ev, act)
     })
+  }
+
+  // ---------- 休息提醒（设置 → 外观：关 / 20 / 30 / 45 分钟）：连续阅读这么久，轻轻提示看看远处 ----------
+  restTick() {
+    const min = +store('shuku.app', {}).rest || 0
+    if (!min) { this.restSecs = 0; return }
+    this.restSecs = (this.restSecs || 0) + 1
+    if (this.restSecs < min * 60) return
+    this.restSecs = 0
+    toast(`已经连续看了 ${min} 分钟，抬头看看远处，休息一下眼睛`, { duration: 8000 })
   }
 
   // ---------- 听书 ----------
@@ -858,6 +861,7 @@ class Reader {
     this.nightBtn.replaceChildren(icon(t.dark ? 'sun' : 'moon'))
     this.nightBtn.title = t.dark ? '切换到日间' : '切换到夜间'
     this.nightBtn.setAttribute('aria-label', this.nightBtn.title)
+    applyTone(store('shuku.app', {})) // 书库界面的夜读、蓝光过滤跟着（阅读器里点月亮切换、到点自动夜读时）
     document.querySelector('#theme-color')?.setAttribute('content', t.bg)
     call('setThemeColor', t.bg, t.dark)
     this.dim.style.opacity = isEInk() ? '0' : String(1 - this.prefs.brightness)

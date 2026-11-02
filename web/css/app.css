@@ -50,6 +50,48 @@
   color-scheme: dark;
 }
 
+/* 护眼（白天）：暖米黄底、深棕灰字，对比度稍低、少一点蓝光 */
+:root[data-tone="eyecare"] {
+  --bg: #F4EFE3;
+  --surface: #FAF6EC;
+  --sunken: #ECE6D7;
+  --ink: #2E2A24;
+  --ink-2: #5A5348;
+  --ink-3: #8A8274;
+  --rule: #E3DCCB;
+  --rule-strong: #D3CAB5;
+  --accent: #3C6E80;
+  --accent-soft: rgba(60, 110, 128, .10);
+}
+
+/* 夜读（OLED 纯黑）：底、卡片、侧栏全黑（OLED 屏上黑色不发光，省电、不晃眼），
+   字用暖米灰（不用纯白），线和边框很暗，强调色调暗 */
+:root[data-tone="night"] {
+  --bg: #000000;
+  --surface: #000000;
+  --sunken: #000000;
+  --ink: #BDB4A4;
+  --ink-2: #8E877B;
+  --ink-3: #6B655C;
+  --rule: #1C1B19;
+  --rule-strong: #2B2926;
+  --accent: #A8936C;
+  --accent-ink: #000000;
+  --accent-soft: rgba(168, 147, 108, .14);
+  --warn: #B89150;
+  --danger: #C27A6E;
+  --ok: #7FA284;
+  --shadow-book: none;
+  --shadow-pop: 0 0 0 1px #2B2926;
+}
+
+/* 蓝光过滤：整个页面（包括阅读器）上面盖一层暖色，强度三档 */
+#bluefilter { position: fixed; inset: 0; z-index: 2147483000; pointer-events: none; background: rgba(255, 140, 40, .1); mix-blend-mode: multiply; display: none; }
+#bluefilter.lv1 { display: block; background: rgba(255, 140, 40, .08); }
+#bluefilter.lv2 { display: block; background: rgba(255, 140, 40, .16); }
+#bluefilter.lv3 { display: block; background: rgba(255, 130, 30, .26); }
+html.eink #bluefilter { display: none !important; }
+
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; overflow-x: hidden; } /* 整页不左右滚：内容不小心超宽时也不把页面撑宽（旧的网页组件会整页缩小或能左右拖） */
 html, body { margin: 0; height: 100%; }
@@ -478,9 +520,11 @@ textarea.input { height: auto; min-height: 96px; padding: 9px 11px; line-height:
 }
 .reader[data-t="paper"] { --r-bg: #F2EDE0; --r-fg: #3B3327; --r-ui: rgba(242,237,224,.95); --r-ui-fg: #3B3327; --r-rule: rgba(60,45,20,.12); --r-dim: #8E8371; --r-acc: #8A5A2B; }
 .reader[data-t="green"] { --r-bg: #D3E4CF; --r-fg: #233221; --r-ui: rgba(211,228,207,.95); --r-ui-fg: #233221; --r-rule: rgba(20,50,20,.12); --r-dim: #667A62; --r-acc: #3D6B44; }
-.reader[data-t="gray"], .reader[data-t="black"], .reader[data-t="amber"] { color-scheme: dark; }
+.reader[data-t="gray"], .reader[data-t="black"], .reader[data-t="amber"], .reader[data-t="oled"] { color-scheme: dark; }
 .reader[data-t="gray"] { --r-bg: #1E1F21; --r-fg: #C9C7C2; --r-ui: rgba(36,37,40,.95); --r-ui-fg: #D6D4CF; --r-rule: rgba(255,255,255,.08); --r-dim: #7B7D80; --r-acc: #86B6CB; }
 .reader[data-t="black"] { --r-bg: #000000; --r-fg: #A9A9A6; --r-ui: rgba(16,16,16,.96); --r-ui-fg: #C4C4C0; --r-rule: rgba(255,255,255,.08); --r-dim: #6A6A68; --r-acc: #86B6CB; }
+/* 夜读：OLED 纯黑底、暖米灰字，工具栏也是纯黑（和书库界面的夜读一样） */
+.reader[data-t="oled"] { --r-bg: #000000; --r-fg: #BDB4A4; --r-ui: #000000; --r-ui-fg: #BDB4A4; --r-rule: rgba(189,180,164,.14); --r-dim: #6B655C; --r-acc: #A8936C; }
 .reader[data-t="amber"] { --r-bg: #19130E; --r-fg: #CDAE80; --r-ui: rgba(32,24,17,.96); --r-ui-fg: #D7BA8E; --r-rule: rgba(205,174,128,.12); --r-dim: #7F6A4E; --r-acc: #D9A456; }
 
 .r-stage { position: absolute; inset: 0; }
@@ -1271,7 +1315,7 @@ html.eink .gen { background-image: none; }
 html.eink .reader, html.eink .reader[data-t="white"], html.eink .reader[data-t="paper"], html.eink .reader[data-t="green"] {
   --r-bg: #FFFFFF; --r-fg: #000000; --r-ui: #FFFFFF; --r-ui-fg: #000000; --r-rule: #000000; --r-dim: #333333; --r-acc: #000000;
 }
-html.eink .reader[data-t="gray"], html.eink .reader[data-t="black"], html.eink .reader[data-t="amber"] {
+html.eink .reader[data-t="gray"], html.eink .reader[data-t="black"], html.eink .reader[data-t="amber"], html.eink .reader[data-t="oled"] {
   --r-bg: #000000; --r-fg: #FFFFFF; --r-ui: #000000; --r-ui-fg: #FFFFFF; --r-rule: #FFFFFF; --r-dim: #CCCCCC; --r-acc: #FFFFFF;
 }
 html.eink .r-bar, html.eink .r-panel, html.eink .r-sheet, html.eink .r-end, html.eink .r-note, html.eink .r-pop, html.eink .r-dict,

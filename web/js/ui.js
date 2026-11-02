@@ -385,6 +385,68 @@ export function applyEInk(p) {
   if (scale === 1) root.style.removeProperty('--ui-scale')
   else root.style.setProperty('--ui-scale', String(scale))
 }
+// ---------- 界面颜色：浅色 / 护眼 / 深色 / 夜读（OLED 纯黑）。boot.js 在页面绘制前先做一遍（同一套规则，ES5 写法） ----------
+// 自动夜读和阅读器的“自动夜间模式”是同一套设置（存在 shuku.reader 的 nightMode / nightStart / nightEnd）：
+// 到点书库界面和阅读器一起换成纯黑夜读。阅读器里点月亮手动切换的，10 小时内有效（shuku.nightOverride）
+export function nightSchedule() {
+  const r = store('shuku.reader', {})
+  return { mode: r.nightMode || 'system', start: r.nightStart || '21:30', end: r.nightEnd || '07:00' }
+}
+export function setNightSchedule(v) {
+  const r = store('shuku.reader', {})
+  save('shuku.reader', Object.assign(r, v))
+}
+export function inTimeRange(start, end) {
+  const now = new Date(), m = now.getHours() * 60 + now.getMinutes()
+  const [sh, sm] = String(start).split(':').map(Number), [eh, em] = String(end).split(':').map(Number)
+  const a = sh * 60 + sm, b = eh * 60 + em
+  return a <= b ? m >= a && m < b : m >= a || m < b
+}
+export function nightOverride() {
+  try {
+    const o = JSON.parse(localStorage.getItem('shuku.nightOverride') || 'null')
+    if (o && Date.now() - o.at < 10 * 3600e3) return !!o.on
+  } catch {}
+  return null
+}
+const osDark = () => !!window.matchMedia?.('(prefers-color-scheme: dark)').matches
+// 现在该不该是夜读：手动切换的 > 自动（跟随系统 / 定时 / 关）
+export function nightNow() {
+  const o = nightOverride()
+  if (o !== null) return o
+  const s = nightSchedule()
+  if (s.mode === 'system') return osDark()
+  if (s.mode === 'time') return inTimeRange(s.start, s.end)
+  return false
+}
+// 界面现在用哪种颜色：light / eyecare / dark / night。墨水屏只有黑白：选了深色、夜读才用深色
+export function uiTone(p) {
+  const a = (p && p.appearance) || 'system'
+  if (isEInk()) return a === 'dark' || a === 'night' ? 'dark' : 'light'
+  if (a === 'night' || nightNow()) return 'night'
+  if (a === 'system') return osDark() ? 'dark' : 'light'
+  return a === 'eyecare' || a === 'dark' ? a : 'light'
+}
+export const TONE_BG = { light: '#F8F8F6', eyecare: '#F4EFE3', dark: '#14181E', night: '#000000' }
+// 蓝光过滤的强度：关 / 轻 / 中 / 强；夜读时没开的话默认用“中”（设置里可以关掉）
+export function filterLevel(p, tone) {
+  if (isEInk()) return 0
+  const lv = +(p && p.blueFilter) || 0
+  if (!lv && tone === 'night' && (p && p.nightFilter) !== false) return 2
+  return lv
+}
+export function applyTone(p) {
+  const root = document.documentElement
+  const tone = uiTone(p)
+  root.dataset.theme = tone === 'night' || tone === 'dark' ? 'dark' : 'light'
+  root.dataset.tone = tone
+  const lv = filterLevel(p, tone)
+  let f = document.getElementById('bluefilter')
+  if (lv && !f && document.body) { f = h('div', { id: 'bluefilter', 'aria-hidden': 'true' }); document.body.append(f) }
+  if (f) f.className = lv ? 'lv' + lv : ''
+  return tone
+}
+
 // 墨水屏上阅读的默认字号：字身大约 3.8 毫米（0.15 英寸），按屏幕每英寸的网页像素算
 export const einkFontSize = () => Math.max(16, Math.min(30, Math.round(0.15 * (window.SHUKU_SCREEN_PPI || 160))))
 
