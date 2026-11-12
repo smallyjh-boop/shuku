@@ -428,6 +428,18 @@ class NarrationService : Service() {
         }
     }
 
+    /**
+     * 熄屏后由这里从书库取的章节：也请书库在后台提前合成（网页在的时候网页已经交过了）。
+     * 用的文字、音色、语速和正式合成一样，读到时书库直接从缓存拿
+     */
+    private fun serverPrefetch(segs: List<Seg>) {
+        if (useDevice || segs.isEmpty() || !app.link.online) return
+        val items = JSONArray()
+        for (seg in segs.take(300)) items.put(JSONObject().put("text", seg.text).put("voice", seg.voice.ifEmpty { voice }))
+        val body = JSONObject().put("items", items).put("lang", lang).put("speed", speed)
+        pool.execute { try { app.link.send("POST", "/api/tts/prefetch", body, 15000) } catch (e: Exception) {} }
+    }
+
     /** 快读完了：取下一章 */
     private fun feedMore() {
         if (feedBusy || ended || queue.size - index > PREFETCH + 6) return
@@ -456,6 +468,7 @@ class NarrationService : Service() {
 
     private fun appendFeed(segs: List<Seg>) {
         queue += segs
+        serverPrefetch(segs)
         if (feedNext >= feedChapters.length() && segs.isEmpty()) ended = true
         if (waitingMore && playing) {
             waitingMore = false

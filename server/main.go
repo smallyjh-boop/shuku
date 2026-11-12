@@ -98,6 +98,8 @@ func main() {
 		}()
 	}
 
+	startTTSPrefetch() // 听书时在后台提前合成后面的句子
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           routes(),

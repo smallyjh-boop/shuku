@@ -120,6 +120,7 @@ func routes() http.Handler {
 
 	routesP1(mux)
 	routesP2(mux)
+	routesAIRead(mux)
 	mux.HandleFunc("/", handleStatic)
 	return withCORS(mux)
 }

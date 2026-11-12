@@ -571,6 +571,7 @@ func openaiSynth(ctx context.Context, c TTSConfig, text, voice string, speed flo
 
 var ttsWrites int
 var ttsMu sync.Mutex
+var ttsInflight = map[string]chan struct{}{}
 
 func ttsCachePath(key string) string {
 	return filepath.Join(cfg.DataDir, "cache", "tts", key[:2], key+".mp3")
@@ -645,6 +646,29 @@ func synthesizeWith(ctx context.Context, engine, text, voice string, speed float
 		os.Chtimes(p, now, now)
 		return b, nil
 	}
+	// 同一句正在合成（比如提前合成刚好在做这一句）：等它做完，不重复请求
+	ttsMu.Lock()
+	if ch, ok := ttsInflight[key]; ok {
+		ttsMu.Unlock()
+		select {
+		case <-ch:
+			if b, err := os.ReadFile(p); err == nil {
+				return b, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		ttsMu.Lock()
+	}
+	done := make(chan struct{})
+	ttsInflight[key] = done
+	ttsMu.Unlock()
+	defer func() {
+		ttsMu.Lock()
+		delete(ttsInflight, key)
+		ttsMu.Unlock()
+		close(done)
+	}()
 	select {
 	case ttsSem <- struct{}{}:
 		defer func() { <-ttsSem }()
@@ -674,6 +698,185 @@ func synthesizeWith(ctx context.Context, engine, text, voice string, speed float
 		go trimTTSCache()
 	}
 	return b, nil
+}
+
+// ---------- 提前合成 ----------
+//
+// 网络不好时一句要等好几秒，听书一顿一顿的。听书的设备（网页、手机 App、手表）把后面要读的句子
+// （和正式请求一样的文字、音色、语速）交给这里，NAS 在后台慢慢合成好存进缓存，读到时直接从缓存拿。
+// 每个人一条队列，新的请求换掉旧的（换了位置、语速，旧的就没用了）；同时最多 2 句在合成，
+// 正在听的那一句（/api/tts）永远有空位。
+
+type ttsJob struct {
+	UID               int64
+	Text, Voice, Lang string
+	Speed             float64
+}
+
+// 每个人这一批提前合成的进度（阅读器里显示“已准备好约几分钟”）
+type prefetchStat struct {
+	Total, Done, Failed int
+	Chars               int // 已经合成好的字数（估算能听多久）
+	At                  time.Time
+}
+
+var prefetch = struct {
+	sync.Mutex
+	queues map[int64][]ttsJob // 每个人还没合成的
+	order  []int64            // 轮流做各人的
+	stats  map[int64]*prefetchStat
+	wake   chan struct{}
+}{queues: map[int64][]ttsJob{}, stats: map[int64]*prefetchStat{}, wake: make(chan struct{}, 1)}
+
+const prefetchMax = 400 // 一次最多排这么多句（大约一两章）
+
+func startTTSPrefetch() {
+	for i := 0; i < 2; i++ {
+		go prefetchWorker()
+	}
+}
+
+func prefetchWorker() {
+	for {
+		job, ok := nextPrefetch()
+		if !ok {
+			<-prefetch.wake
+			continue
+		}
+		c := ttsConfig()
+		if c.Engine != "edge" && c.Engine != "openai" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := synthesize(ctx, job.Text, job.Voice, job.Lang, job.Speed)
+		prefetch.Lock()
+		if st := prefetch.stats[job.UID]; st != nil {
+			if err != nil {
+				st.Failed++
+			} else {
+				st.Done++
+				st.Chars += len([]rune(job.Text))
+			}
+		}
+		prefetch.Unlock()
+		if err != nil && isNetErr(err) {
+			// 连不上语音服务：这一批先放下，别一直空转（下次听书时再交过来）
+			prefetch.Lock()
+			prefetch.queues = map[int64][]ttsJob{}
+			prefetch.order = nil
+			prefetch.Unlock()
+		}
+		cancel()
+	}
+}
+
+func nextPrefetch() (ttsJob, bool) {
+	prefetch.Lock()
+	defer prefetch.Unlock()
+	for len(prefetch.order) > 0 {
+		uid := prefetch.order[0]
+		prefetch.order = prefetch.order[1:]
+		q := prefetch.queues[uid]
+		if len(q) == 0 {
+			delete(prefetch.queues, uid)
+			continue
+		}
+		job := q[0]
+		prefetch.queues[uid] = q[1:]
+		if len(q) > 1 {
+			prefetch.order = append(prefetch.order, uid) // 轮到下一个人
+		} else {
+			delete(prefetch.queues, uid)
+		}
+		return job, true
+	}
+	return ttsJob{}, false
+}
+
+func isNetErr(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func handleTTSPrefetch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []struct {
+			Text  string `json:"text"`
+			Voice string `json:"voice"`
+			Lang  string `json:"lang"`
+		} `json:"items"`
+		Lang  string  `json:"lang"`
+		Speed float64 `json:"speed"`
+	}
+	if readJSON(r, &req) != nil {
+		errJSON(w, 400, "格式不正确")
+		return
+	}
+	c := ttsConfig()
+	if c.Engine != "edge" && c.Engine != "openai" {
+		writeJSON(w, 200, map[string]any{"queued": 0})
+		return
+	}
+	var jobs []ttsJob
+	for _, it := range req.Items {
+		t := strings.TrimSpace(it.Text)
+		if t == "" {
+			continue
+		}
+		if len([]rune(t)) > 3000 {
+			t = string([]rune(t)[:3000])
+		}
+		lang := it.Lang
+		if lang == "" {
+			lang = req.Lang
+		}
+		jobs = append(jobs, ttsJob{Text: t, Voice: it.Voice, Lang: lang, Speed: req.Speed})
+		if len(jobs) >= prefetchMax {
+			break
+		}
+	}
+	uid := int64(0)
+	if u := me(r); u != nil {
+		uid = u.ID
+	}
+	for i := range jobs {
+		jobs[i].UID = uid
+	}
+	prefetch.Lock()
+	prefetch.stats[uid] = &prefetchStat{Total: len(jobs), At: time.Now()}
+	if _, had := prefetch.queues[uid]; !had && len(jobs) > 0 {
+		prefetch.order = append(prefetch.order, uid)
+	}
+	if len(jobs) > 0 {
+		prefetch.queues[uid] = jobs // 换掉这个人以前排的
+	} else {
+		delete(prefetch.queues, uid)
+	}
+	prefetch.Unlock()
+	select {
+	case prefetch.wake <- struct{}{}:
+	default:
+	}
+	writeJSON(w, 200, map[string]any{"queued": len(jobs)})
+}
+
+// 这一批提前合成到哪了：total 交来几句、done 合成好几句、minutes 合成好的大约能听几分钟（按 1 倍速每分钟 260 字）
+func handleTTSPrefetchStatus(w http.ResponseWriter, r *http.Request) {
+	uid := int64(0)
+	if u := me(r); u != nil {
+		uid = u.ID
+	}
+	prefetch.Lock()
+	st := prefetch.stats[uid]
+	var out map[string]any
+	if st == nil {
+		out = map[string]any{"total": 0, "done": 0, "failed": 0, "minutes": 0, "running": false}
+	} else {
+		out = map[string]any{"total": st.Total, "done": st.Done, "failed": st.Failed, "minutes": math.Round(float64(st.Chars)/260*10) / 10,
+			"running": len(prefetch.queues[uid]) > 0}
+	}
+	prefetch.Unlock()
+	writeJSON(w, 200, out)
 }
 
 // ---------- 接口 ----------

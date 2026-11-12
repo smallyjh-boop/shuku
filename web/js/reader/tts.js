@@ -3,7 +3,7 @@
 
 import { h, fill, icon, iconBtn, toast, store, save, openMenu } from '../ui.js'
 import { api, apiUrl, net } from '../api.js'
-import { call, callJSON, onNative } from '../native.js'
+import { call, callJSON, onNative, isNative } from '../native.js'
 
 const SPEEDS = [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5]
 
@@ -149,6 +149,56 @@ function openVoiceMenu(e, { cur, serverOk = true, voices, curVoice, onEngine, on
     for (const v of voices.slice(0, 40)) items.push({ label: v.name + mark(v.id === curVoice), run: () => onVoice(v.id) })
   }
   openMenu(items, { x: r.left, y: r.top, above: true, title: cur === 'device' ? '声音 · 本机语音' : '声音 · 在线合成' })
+}
+
+// 请书库在后台提前合成后面的句子（网络不好时不用一句一句等）。items：{ text, voice }，和正式合成时的一样
+function serverPrefetch(items, lang, speed) {
+  if (!items.length) return
+  api('/api/tts/prefetch', { method: 'POST', body: { items: items.slice(0, 300), lang: lang || '', speed } }).catch(() => {})
+}
+
+// 没在听也先准备：在读哪本书，就从看到的这一页往后，把这一节（章、PDF 的这一页）交给书库提前合成。
+// 这台设备用本机语音、书库设成设备语音、断网时不做。阅读器在读了一会儿、翻到新的一节时调用
+export async function prefetchFromView(shell) {
+  const eng = shell.engine
+  if (!eng?.ttsSegments || net.route === 'offline') return
+  const prefs = store(PREFS_KEY, { speed: 1 })
+  if (isNative ? (callJSON('prefs') || {}).tts_engine === 'device' : prefs.engine === 'device') return
+  let info
+  try { info = await voiceInfo() } catch { return }
+  if (info.engine === 'browser') return
+  const segs = await eng.ttsSegments(true).catch(() => [])
+  if (!segs?.length) return
+  const code = bookCode(shell, segs)
+  serverPrefetch(segs.map(x => ({ text: x.text, voice: voiceFor(prefs, info, segLang(x.text, code)) })), code, prefs.speed || 1)
+}
+
+// 书库提前合成到哪了：“已准备好约 12 分钟”（没有在准备的就是空的）
+export async function prefetchStatus() {
+  try {
+    const r = await api('/api/tts/prefetch')
+    if (!r.total) return ''
+    const min = r.minutes >= 1 ? `约 ${Math.round(r.minutes)} 分钟` : `${r.done} 句`
+    if (r.running) return `正在提前合成，已备好${min}（${r.done}/${r.total} 句）`
+    return r.done ? `已提前备好${min}，网络不好也不用等` : r.failed ? '提前合成失败（书库连不上语音服务）' : ''
+  } catch { return '' }
+}
+
+// 听书时播放条上显示书库提前备好了多少（每 15 秒看一次）
+function watchReady(nar, on) {
+  clearInterval(nar.readyT)
+  nar.readyEl.textContent = ''
+  if (!on) return
+  const tick = async () => {
+    const device = nar instanceof Narrator ? nar.mode === 'browser' : nar.engine === 'device'
+    if (device || !nar.active) { nar.readyEl.textContent = ''; return }
+    try {
+      const r = await api('/api/tts/prefetch')
+      nar.readyEl.textContent = r.total && r.done ? `已备 ${r.minutes >= 1 ? Math.round(r.minutes) + ' 分' : r.done + ' 句'}` : r.running ? '提前合成中' : ''
+    } catch { nar.readyEl.textContent = '' }
+  }
+  setTimeout(tick, 3000)
+  nar.readyT = setInterval(tick, 15000)
 }
 
 // 书库的声音里这种语言的（和多语言的），给菜单用
@@ -319,7 +369,7 @@ export class Narrator {
       iconBtn('prevSent', '上一句', () => this.step(-1)),
       this.playBtn,
       iconBtn('nextSent', '下一句', () => this.step(1)),
-      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl,
+      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl, (this.readyEl = h('span', { class: 'state ready', title: '书库已经提前合成好的' })),
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)
@@ -354,6 +404,8 @@ export class Narrator {
     this.setState('准备中…')
     await this.load(true)
     this.code = bookCode(this.shell, this.queue)
+    this.prefetchAhead()
+    watchReady(this, true)
     this.play()
   }
 
@@ -367,6 +419,7 @@ export class Narrator {
     this.shell.root.classList.remove('narrating')
     document.body.classList.remove('narrating')
     clearInterval(this.timerTick); this.timerMin = 0; this.timerEnd = 0
+    watchReady(this, false)
     for (const p of this.cache.values()) p.then(u => u && URL.revokeObjectURL(u)).catch(() => {})
     this.cache.clear()
     this.updateUI()
@@ -385,12 +438,19 @@ export class Narrator {
     }
   }
 
+  // 这一节后面的句子交给书库提前合成（用书库语音时）
+  prefetchAhead() {
+    if (this.mode !== 'server' || !this.queue.length) return
+    serverPrefetch(this.queue.slice(this.i + 1).map(s => ({ text: s.text, voice: voiceFor(this.prefs, this.info, segLang(s.text, this.code)) })), this.code, this.speed)
+  }
+
   // 用户自己翻页后，从新位置接着读
   async jumpToView() {
     if (!this.active) return
     const was = this.playing
     this.halt()
     await this.load(true)
+    this.prefetchAhead()
     if (was) this.play()
     else this.shell.engine.ttsHighlight?.(this.queue[this.i])
   }
@@ -534,6 +594,7 @@ export class Narrator {
       if (!(await this.shell.engine.ttsNextUnit())) { this.finish(); return }
       await this.load(false)
       if (!this.active) return
+      this.prefetchAhead()
     }
     this.speakCurrent()
   }
@@ -559,6 +620,7 @@ export class Narrator {
     this.cache.clear()
     if (this.playing) { this.halt(); this.playing = true; this.speakCurrent() }
     else window.speechSynthesis?.cancel() // 暂停着换了读法、音色：继续时从这句重新读
+    this.prefetchAhead() // 换了语速、音色、读法：按新的重新提前合成
   }
 
   cycleTimer() {
@@ -594,7 +656,10 @@ export class Narrator {
     const info = await this.engineInfo()
     const parts = [h('h4', null, '听书')]
     const box = h('div')
-    parts.push(box)
+    const ready = smallNote('')
+    ready.hidden = true
+    prefetchStatus().then(t => { ready.textContent = t; ready.hidden = !t })
+    parts.push(box, ready)
     if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
     const draw = () => {
       const items = []
@@ -665,7 +730,7 @@ export class NativeNarrator {
       iconBtn('prevSent', '上一句', () => call('tts', 'prev', '')),
       this.playBtn,
       iconBtn('nextSent', '下一句', () => call('tts', 'next', '')),
-      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl,
+      this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl, (this.readyEl = h('span', { class: 'state ready', title: '书库已经提前合成好的' })),
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)
@@ -735,6 +800,15 @@ export class NativeNarrator {
       // 打开这本书时书库进度的版本：App 自己存进度时带上，别的设备读到了后面就不直接覆盖
       progressBase: this.shell.base ?? null,
     })
+    this.prefetchPacked(this.order.map(id => this.segs.get(id)), voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''))
+    watchReady(this, true)
+  }
+
+  // 交给 App 的句子也请书库提前合成（App 用书库语音时；App 自己只提前几十句）
+  prefetchPacked(list, fallbackVoice) {
+    if ((callJSON('prefs') || {}).tts_engine === 'device') return
+    this.prefVoice = fallbackVoice ?? this.prefVoice
+    serverPrefetch(list.filter(Boolean).map(s => ({ text: s.text, voice: this.voiceInfo ? voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code)) : (this.prefVoice || '') })), this.code, this.speed)
   }
 
   async onEvent(e) {
@@ -794,7 +868,9 @@ export class NativeNarrator {
       if (!unit) { call('tts', 'end', ''); return }
       this.lastKey = unit.key
       if (this.timerMin === -1) { call('tts', 'end', ''); return } // 读完本章就停
-      call('tts', 'append', { segments: this.pack(unit) })
+      const packed = this.pack(unit)
+      call('tts', 'append', { segments: packed })
+      this.prefetchPacked(packed)
     } catch (e) { console.error(e); call('tts', 'end', '') } finally { this.loadingMore = false }
   }
 
@@ -834,6 +910,7 @@ export class NativeNarrator {
   stop() { call('tts', 'stop', ''); this.cleanup() }
 
   cleanup() {
+    watchReady(this, false)
     this.active = false
     this.playing = false
     this.shell.engine?.ttsClear?.()
@@ -882,7 +959,10 @@ export class NativeNarrator {
   async sheetSection() {
     const parts = [h('h4', null, '听书')]
     const box = h('div')
-    parts.push(box)
+    const ready = smallNote('')
+    ready.hidden = true
+    prefetchStatus().then(t => { ready.textContent = t; ready.hidden = !t })
+    parts.push(box, ready)
     let info = null
     try { info = await voiceInfo() } catch {}
     if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))

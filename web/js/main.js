@@ -333,6 +333,7 @@ async function pollStatus() {
   if (!ctx.user || document.hidden) return
   try {
     const s = await api('/api/status')
+    ctx.aiReady = !!s.ai
     const busy = !!(s.inbox.pending || s.scan.running)
     const side = $('#side-status')
     if (side) {

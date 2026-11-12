@@ -32,6 +32,8 @@ func routesP1(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/fulltext/rebuild", ad(handleFulltextRebuild))
 	mux.HandleFunc("GET /api/tts/voices", a(handleTTSVoices))
 	mux.HandleFunc("POST /api/tts", a(handleTTS))
+	mux.HandleFunc("POST /api/tts/prefetch", a(handleTTSPrefetch))
+	mux.HandleFunc("GET /api/tts/prefetch", a(handleTTSPrefetchStatus))
 
 	o := requireOPDS
 	mux.HandleFunc("GET /opds", o(opdsRoot))

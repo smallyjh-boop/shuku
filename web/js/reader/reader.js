@@ -9,6 +9,7 @@ import { Notes } from './notes.js'
 import { placePopup } from './dict.js'
 import { targetLang, setTargetLang, loadDefaultLang, langOptions, translateTexts, needsTranslation } from './translate.js'
 import { AutoTurn } from './autoturn.js'
+import { AIPanel } from './aipanel.js'
 
 export const THEMES = [
   { id: 'white', name: '白', bg: '#FFFFFF', fg: '#26292E', dark: false },
@@ -213,6 +214,18 @@ class Reader {
       this.engine.find(sq, isNaN(sec) ? -1 : sec).then(ok => toast(ok ? `已定位到“${sq}”` : `没在这一章找到“${sq}”`, { duration: 2000 })).catch(() => {})
     }
     this.startTimeTracking()
+    this.loadToday()
+    // 隔了 3 天以上再打开（读过一些）：问一下要不要看前情提要
+    const gapDays = server?.updated_at ? (Date.now() / 1000 - server.updated_at) / 86400 : 0
+    if (gapDays >= 3 && (server.percent || 0) > 0.01 && this.engine.ttsSegments && this.ctx.aiReady !== false) {
+      setTimeout(() => {
+        if (this.destroyed) return
+        toast(`隔了 ${Math.floor(gapDays)} 天，看看前面讲了什么？`, { duration: 9000, action: { label: '前情提要', run: () => { this.togglePanel('ai'); (this.aiPanel ||= new AIPanel(this)).loadRecap(false) } } })
+      }, 2500)
+    }
+    // 读了 20 秒（不是随手翻翻）：请书库从这一页往后提前合成听书的语音，之后翻到新的一节接着合成
+    this.openedAt = Date.now()
+    this.prefT = setTimeout(() => this.prefetchListen(), 20000)
     if (q) this.saveSoon()
     // 第一次打开时短暂显示工具栏，让人知道在哪
     this.showUI(true)
@@ -363,7 +376,7 @@ class Reader {
     this.markActivity()
     const tick = setInterval(() => {
       if (document.hidden && !this.narrator?.playing) return
-      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) { this.readSecs++; this.activeSecs++; this.restTick() }
+      if (Date.now() - this.lastAct < 300000 || this.narrator?.playing) { this.readSecs++; this.activeSecs++; this.restTick(); this.goalTick() }
       else this.restSecs = 0 // 停下来 5 分钟以上不算连续阅读
     }, 1000)
     // 一直停在同一页（比如在看一大页 PDF）：攒够 5 分钟也传一次阅读时长
@@ -376,6 +389,23 @@ class Reader {
     })
   }
 
+  // ---------- 每日目标、读完预测（今天读了多久、最近每天平均读多久，从书库取） ----------
+  async loadToday() {
+    try { this.today = await api('/api/stats/today'); this.todayAt = this.activeSecs || 0 } catch {}
+    if (this.lastUnits) this.showTimeLeft(this.lastUnits)
+  }
+
+  goalTick() {
+    const goal = +store('shuku.app', {}).goal || 0
+    if (!goal || !this.today || this.goalDone) return
+    const secs = (this.today.seconds || 0) + (this.activeSecs - (this.todayAt || 0))
+    if (secs < goal * 60) return
+    this.goalDone = true
+    const key = 'shuku.goalDone.' + new Date().toDateString()
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, '1') } catch {}
+    toast(`今天的 ${goal} 分钟读够了${this.today.streak ? `，已经连续 ${this.today.streak + (this.today.seconds >= 60 ? 0 : 1)} 天` : ''}`, { duration: 6000 })
+  }
+
   // ---------- 休息提醒（设置 → 外观：关 / 20 / 30 / 45 分钟）：连续阅读这么久，轻轻提示看看远处 ----------
   restTick() {
     const min = +store('shuku.app', {}).rest || 0
@@ -384,6 +414,15 @@ class Reader {
     if (this.restSecs < min * 60) return
     this.restSecs = 0
     toast(`已经连续看了 ${min} 分钟，抬头看看远处，休息一下眼睛`, { duration: 8000 })
+  }
+
+  // ---------- 提前合成听书语音（在读哪本就合成哪本，从读到的地方往后） ----------
+  prefetchSoon = debounce(() => this.prefetchListen(), 3000)
+
+  async prefetchListen() {
+    if (this.destroyed || !this.engine?.ttsSegments || this.narrator?.active) return
+    this.prefKey = this.engine.ttsUnitKey?.()
+    try { (await import('./tts.js')).prefetchFromView(this) } catch {}
   }
 
   // ---------- 听书 ----------
@@ -545,6 +584,7 @@ class Reader {
 
   destroy() {
     this.destroyed = true
+    clearTimeout(this.prefT)
     setActiveBook(0)
     this.dict?.destroy()
     this.notes?.destroy()
@@ -680,6 +720,7 @@ class Reader {
     this.showTimeLeft(units)
     if (moved) this.chipTick()
     if (fraction >= 0.995) this.onEnd()
+    if (this.openedAt && Date.now() - this.openedAt > 20000 && this.engine?.ttsUnitKey?.() !== this.prefKey) this.prefetchSoon()
     if (moved || !this.auto?.page) this.auto?.onPage({ fraction, units }, act)
     // PDF 的翻译面板开着：翻到别的页时跟着换
     if (this.trOpen && this.engine?.translateKey?.() !== this.trKey) this.drawTranslateSoon()
@@ -830,11 +871,18 @@ class Reader {
   }
 
   showTimeLeft(u) {
+    this.lastUnits = u
     const sp = store(this.speedKey, {})[this.kind]
     if (!u || !(sp > 0)) { this.timeEl.textContent = ''; return }
     const parts = []
     if (u.chapterEnd != null && u.chapterEnd > u.pos) parts.push('本章还剩约 ' + fmtMinutes((u.chapterEnd - u.pos) / sp))
-    if (u.total > u.pos) parts.push('全书还剩约 ' + fmtMinutes((u.total - u.pos) / sp))
+    if (u.total > u.pos) {
+      const left = (u.total - u.pos) / sp
+      parts.push('全书还剩约 ' + fmtMinutes(left))
+      // 读完预测：按最近两周平均每天读多久
+      const perDay = (this.today?.avg14 || 0) / 60
+      if (perDay >= 3 && left > perDay) parts.push(`按最近每天约 ${Math.round(perDay)} 分钟，大约 ${Math.ceil(left / perDay)} 天读完`)
+    }
     this.timeEl.textContent = parts.join(' · ')
   }
 
@@ -933,13 +981,16 @@ class Reader {
   drawPanel() {
     // 面板打开着才画：目录可能有几千条（TXT 一章一条），墨水屏上打开书时光画目录就要一两秒；打开面板时再画
     if (!this.panel.classList.contains('show')) return
-    const tabs = this.engine?.panelTabs?.() || [['toc', '目录'], ['bm', '书签']]
+    const tabs = [...(this.engine?.panelTabs?.() || [['toc', '目录'], ['bm', '书签']])]
+    // 有文字的书（不是漫画、固定版式）：AI 助手（前情提要、问这本书、整理划线）
+    if (this.engine?.ttsSegments) tabs.push(['ai', 'AI 助手'])
     if (!this.ptab || !tabs.some(t => t[0] === this.ptab)) this.ptab = tabs[0][0]
     fill(this.ptabs, ...tabs.map(([k, l]) => h('button', { class: this.ptab === k ? 'on' : '', type: 'button', role: 'tab', 'aria-selected': this.ptab === k ? 'true' : 'false', onclick: () => { this.ptab = k; this.drawPanel() } }, l)))
     clear(this.pbody)
     if (this.ptab === 'toc') this.drawToc()
     else if (this.ptab === 'bm') this.drawBookmarks()
     else if (this.ptab === 'notes') this.notes?.drawTab(this.pbody)
+    else if (this.ptab === 'ai') (this.aiPanel ||= new AIPanel(this)).draw(this.pbody)
     else this.engine?.drawPanelTab?.(this.ptab, this.pbody)
   }
 
