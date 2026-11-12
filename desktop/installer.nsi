@@ -32,6 +32,9 @@ UninstPage instfiles
 !macro QuitApp
   nsExec::Exec 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Method Post http://127.0.0.1:27230/quit | Out-Null; Start-Sleep -Seconds 2 } catch {}"'
   Pop $0
+  ; 还没退的（比如卡住了）：只关这个文件夹里的 Python
+  nsExec::Exec `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1"`
+  Pop $0
 !macroend
 
 Section "书库"
