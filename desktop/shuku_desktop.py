@@ -768,7 +768,7 @@ def quit_app():
         pass
     if window is None:
         os._exit(0)
-    threading.Timer(5, lambda: os._exit(0)).start()  # 窗口没关干净也要退出
+    threading.Timer(3, lambda: os._exit(0)).start()  # 窗口没关干净也要退出
 
 
 # ---------- 窗口里的书库网页能调用的（window.pywebview.api，书库“设置”里显示这台电脑的加速开关） ----------
