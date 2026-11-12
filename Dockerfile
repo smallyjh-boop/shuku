@@ -46,7 +46,20 @@ RUN apt-get update \
  && rm -f /usr/share/tesseract-ocr/*/tessdata/osd.traineddata \
  && rm -rf /var/lib/apt/lists/*
 
-FROM ocr
+FROM ocr AS tts
+# NAS 本地语音（听书时中文、英文不经过外网）：MeloTTS 中英混读模型和运行它的 Python 环境（sherpa-onnx，只用 CPU）。
+# 书库启动后自己在后台开着它（server/tts_embed.go，只听本机 127.0.0.1:27210），程序在 tts/server.py。
+# 发布时这一段单独做成 ghcr.io/smallyjh-boop/shuku-runtime:tts-…（文字识别层和这一段没变就一直用同一个），
+# NAS 只在第一次多下载这一层（三百多 MB）
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv curl bzip2 ca-certificates \
+ && python3 -m venv /opt/tts/venv \
+ && /opt/tts/venv/bin/pip install --no-cache-dir sherpa-onnx==2.0.1 lameenc==1.9.0 "numpy<2.4" \
+ && mkdir -p /opt/tts/models && curl -fsSL https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2 | tar xj -C /opt/tts/models \
+ && rm -f /opt/tts/models/vits-melo-tts-zh_en/model.int8.onnx \
+ && apt-get purge -y bzip2 && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /root/.cache
+
+FROM tts
 # 威联通上要用宿主机网络（network_mode: host）运行，书库直接监听 SHUKU_PORT；默认 27200，避开 QTS 自己的 8080
 ENV TZ=Asia/Bangkok \
     SHUKU_PORT=27200 \
@@ -60,6 +73,7 @@ COPY --from=build /out/shuku /app/shuku
 # 手机 App、手表 App、浏览器插件的安装包和版本信息（clients.json），各端从书库检查更新、下载
 COPY --from=build /out/clients/ /app/clients/
 COPY web/ /app/web/
+COPY tts/server.py /app/tts/server.py
 VOLUME ["/data"]
 EXPOSE 27200
 HEALTHCHECK --interval=60s --timeout=5s CMD ["/app/shuku", "-health"]

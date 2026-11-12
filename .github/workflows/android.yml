@@ -252,11 +252,27 @@ jobs:
           npm ci --no-audit --no-fund 2>&1 | tail -n 3
           node build.mjs 2>&1 | grep -v -e '^ ' -e '^$' | tee -a "$RUNNER_TEMP/build.log"
 
+      - name: 本地语音（文字识别层加上 MeloTTS 中英模型，没改就用做好的）
+        run: |
+          set -o pipefail
+          # 标签按文字识别层和 Dockerfile 里 tts 那一段算：都没变就一直用同一个，NAS 只在第一次下载这一层
+          key="$OCR|$(awk '/^FROM .* AS tts$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile)"
+          T="$RUNTIME_IMAGE:tts-$(printf '%s' "$key" | sha256sum | cut -c1-12)"
+          echo "TTS=$T" >> "$GITHUB_ENV"
+          if docker buildx imagetools inspect "$T" > /dev/null 2>&1; then
+            echo "用已有的 $T"
+            exit 0
+          fi
+          echo "制作 $T"
+          docker buildx build --platform linux/amd64 --target tts --build-context ocr="docker-image://$OCR" \
+            -t "$T" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          docker push "$T"
+
       - name: 打包服务器镜像并试运行
         run: |
           set -o pipefail
-          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成做好的（带字典和文字识别）
-          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context ocr="docker-image://$OCR" \
+          # 用根目录的 Dockerfile：编译阶段换成前面编译好的程序和各端安装包，运行环境换成做好的（带字典、文字识别、本地语音）
+          docker buildx build --platform linux/amd64 --build-context build="$RUNNER_TEMP/ctx" --build-context tts="docker-image://$TTS" \
             -t "$IMAGE:latest" -t "$IMAGE:v$V" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           # 和 NAS 上一样用宿主机网络试运行：接口、网页、各端安装包都要能取到
           docker run -d --name shuku-test --network host -e SHUKU_PORT=18080 "$IMAGE:latest" > /dev/null
@@ -356,6 +372,15 @@ jobs:
             curl -fsS http://127.0.0.1:18080/dl/$f -o "$RUNNER_TEMP/dl-$f" 2>/dev/null || true
             cmp -s "$RUNNER_TEMP/dl-$f" "dist/$f" && echo "下载 $f：正常" || { ok=""; echo "从书库下载的 $f 不对"; }
           done
+          # 本地语音：书库自己开在 127.0.0.1:27210，加载模型要半分钟左右；合成一句中英混读拿到 MP3
+          tts=
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:27210/health > /dev/null && tts=1 && break; sleep 2; done
+          if [ -n "$tts" ] && curl -fs -X POST -H 'Content-Type: application/json' -d '{"input":"那是一个晴朗的早晨。It was a bright day.","speed":1}' \
+              http://127.0.0.1:27210/v1/audio/speech -o "$RUNNER_TEMP/tts.mp3" && [ "$(stat -c%s "$RUNNER_TEMP/tts.mp3")" -gt 5000 ]; then
+            echo "本地语音：$(curl -fs http://127.0.0.1:27210/health)"
+          else
+            ok=""; echo "本地语音没开起来"
+          fi
           docker logs shuku-test 2>&1 | tail -n 20 | tee -a "$RUNNER_TEMP/build.log"
           docker rm -f shuku-test > /dev/null
           # Calibre：把一个 RTF 转成 EPUB（和书库转换时的参数一样）
@@ -455,30 +480,6 @@ jobs:
         run: |
           docker push "$IMAGE:v$V"
           docker push "$IMAGE:latest"
-
-      - name: NAS 本地语音服务 shuku-tts（tts 文件夹没改就用做好的）
-        run: |
-          set -o pipefail
-          # 标签按 tts 文件夹的内容算：没改就不重做，NAS 也不用重新下载（安装：deploy/tts/install.sh）
-          T=ghcr.io/smallyjh-boop/shuku-tts
-          tag=$(cat tts/Dockerfile tts/server.py | sha256sum | cut -c1-12)
-          if docker buildx imagetools inspect "$T:$tag" > /dev/null 2>&1; then
-            echo "用已有的 $T:$tag"
-            exit 0
-          fi
-          docker buildx build --platform linux/amd64 --build-arg TTS_VERSION="$tag" -t "$T:$tag" -t "$T:latest" --load tts 2>&1 | tee -a "$RUNNER_TEMP/build.log"
-          # 试运行：启动、合成一句中英混读，拿到 MP3 才推送
-          docker run -d --name tts-check --network host -e TTS_PORT=27299 "$T:$tag"
-          ok=
-          for i in $(seq 1 90); do curl -fs http://127.0.0.1:27299/health && ok=1 && break; sleep 2; done
-          [ -n "$ok" ] || { docker logs tts-check; exit 1; }
-          curl -fs -X POST -H 'Content-Type: application/json' -d '{"input":"那是一个晴朗的早晨。It was a bright cold day.","speed":1}' \
-            http://127.0.0.1:27299/v1/audio/speech -o "$RUNNER_TEMP/tts.mp3"
-          size=$(stat -c%s "$RUNNER_TEMP/tts.mp3"); echo "试读：$size 字节"; [ "$size" -gt 5000 ]
-          docker logs tts-check | tail -n 3
-          docker rm -f tts-check > /dev/null
-          docker push "$T:$tag"
-          docker push "$T:latest"
 
       # ---------- 出错时 ----------
 
