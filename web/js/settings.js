@@ -712,8 +712,8 @@ function narration(s, ctx) {
   api('/api/tts/voices').then(r => {
     const l = r.local || {}
     localState.textContent = l.ok
-      ? `已经装好（${l.model || 'MeloTTS'}，合成 1 秒语音约 ${l.rtf} 秒）。中文、英文不经过外网，网络不好也不卡；泰文等其他语言照旧用微软`
-      : '还没装：在 NAS 上装好本地语音服务（shuku-tts）以后，书库会自动用上，不用改设置'
+      ? `已开（${l.model || 'MeloTTS'}，在这台 NAS 上合成 1 秒语音约 ${l.rtf} 秒）。中文、英文不经过外网，网络不好也不卡；泰文等其他语言照旧用微软。选“不用”会关掉，省内存`
+      : localSel.value === 'off' ? '已关：听书全部用微软' : '正在准备：书库启动后要半分钟左右加载本地语音模型，稍后刷新这一页'
   }).catch(() => { localState.textContent = '' })
   const body = () => ({ engine: engine.value, voice: voiceSel.value || t.voice, local: localSel.value, openai: { base_url: base.value.trim(), api_key: key.value.trim(), model: model.value.trim(), voice: ovoice.value.trim(), voices: ovoices.value.trim() } })
   async function loadVoices() {

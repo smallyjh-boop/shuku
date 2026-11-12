@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""书库本地语音服务（shuku-tts）：在 NAS 上用 MeloTTS（中英混读，sherpa-onnx，只用 CPU）合成听书的语音。
+"""书库本地语音服务：在 NAS 上用 MeloTTS（中英混读，sherpa-onnx，只用 CPU）合成听书的语音。
+书库镜像里带着它（Dockerfile 的 tts 段），书库启动后自己在后台开着（server/tts_embed.go），不用另外装。
 
 接口和 OpenAI 的语音接口一样：POST /v1/audio/speech {"input": 文字, "speed": 语速}，返回 MP3。
 书库（server/tts_local.go）自动发现本机 27210 端口上的这个服务：中文、英文先用它，出错或者没开时用微软。
@@ -19,6 +20,7 @@ import numpy as np
 import sherpa_onnx as so
 
 PORT = int(os.environ.get('TTS_PORT', '27210'))
+HOST = os.environ.get('TTS_HOST', '0.0.0.0')  # 书库自己开的只听本机（127.0.0.1）
 THREADS = int(os.environ.get('TTS_THREADS', '4'))
 MODEL = os.environ.get('TTS_MODEL_DIR', '/models/vits-melo-tts-zh_en').rstrip('/') + '/'
 VERSION = os.environ.get('TTS_VERSION', 'dev')
@@ -128,6 +130,6 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    srv = ThreadingHTTPServer(('0.0.0.0', PORT), H)
+    srv = ThreadingHTTPServer((HOST, PORT), H)
     srv.daemon_threads = True
     srv.serve_forever()
