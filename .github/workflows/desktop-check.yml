@@ -30,8 +30,8 @@ jobs:
           New-Item -ItemType Directory -Force build\app | Out-Null
           Copy-Item desktop\shuku_desktop.py, desktop\shuku.ico build\app\
           Copy-Item build\runtime\runtime.txt build\app\
-          Set-Content -NoNewline build\app\version.txt 'ci'
-          Set-Content -NoNewline build\app\server.json '{"name": "CI"}'
+          [IO.File]::WriteAllText("$pwd\build\app\version.txt", 'ci')
+          [IO.File]::WriteAllText("$pwd\build\app\server.json", '{"name": "CI"}')
           & $nsis -INPUTCHARSET UTF8 -V2 "-DRUNTIME=$pwd\build\runtime" "-DAPPSRC=$pwd\build\app" "-DOUTFILE=$pwd\build\setup.exe" -DVERSION=ci desktop\installer.nsi
           if ($LASTEXITCODE -ne 0) { exit 1 }
           "安装程序：{0:N1} MB" -f ((Get-Item build\setup.exe).Length / 1MB)
