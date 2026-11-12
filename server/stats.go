@@ -132,5 +132,18 @@ func handleStatsToday(w http.ResponseWriter, r *http.Request) {
 		WHERE p.user_id=? AND COALESCE(ub.read_state,'unread')<>'done' AND `+vis+` ORDER BY p.updated_at DESC LIMIT 1`, append([]any{u.ID}, vargs...)...).Scan(&id, &title, &kind, &pct) == nil {
 		book = map[string]any{"id": id, "title": title, "kind": kind, "percent": pct}
 	}
-	writeJSON(w, 200, map[string]any{"seconds": secs, "book": book})
+	// 每日目标、读完预测用：连续读了几天（今天没读的话从昨天算）、最近 14 天平均每天读多少秒
+	streak := 0
+	for i := 0; i < 400; i++ {
+		var s int
+		db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE user_id=? AND day=?`, u.ID, time.Now().AddDate(0, 0, -i).Format("2006-01-02")).Scan(&s)
+		if s >= 60 {
+			streak++
+		} else if i > 0 {
+			break
+		}
+	}
+	var sum14 int
+	db.QueryRow(`SELECT COALESCE(SUM(seconds),0) FROM reading_log WHERE user_id=? AND day>=?`, u.ID, time.Now().AddDate(0, 0, -13).Format("2006-01-02")).Scan(&sum14)
+	writeJSON(w, 200, map[string]any{"seconds": secs, "book": book, "streak": streak, "avg14": sum14 / 14})
 }

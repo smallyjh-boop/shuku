@@ -79,6 +79,7 @@ function appearance(ctx) {
   const filter = segOf([['0', '关'], ['1', '轻'], ['2', '中'], ['3', '强']], () => String(+p.blueFilter || 0), v => ctx.setTonePref('blueFilter', +v))
   const nightFilter = h('input', { type: 'checkbox', checked: p.nightFilter !== false })
   nightFilter.onchange = () => ctx.setTonePref('nightFilter', nightFilter.checked)
+  const goal = segOf([['0', '关'], ['15', '15 分钟'], ['30', '30 分钟'], ['60', '60 分钟']], () => String(+p.goal || 0), v => ctx.setTonePref('goal', +v))
   const rest = segOf([['0', '关'], ['20', '20 分钟'], ['30', '30 分钟'], ['45', '45 分钟']], () => String(+p.rest || 0), v => ctx.setTonePref('rest', +v))
   // 墨水屏阅读器（墨案、文石等）：黑白、没有动画和阴影，阅读时按页翻
   const eink = segOf([['auto', '自动'], ['on', '开'], ['off', '关']], () => p.eink || 'auto', v => ctx.setDisplay('eink', v))
@@ -105,6 +106,7 @@ function appearance(ctx) {
     row('界面颜色', colorHint, colors, 'wrap-sm'),
     autoRow, filterRow, nightFilterRow,
     row('休息提醒', '连续阅读这么久，提醒你看看远处、休息一下眼睛', rest, 'wrap-sm'),
+    row('每日阅读目标', '书架顶上显示今天读了多久、连续读了几天，读够了提醒一下', goal, 'wrap-sm'),
     row('界面字号', scaleHint, scale, 'wrap-sm'),
     row('墨水屏模式', einkHint, eink))
 }

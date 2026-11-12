@@ -93,7 +93,19 @@ export function renderLibrary(main, opts, ctx) {
     h('a', { href: '#/books' }, icon('book'), '图书'),
     h('a', { href: '#/comics' }, icon('comic'), '漫画'),
     offlineSupported ? h('a', { href: '#/offline' }, icon('saved'), '离线书架') : null) : null
-  add(main, head, quick, continueWrap, gridTitle, filters, grid, emptyEl, sentinel, ftWrap)
+  // 每日目标（设置 → 外观里设）：今天读了多久、连续几天
+  const goalMin = +store('shuku.app', {}).goal || 0
+  const goalEl = opts.view === 'home' && !tag && goalMin ? h('div', { class: 'goal-bar', hidden: true }) : null
+  if (goalEl) api('/api/stats/today').then(t => {
+    const min = Math.floor((t.seconds || 0) / 60)
+    const done = min >= goalMin
+    fill(goalEl, h('div', { class: 'goal-txt' }, h('b', null, done ? '今天的目标完成了' : `今天读了 ${min} / ${goalMin} 分钟`),
+      t.streak ? h('span', null, `连续读了 ${t.streak} 天`) : null),
+      h('div', { class: 'goal-track' }, h('i', { style: { width: Math.min(100, Math.round(min / goalMin * 100)) + '%' } })))
+    goalEl.classList.toggle('done', done)
+    goalEl.hidden = false
+  }).catch(() => {})
+  add(main, head, goalEl, quick, continueWrap, gridTitle, filters, grid, emptyEl, sentinel, ftWrap)
 
   function query(extra = {}) {
     const p = new URLSearchParams()
