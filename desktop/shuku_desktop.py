@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""书库桌面版（Windows）：托盘里的听书加速器，顺便一点就能打开书库看书。
+"""书库 Windows 版：打开就是书库的窗口（看书、听书），听书加速器在同一个程序里一起运行。
 
-- 连上书库（配对码）以后，电脑开着时向书库要活干：书库的微软语音不行（网络不好）时，要合成的听书句子交给电脑，
-  用电脑的 CPU 跑 MeloTTS（和 NAS 本地语音同一个模型，sherpa-onnx），合成好传回书库存进听书包。
-  电脑只往外连书库（拉活、交活），不用开端口、不用改防火墙。
+- 窗口用系统自带的 Edge 内核（WebView2，pywebview）显示书库网页，不开浏览器；配对一次，看书和加速都用这个登录。
+- 加速：书库的微软语音不行（网络不好）时，要合成的听书句子交给电脑，用电脑的 CPU 跑 MeloTTS
+  （和 NAS 本地语音同一个模型，sherpa-onnx），合成好传回书库存进听书包。电脑只往外连书库（拉活、交活），不用开端口。
+  打开程序就在加速；窗口里（书库“设置 → 手机、手表、浏览器插件”）、托盘菜单都能开关。
 - 电脑空闲时全速；有人在用（最近一分钟碰过键盘鼠标）时降速；用电池时不干活（可以改）。
-- 开机自动启动（可以关）；每 6 小时检查一次更新，有新版自己换上程序。
-- 设置和状态在本机网页 http://127.0.0.1:27230 （只有这台电脑能打开）。
+- 关窗口缩到托盘接着加速，托盘“退出”才真正关掉；开机自动启动（可以关）；有新版自己升级。
+- 本机设置页 http://127.0.0.1:27230 （只有这台电脑能打开）：配对、状态；安装程序用它的 /quit 关掉正在运行的程序。
 
-书库那边的接口见 server/listen.go（/api/listen/worker/next、/done）和 server/desktop.go。
+书库那边的接口见 server/listen.go（/api/listen/worker/next、/done）和 server/desktop.go。安装程序是 installer.nsi，
+运行环境是 make_runtime.py 做的。
 """
 import ctypes
 import io
@@ -44,6 +46,9 @@ def _read(p, default=''):
 
 
 VERSION = _read(os.path.join(APP_DIR, 'version.txt'), 'dev')
+RUNTIME = _read(os.path.join(APP_DIR, 'runtime.txt'), '')
+ICON = os.path.join(APP_DIR, 'shuku.ico')
+SELFTEST = os.environ.get('SHUKU_DESKTOP_SELFTEST') == '1'
 
 if WINDOWS:
     HOME = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'Shuku')
@@ -229,7 +234,7 @@ def set_autostart(on):
         exe = exe[:-10] + 'pythonw.exe'
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
         if on:
-            winreg.SetValueEx(k, 'ShukuDesktop', 0, winreg.REG_SZ, f'"{exe}" "{os.path.abspath(__file__)}"')
+            winreg.SetValueEx(k, 'ShukuDesktop', 0, winreg.REG_SZ, f'"{exe}" "{os.path.abspath(__file__)}" --hidden')
         else:
             try:
                 winreg.DeleteValue(k, 'ShukuDesktop')
@@ -240,7 +245,7 @@ def set_autostart(on):
 # ---------- 状态（托盘、设置页显示） ----------
 
 state = {'text': '启动中…', 'done': 0, 'today': 0, 'day': '', 'rtf': None, 'busy': False, 'model': '',
-         'last_error': '', 'update': ''}
+         'last_error': '', 'update': '', 'window': '', 'tray': False, 'page_title': ''}
 state_lock = threading.Lock()
 listeners = []
 
@@ -464,7 +469,7 @@ def pair(address, code):
 
 
 def check_update(auto=True):
-    """有新版就下载程序部分换上（运行环境不变），然后重新启动自己"""
+    """有新版就换上：运行环境没变只换程序（几十 KB），变了就下载安装程序静默重装；然后重新打开"""
     try:
         r = conn.json('GET', '/api/clients', auth=False)
     except Exception as e:
@@ -475,6 +480,22 @@ def check_update(auto=True):
         set_state(update='')
         return '已经是最新版' + ('' if VERSION != 'dev' else '（开发版）')
     set_state(update=v)
+    # 运行环境变了（或者是 1.0.0.32 的 zip 版，没有窗口要用的库）：下载安装程序重新安装
+    import importlib.util
+    old_zip = WINDOWS and importlib.util.find_spec('webview') is None
+    if d.get('url') and d.get('runtime') and (old_zip or (RUNTIME and d['runtime'] != RUNTIME)):
+        code, b = conn.request('GET', d['url'], auth=False, timeout=900)
+        if code != 200 or b[:2] != b'MZ':
+            return '下载新版安装程序失败'
+        import subprocess
+        import tempfile
+        exe = os.path.join(tempfile.gettempdir(), 'shuku-setup.exe')
+        with open(exe, 'wb') as f:
+            f.write(b)
+        log('运行环境有更新，重新安装', v)
+        # 安装程序会先让这个程序退出（/quit），装完再打开
+        subprocess.Popen([exe, '/S'], close_fds=True, creationflags=0x00000008 if WINDOWS else 0)
+        return '正在安装新版 ' + v
     code, b = conn.request('GET', d.get('app_url') or '/dl/shuku-desktop.zip?part=app', auth=False, timeout=120)
     if code != 200:
         return '下载新版失败'
@@ -494,6 +515,11 @@ def check_update(auto=True):
 def restart():
     import subprocess
     stop_event.set()
+    try:
+        if tray:
+            tray.stop()
+    except Exception:
+        pass
     flags = 0x00000008 if WINDOWS else 0  # DETACHED_PROCESS
     env = dict(os.environ, SHUKU_DESKTOP_RESTART='1')  # 新的等这个退出、端口空出来再开
     subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=APP_DIR, creationflags=flags, close_fds=True, env=env)
@@ -512,8 +538,8 @@ def updater():
 
 # ---------- 设置页（本机网页） ----------
 
-PAGE = '''<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>书库桌面版</title><style>
+PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>书库</title><style>
 :root{--bg:#f7f7f5;--fg:#222;--card:#fff;--muted:#777;--acc:#2f6f8f;--line:#e3e3e0}
 @media (prefers-color-scheme:dark){:root{--bg:#161616;--fg:#e8e8e8;--card:#202020;--muted:#999;--acc:#6fb2d2;--line:#333}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}
@@ -525,19 +551,19 @@ button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 1
 button.q{background:transparent;color:var(--acc);border:1px solid var(--acc)}label{display:block;margin:8px 0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}#msg{min-height:1.4em;color:var(--acc)}
 </style></head><body><main>
-<h1>书库桌面版</h1><div class="muted">版本 <span id="ver"></span> · 听书加速器</div>
+<h1>书库</h1><div class="muted">Windows 版 <span id="ver"></span> · 看书、听书加速</div>
 <div class="card"><div class="big" id="text">…</div><div class="muted" id="sub"></div>
-<div class="row" style="margin-top:8px"><button id="open">打开书库</button><button class="q" id="upd">检查更新</button></div></div>
+<div class="row" style="margin-top:8px"><button id="open">进入书库</button><button class="q" id="upd">检查更新</button></div></div>
 <div class="card" id="paircard"><div class="big">连接书库</div>
-<div class="muted">在书库网页“设置 → 手机、手表、浏览器插件”里点“生成配对码”，填到下面。</div>
-<label>书库地址（一般不用改）<input type="text" id="addr" placeholder="http://192.168.x.x:27200"></label>
+<div class="muted">在书库网页“设置 → 手机、手表、浏览器插件”里点“显示配对二维码”，把配对码填到下面。</div>
+<label>书库地址<input type="text" id="addr" placeholder="http://192.168.x.x:27200"></label>
 <label>配对码<input type="text" id="code" placeholder="8 位配对码" autocomplete="off"></label>
 <button id="pair">连接</button></div>
-<div class="card"><div class="big">设置</div>
+<div class="card"><div class="big">听书加速</div>
 <label><input type="checkbox" id="accel"> 帮书库合成听书包（加速）</label>
 <label><input type="checkbox" id="battery"> 用电池时也加速（笔记本）</label>
 <label><input type="checkbox" id="autostart"> 开机自动启动</label>
-<div class="muted">电脑空闲时全速；最近一分钟用过键盘鼠标时降到一半左右；程序优先级比别的程序低。</div></div>
+<div class="muted">电脑空闲时全速；最近一分钟用过键盘鼠标时降到一半左右；程序优先级比别的程序低。关掉窗口会缩到右下角托盘里接着加速。</div></div>
 <div id="msg"></div>
 <script>
 const $=id=>document.getElementById(id)
@@ -545,14 +571,40 @@ async function post(p,b){const r=await fetch(p,{method:'POST',headers:{'Content-
 let first=true
 async function refresh(){try{const s=await (await fetch('/status')).json();$('ver').textContent=s.version;$('text').textContent=s.text
 let sub=[];if(s.server)sub.push('书库：'+s.server+(s.url?'（'+s.url+'）':''));if(s.model)sub.push(s.model);if(s.rtf)sub.push('速度：合成 1 秒语音要 '+s.rtf.toFixed(2)+' 秒');sub.push('今天合成 '+s.today+' 句');if(s.update)sub.push('有新版 '+s.update);if(s.last_error)sub.push('上次出错：'+s.last_error)
-$('sub').textContent=sub.join(' · ');$('paircard').style.display=s.paired&&!first?'none':''
-if(first){first=false;$('paircard').style.display=s.paired?'none':'';$('addr').value=s.default_url||'';for(const k of ['accel','battery','autostart'])$(k).checked=!!s[k]}}catch(e){$('text').textContent='桌面版没有在运行'}}
+$('sub').textContent=sub.join(' · ');$('open').style.display=s.paired?'':'none'
+if(first){first=false;$('paircard').style.display=s.paired?'none':'';$('addr').value=s.default_url||'';for(const k of ['accel','battery','autostart'])$(k).checked=!!s[k]}}catch(e){$('text').textContent='书库程序没有在运行'}}
 for(const k of ['accel','battery','autostart'])$(k).onchange=async e=>{try{await post('/settings',{[k]:e.target.checked});$('msg').textContent='已保存'}catch(err){$('msg').textContent=err.message}}
-$('pair').onclick=async()=>{$('msg').textContent='连接中…';try{const r=await post('/pair',{address:$('addr').value,code:$('code').value});$('msg').textContent='已连接：'+(r.name||'书库');$('paircard').style.display='none';refresh()}catch(e){$('msg').textContent=e.message}}
+$('pair').onclick=async()=>{$('msg').textContent='连接中…';try{const r=await post('/pair',{address:$('addr').value,code:$('code').value});$('msg').textContent='已连接：'+(r.name||'书库')+'，正在打开…';$('paircard').style.display='none';refresh();post('/open')}catch(e){$('msg').textContent=e.message}}
 $('open').onclick=()=>post('/open')
 $('upd').onclick=async()=>{$('msg').textContent='检查中…';try{const r=await post('/update');$('msg').textContent=r.message}catch(e){$('msg').textContent=e.message}}
 refresh();setInterval(refresh,3000)
-</script></main></body></html>'''
+</script></main></body></html>"""
+
+
+def status():
+    with state_lock:
+        s = dict(state)
+    urls = candidate_urls()
+    s.update(version=VERSION, runtime=RUNTIME, paired=bool(cfg.get('token')),
+             server=cfg.get('server_name') or bundled_server().get('name', ''),
+             url=conn.base, default_url=urls[0] if urls else '', accel=cfg.get('accel', True),
+             battery=cfg.get('battery', False), autostart=cfg.get('autostart', True))
+    return s
+
+
+def set_option(k, v):
+    if k not in ('accel', 'battery', 'autostart'):
+        raise ValueError('没有这个设置')
+    cfg[k] = bool(v)
+    if k == 'autostart':
+        set_autostart(cfg[k])
+    save_cfg()
+    wake.set()
+    for f in listeners:
+        try:
+            f()
+        except Exception:
+            pass
 
 
 class UI(BaseHTTPRequestHandler):
@@ -584,13 +636,7 @@ class UI(BaseHTTPRequestHandler):
         if self.path == '/':
             return self.send(200, PAGE, 'text/html; charset=utf-8')
         if self.path == '/status':
-            with state_lock:
-                s = dict(state)
-            urls = candidate_urls()
-            s.update(version=VERSION, paired=bool(cfg.get('token')), server=cfg.get('server_name') or bundled_server().get('name', ''),
-                     url=conn.base, default_url=urls[0] if urls else '', accel=cfg.get('accel', True),
-                     battery=cfg.get('battery', False), autostart=cfg.get('autostart', True))
-            return self.send(200, s)
+            return self.send(200, status())
         self.send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -611,39 +657,187 @@ class UI(BaseHTTPRequestHandler):
             if self.path == '/settings':
                 for k in ('accel', 'battery', 'autostart'):
                     if k in body:
-                        cfg[k] = bool(body[k])
-                if 'autostart' in body:
-                    set_autostart(cfg['autostart'])
-                save_cfg()
-                wake.set()
-                set_state(text=state['text'])
-                for f in listeners:
-                    f()
+                        set_option(k, body[k])
                 return self.send(200, {'ok': True})
             if self.path == '/open':
-                open_library()
+                threading.Thread(target=open_library, daemon=True).start()
+                return self.send(200, {'ok': True})
+            if self.path == '/show':
+                show_window()
                 return self.send(200, {'ok': True})
             if self.path == '/update':
                 return self.send(200, {'message': check_update(auto=False)})
+            if self.path == '/quit':
+                self.send(200, {'ok': True})
+                threading.Timer(0.3, quit_app).start()
+                return
+            if self.path == '/selftest' and SELFTEST:
+                mp3, dt = synth('那是一个晴朗的早晨。It was a bright day.')
+                return self.send(200, {'ok': len(mp3) > 1000, 'bytes': len(mp3), 'secs': round(dt, 2), 'rtf': state.get('rtf')})
         except Exception as e:
             return self.send(400, {'error': str(e)})
         self.send(404, {'error': 'not found'})
 
 
 ui_server = None
+tray = None
+window = None
+quitting = False
 
 
-def open_settings():
-    webbrowser.open(f'http://127.0.0.1:{UI_PORT}/')
+def local_page():
+    return f'http://127.0.0.1:{UI_PORT}/'
+
+
+def library_url():
+    """能连上的书库地址（不用登录的 /api/ping 试一下）"""
+    urls = candidate_urls()
+    if conn.base in urls:
+        urls.remove(conn.base)
+        urls.insert(0, conn.base)
+    for u in urls:
+        try:
+            with urllib.request.urlopen(u + '/api/ping', timeout=4) as r:
+                if b'shuku' in r.read(200):
+                    conn.base = u
+                    return u
+        except Exception:
+            continue
+    return ''
 
 
 def open_library():
-    urls = candidate_urls()
-    u = conn.base or (urls[0] if urls else '')
-    if u:
-        webbrowser.open(u + '/')
-    else:
-        open_settings()
+    """窗口里打开书库（还没配对、连不上时打开本机设置页）"""
+    u = library_url() if cfg.get('token') else ''
+    target = (u + '/') if u else local_page()
+    if window is None:
+        webbrowser.open(target)
+        return
+    show_window()
+    try:
+        window.load_url(target)
+    except Exception as e:
+        log('打开书库失败：', e)
+
+
+def open_settings():
+    if window is None:
+        webbrowser.open(local_page())
+        return
+    show_window()
+    window.load_url(local_page())
+
+
+def show_window():
+    if window is None:
+        open_settings() if not cfg.get('token') else open_library()
+        return
+    try:
+        window.show()
+        window.restore()
+    except Exception:
+        pass
+
+
+def quit_app():
+    global quitting
+    quitting = True
+    stop_event.set()
+    wake.set()
+    try:
+        if tray:
+            tray.stop()
+    except Exception:
+        pass
+    try:
+        if window is not None:
+            window.destroy()
+    except Exception:
+        pass
+    if window is None:
+        os._exit(0)
+    threading.Timer(5, lambda: os._exit(0)).start()  # 窗口没关干净也要退出
+
+
+# ---------- 窗口里的书库网页能调用的（window.pywebview.api，书库“设置”里显示这台电脑的加速开关） ----------
+
+class Api:
+    def state(self):
+        return status()
+
+    def set_option(self, key, value):
+        set_option(key, value)
+        return status()
+
+    def open_settings(self):
+        threading.Thread(target=open_settings, daemon=True).start()
+
+    def check_update(self):
+        return check_update(auto=False)
+
+
+def on_loaded():
+    """页面打开了：书库的网页还没登录就用配对时拿到的登录"""
+    try:
+        url = window.get_current_url() or ''
+        set_state(window=url)
+        tok = cfg.get('token')
+        if tok and not url.startswith(local_page()) and any(url.startswith(u) for u in candidate_urls()):
+            t = json.dumps(tok)
+            window.evaluate_js(f"if(!localStorage.getItem('shuku.token')){{localStorage.setItem('shuku.token',{t});location.reload()}}")
+        set_state(page_title=str(window.evaluate_js('document.title') or ''))
+        time.sleep(2)
+        set_state(bridge=bool(window.evaluate_js('!!(window.pywebview && window.pywebview.api && window.pywebview.api.state)')))
+    except Exception as e:
+        log('页面打开后出错：', e)
+
+
+def on_closing():
+    """关窗口：缩到托盘接着加速（托盘“退出”才真正关掉）"""
+    if quitting or tray is None:
+        stop_event.set()
+        return True
+    try:
+        window.hide()
+        if not cfg.get('hint_tray'):
+            cfg['hint_tray'] = True
+            save_cfg()
+            tray.notify('书库还在右下角托盘里帮你加速。要完全退出，右键托盘图标选“退出”。', '书库')
+    except Exception:
+        pass
+    return False
+
+
+def on_shown():
+    set_state(shown=True)
+    # 窗口和任务栏用书库的图标（不然是 Python 的）
+    try:
+        import clr  # noqa: F401
+        from System import Action
+        from System.Drawing import Icon as DIcon
+        f = window.native
+        f.Invoke(Action(lambda: setattr(f, 'Icon', DIcon(ICON))))
+        set_state(icon=True)
+    except Exception as e:
+        log('设窗口图标失败：', e)
+
+
+def title_loop():
+    """窗口标题上显示加速的状态"""
+    last = ''
+    while not stop_event.wait(3):
+        if window is None:
+            return
+        t = '书库'
+        if cfg.get('token'):
+            t += ' · ' + ('加速已暂停' if not cfg.get('accel', True) else
+                          f'加速中（今天 {state["today"]} 句）' if state['text'].startswith('正在合成') else '听书加速开着')
+        if t != last:
+            last = t
+            try:
+                window.set_title(t)
+            except Exception:
+                pass
 
 
 # ---------- 托盘 ----------
@@ -651,59 +845,48 @@ def open_library():
 
 def tray_icon_image(active):
     from PIL import Image, ImageDraw
-    img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    color = (47, 111, 143, 255) if active else (130, 130, 130, 255)
-    d.rounded_rectangle((6, 8, 58, 56), radius=8, fill=color)
-    d.rectangle((31, 12, 33, 52), fill=(255, 255, 255, 255))
-    for y in (20, 28, 36):
-        d.line((12, y, 26, y), fill=(255, 255, 255, 220), width=3)
-        d.line((38, y, 52, y), fill=(255, 255, 255, 220), width=3)
+    try:
+        img = Image.open(ICON).convert('RGBA').resize((64, 64))
+    except Exception:
+        img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rounded_rectangle((6, 8, 58, 56), radius=8, fill=(47, 111, 143, 255))
+    if not active:
+        img = img.convert('LA').convert('RGBA')  # 加速关着：灰色
     return img
 
 
-def run_tray():
+def make_tray():
     import pystray
     from pystray import Menu, MenuItem as Item
 
     def toggle_accel(icon, item):
-        cfg['accel'] = not cfg.get('accel', True)
-        save_cfg()
-        wake.set()
-        refresh()
+        set_option('accel', not cfg.get('accel', True))
 
     def toggle_autostart(icon, item):
-        cfg['autostart'] = not cfg.get('autostart', True)
-        set_autostart(cfg['autostart'])
-        save_cfg()
+        set_option('autostart', not cfg.get('autostart', True))
 
-    def quit_app(icon, item):
-        stop_event.set()
-        wake.set()
-        icon.stop()
-
-    icon = pystray.Icon('shuku', tray_icon_image(True), '书库桌面版', Menu(
-        Item('打开书库', lambda i, it: open_library(), default=True),
-        Item('设置和状态', lambda i, it: open_settings()),
+    icon = pystray.Icon('shuku', tray_icon_image(True), '书库', Menu(
+        Item('打开书库', lambda i, it: threading.Thread(target=show_window, daemon=True).start(), default=True),
+        Item('连接和加速设置', lambda i, it: threading.Thread(target=open_settings, daemon=True).start()),
         Menu.SEPARATOR,
         Item('帮书库加速', toggle_accel, checked=lambda it: cfg.get('accel', True)),
         Item('开机自动启动', toggle_autostart, checked=lambda it: cfg.get('autostart', True)),
-        Item('检查更新', lambda i, it: threading.Thread(target=lambda: icon.notify(check_update(auto=False), '书库桌面版'), daemon=True).start()),
+        Item('检查更新', lambda i, it: threading.Thread(target=lambda: icon.notify(check_update(auto=False), '书库'), daemon=True).start()),
         Menu.SEPARATOR,
-        Item('退出', quit_app)))
+        Item('退出', lambda i, it: threading.Thread(target=quit_app, daemon=True).start())))
 
     def refresh():
         try:
             icon.icon = tray_icon_image(bool(cfg.get('token')) and cfg.get('accel', True))
-            icon.title = ('书库桌面版 · ' + state['text'])[:120]
+            icon.title = ('书库 · ' + state['text'])[:120]
         except Exception:
             pass
     listeners.append(refresh)
-    icon.run()
+    return icon
 
 
 def main():
-    global ui_server
+    global ui_server, tray, window
     load_cfg()
     restarting = os.environ.pop('SHUKU_DESKTOP_RESTART', '') == '1'
     for k in range(30 if restarting else 1):
@@ -714,11 +897,19 @@ def main():
             if k + 1 < (30 if restarting else 1):
                 time.sleep(0.5)
     if ui_server is None:
-        # 已经开着一个：打开它的设置页就行
+        # 已经开着一个：让它把窗口显示出来
         if not restarting:
-            open_settings()
+            try:
+                urllib.request.urlopen(urllib.request.Request(local_page() + 'show', data=b'{}', method='POST'), timeout=3)
+            except Exception:
+                webbrowser.open(local_page())
         return
-    log('书库桌面版', VERSION, '启动')
+    log('书库 Windows 版', VERSION, '启动')
+    if WINDOWS:
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Shuku.Desktop')
+        except Exception:
+            pass
     threading.Thread(target=ui_server.serve_forever, daemon=True).start()
     if cfg.get('autostart', True):
         try:
@@ -727,16 +918,38 @@ def main():
             log('设开机启动失败：', e)
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=updater, daemon=True).start()
-    if not cfg.get('token'):
-        open_settings()
-    if os.environ.get('SHUKU_DESKTOP_NO_TRAY') == '1':
-        stop_event.wait()
-        return
+    if os.environ.get('SHUKU_DESKTOP_NO_TRAY') != '1':
+        try:
+            tray = make_tray()
+            tray.run_detached()
+            set_state(tray=True)
+        except Exception as e:
+            log('托盘图标出不来：', e)
+            tray = None
+    # 开机自动启动时（带 --hidden）只在托盘里加速，不弹窗口
+    hidden = '--hidden' in sys.argv and tray is not None
     try:
-        run_tray()
+        if os.environ.get('SHUKU_DESKTOP_NO_WINDOW') == '1':
+            raise RuntimeError('不开窗口')
+        import webview
+        u = library_url() if cfg.get('token') else ''
+        window = webview.create_window('书库', (u + '/') if u else local_page(), js_api=Api(),
+                                       width=1280, height=860, min_size=(420, 500), hidden=hidden, text_select=True)
+        window.events.loaded += on_loaded
+        window.events.closing += on_closing
+        window.events.shown += on_shown
+        threading.Thread(target=title_loop, daemon=True).start()
+        os.makedirs(os.path.join(HOME, 'webview'), exist_ok=True)
+        webview.start(private_mode=False, storage_path=os.path.join(HOME, 'webview'))
+        # 窗口关了（退出）
+        quit_app()
     except Exception as e:
-        log('托盘图标出不来：', e)
+        window = None
+        log('窗口打不开，改用浏览器：', e)
+        if not hidden and os.environ.get('SHUKU_DESKTOP_NO_WINDOW') != '1':
+            open_library() if cfg.get('token') else open_settings()
         stop_event.wait()
+        os._exit(0)
 
 
 if __name__ == '__main__':

@@ -90,7 +90,7 @@ func main() {
 
 	appCtx = ctx
 	var wg sync.WaitGroup
-	for _, loop := range []func(context.Context){inboxLoop, scanLoop, fulltextLoop, backupLoop, purgeLoop, suggestionsLoop, ttsEmbedLoop, listenLoop} {
+	for _, loop := range []func(context.Context){inboxLoop, scanLoop, fulltextLoop, backupLoop, purgeLoop, suggestionsLoop, ttsEmbedLoop, listenLoop, desktopLoop} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

@@ -1,0 +1,85 @@
+# 在真的 Windows 上试装书库 Windows 版：做运行环境和安装程序 → 静默安装 → 程序自己打开 →
+# 检查窗口（WebView2）、托盘、窗口图标、网页里的 pywebview 接口、语音合成（模型从 GitHub 下载）→ 卸载。
+# 只能手动运行（Windows 的 Actions 分钟数按两倍算），改了 desktop/ 里的程序或运行环境时跑一次。
+name: 试装 Windows 版
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 运行环境
+        run: python desktop/make_runtime.py build/runtime
+
+      - name: 安装程序
+        shell: pwsh
+        run: |
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (!(Test-Path $nsis)) { choco install nsis -y --no-progress | Out-Null }
+          New-Item -ItemType Directory -Force build\app | Out-Null
+          Copy-Item desktop\shuku_desktop.py, desktop\shuku.ico build\app\
+          Copy-Item build\runtime\runtime.txt build\app\
+          Set-Content -NoNewline build\app\version.txt 'ci'
+          Set-Content -NoNewline build\app\server.json '{"name": "CI"}'
+          & $nsis -INPUTCHARSET UTF8 -V2 "-DRUNTIME=$pwd\build\runtime" "-DAPPSRC=$pwd\build\app" "-DOUTFILE=$pwd\build\setup.exe" -DVERSION=ci desktop\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "安装程序：{0:N1} MB" -f ((Get-Item build\setup.exe).Length / 1MB)
+
+      - name: 安装、打开、检查、卸载
+        shell: pwsh
+        env:
+          SHUKU_DESKTOP_SELFTEST: '1'
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $fail = @()
+          Start-Process build\setup.exe -ArgumentList '/S' -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\Shuku"
+          $desk = [Environment]::GetFolderPath('Desktop')
+          foreach ($p in @("$dir\python\pythonw.exe", "$dir\app\shuku_desktop.py", "$dir\uninstall.exe", "$desk\书库.lnk")) {
+            if (Test-Path $p) { "有：$p" } else { "没有：$p"; $fail += "缺 $p" }
+          }
+          $s = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            try { $s = Invoke-RestMethod http://127.0.0.1:27230/status -TimeoutSec 3 } catch {}
+            if ($s -and $s.shown -and $s.page_title -and ($s.bridge -ne $null)) { break }
+            Start-Sleep 2
+          }
+          "状态：" + ($s | ConvertTo-Json -Compress)
+          if (!$s) { $fail += '程序没打开' }
+          elseif (!$s.shown) { $fail += '窗口没显示' }
+          else {
+            if (!$s.tray) { $fail += '托盘图标没出来' }
+            if (!$s.icon) { $fail += '窗口图标没换上' }
+            if ($s.page_title -ne '书库') { $fail += "窗口里的页面不对：$($s.page_title)" }
+            if (!$s.bridge) { $fail += '网页里没有 pywebview 接口' }
+          }
+          Get-Process pythonw -ErrorAction SilentlyContinue | ForEach-Object { "窗口标题：" + $_.MainWindowTitle }
+          try {
+            $t = Invoke-RestMethod -Method Post http://127.0.0.1:27230/selftest -TimeoutSec 900 -ContentType 'application/json' -Body '{}'
+            "合成：" + ($t | ConvertTo-Json -Compress)
+            if (!$t.ok) { $fail += '合成出来的语音不对' }
+          } catch { $fail += "合成失败：$_" }
+          # 再打开一次：不会开第二个，只是把窗口叫出来
+          Start-Process "$dir\python\pythonw.exe" -ArgumentList "`"$dir\app\shuku_desktop.py`""
+          Start-Sleep 5
+          $n = (Get-Process pythonw -ErrorAction SilentlyContinue | Measure-Object).Count
+          "pythonw 进程数：$n"
+          if ($n -ne 1) { $fail += "开了 $n 个" }
+          Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -Wait
+          Start-Sleep 10
+          if (Test-Path "$dir\python") { $fail += '卸载后文件还在' }
+          if (Test-Path "$desk\书库.lnk") { $fail += '卸载后桌面图标还在' }
+          if (Get-Process pythonw -ErrorAction SilentlyContinue) { $fail += '卸载后程序还开着' }
+          "---- 日志 ----"
+          Get-Content "$env:LOCALAPPDATA\Shuku\desktop.log" -ErrorAction SilentlyContinue
+          if ($fail.Count) { "有问题：" + ($fail -join '；'); exit 1 }
+          "全部正常"

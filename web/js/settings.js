@@ -842,7 +842,7 @@ function devices(s) {
           h('ol', { class: 'pair-steps' },
             h('li', null, '安卓手机：用相机扫二维码，或者打开书库 App 选“输入配对码”。连接后手表会自动从手机拿到连接信息。'),
             h('li', null, '浏览器插件：在插件设置里填书库地址和上面的配对码。'),
-            h('li', null, 'Windows 电脑：打开书库桌面版的设置页，填上面的配对码。'),
+            h('li', null, 'Windows 电脑：打开书库 Windows 版，填上面的配对码。'),
             h('li', null, '配对码只能用一次，10 分钟内有效。')))))
     } catch (e) { toastError(e) }
     btn.disabled = false
@@ -861,8 +861,33 @@ function devices(s) {
     } catch {}
   }
   drawSessions()
-  // Windows 桌面版（听书加速器）：下载、哪些电脑在帮忙
+  // 书库 Windows 版：在 Windows 版的窗口里显示这台电脑的加速开关；别处显示下载、哪些电脑在帮忙
   const deskBox = h('div', { class: 'stack', style: { gap: '6px' } })
+  const here = h('div', { class: 'stack', style: { gap: '6px' } })
+  const deskApi = () => window.pywebview?.api?.state ? window.pywebview.api : null
+  function drawHere() {
+    const a = deskApi()
+    if (!a) return
+    a.state().then(st => {
+      if (!document.body.contains(here) && here.childNodes.length) return
+      const sw = (key, label, hint) => {
+        const input = h('input', { type: 'checkbox', checked: !!st[key] })
+        input.onchange = () => a.set_option(key, input.checked).then(drawHere, e => toastError(e))
+        return h('div', { class: 'set-row' }, h('div', null, h('div', { class: 'l' }, label), hint ? h('div', { class: 'h' }, hint) : null), h('label', { class: 'switch' }, input, h('i')))
+      }
+      fill(here,
+        h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, '这台电脑（书库 Windows 版 ' + st.version + '）'),
+        h('small', { class: 'muted' }, [st.text, st.rtf ? `合成 1 秒语音要 ${st.rtf.toFixed(2)} 秒` : '', `今天合成 ${st.today} 句`].filter(Boolean).join(' · ')),
+        sw('accel', '帮书库合成听书包（加速）', '书库的微软语音不行时，用这台电脑合成。空闲时全速，在用时降速；关掉窗口会在右下角托盘里接着加速'),
+        sw('battery', '用电池时也加速', '笔记本没插电源时默认不加速'),
+        sw('autostart', '开机自动启动', '开机后在托盘里加速，不弹窗口'),
+        h('div', { class: 'row wrap' }, h('button', { class: 'btn small', onclick: () => a.check_update().then(m => toast(m), toastError) }, '检查 Windows 版更新'),
+          h('button', { class: 'btn small quiet', onclick: () => a.open_settings() }, '连接设置')))
+    }).catch(() => {})
+  }
+  if (deskApi()) drawHere()
+  else window.addEventListener('pywebviewready', drawHere, { once: true })
+  const hereTimer = setInterval(() => { if (!document.body.contains(here) && here.childNodes.length) clearInterval(hereTimer); else if (here.childNodes.length) drawHere() }, 5000)
   ;(async () => {
     let c = {}, jobs = {}
     try { c = await api('/api/clients') } catch {}
@@ -870,10 +895,10 @@ function devices(s) {
     if (!c.desktop && !(jobs.workers || []).length) return
     const now = Date.now()
     fill(deskBox,
-      h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, 'Windows 电脑（听书加速器）'),
-      h('small', { class: 'muted' }, '电脑开着、空闲时帮书库合成听书包（书库的微软语音不行时才用），也能一点打开书库看书。电脑只往外连书库，不用改防火墙；用电池时不干活。'),
-      c.desktop ? h('div', { class: 'row wrap' }, h('a', { class: 'btn', href: apiUrl(c.desktop.url), download: 'shuku-desktop.zip' }, icon('download'), `下载书库桌面版（${c.desktop.version}）`),
-        h('small', { class: 'muted' }, '解压到固定的文件夹，双击“启动书库.cmd”，再填配对码')) : null,
+      h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, 'Windows 电脑（书库 Windows 版）'),
+      h('small', { class: 'muted' }, '装好后桌面上有“书库”：打开就是书库的窗口（看书、听书），同时帮书库合成听书包（微软语音不行时才用），在程序里就能开关加速。电脑只往外连书库，不用改防火墙；用电池时不加速。'),
+      c.desktop && !deskApi() ? h('div', { class: 'row wrap' }, h('a', { class: 'btn', href: apiUrl(c.desktop.url), download: '书库安装程序.exe' }, icon('download'), `下载书库 Windows 版（${c.desktop.version}）`),
+        h('small', { class: 'muted' }, '双击安装，打开后填配对码（第一次下载要等一两分钟，书库在做安装程序）')) : null,
       (jobs.workers || []).map(w => h('div', { class: 'dev-row' }, icon('monitor'),
         h('div', { class: 'grow' }, h('div', null, w.name),
           h('small', null, [now - w.seen < 60000 ? (w.busy ? '在线（电脑在用，降速）' : '在线') : '离线（最近 ' + fmtTime(Math.round(w.seen / 1000)) + '）',
@@ -883,6 +908,7 @@ function devices(s) {
     h('div', { class: 'stack' },
       h('div', { class: 'row wrap' }, h('button', { class: 'btn primary', onclick: e => pair(e.currentTarget) }, icon('phone'), '显示配对二维码')),
       pairBox,
+      here,
       deskBox,
       h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, '已登录的设备'),
       list))

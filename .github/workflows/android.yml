@@ -268,11 +268,11 @@ jobs:
             -t "$T" --load . 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           docker push "$T"
 
-      - name: 桌面版运行环境（Windows 版 Python 和 sherpa-onnx，没改就用做好的）
+      - name: Windows 版运行环境（Windows 版 Python、sherpa-onnx、pywebview 和 makensis，没改就用做好的）
         run: |
           set -o pipefail
-          # 标签按本地语音层和 Dockerfile 里 desk 那一段算：都没变就一直用同一个，NAS 只在第一次下载这一层
-          key="$TTS|$(awk '/^FROM .* AS desk$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile)"
+          # 标签按本地语音层、Dockerfile 里 desk 那一段、desktop/make_runtime.py 算：都没变就一直用同一个，NAS 只在第一次下载这一层
+          key="$TTS|$(awk '/^FROM .* AS desk$/ {f=1; print; next} /^FROM / {f=0} f' Dockerfile)|$(sha256sum desktop/make_runtime.py)"
           T="$RUNTIME_IMAGE:desk-$(printf '%s' "$key" | sha256sum | cut -c1-12)"
           echo "DESK=$T" >> "$GITHUB_ENV"
           if docker buildx imagetools inspect "$T" > /dev/null 2>&1; then
@@ -311,18 +311,19 @@ jobs:
           assert d["android"]["versionCode"] == n and d["android"]["url"] == "/dl/shuku-android.apk", "手机 App"
           assert d["wear"]["versionCode"] == 100000 + n and d["wear"]["url"] == "/dl/shuku-wear.apk", "手表 App"
           assert d["extension"]["version"] == v and d["extension"]["url"] == "/dl/shuku-extension.zip", "插件"
-          assert d["desktop"]["version"] == v and d["desktop"]["url"] == "/dl/shuku-desktop.zip", "桌面版"
+          assert d["desktop"]["version"] == v and d["desktop"]["url"] == "/dl/shuku-setup.exe" and d["desktop"]["runtime"], "Windows 版"
           EOF
-          # 桌面版：书库现场拼的 zip 里要有 Windows 版 Python、sherpa-onnx 和程序
-          curl -fsS -o "$RUNNER_TEMP/desk.zip" http://127.0.0.1:18080/dl/shuku-desktop.zip 2>/dev/null || true
-          python3 - "$RUNNER_TEMP/desk.zip" <<'EOF' || { ok=""; echo "桌面版不完整"; }
-          import sys, zipfile
-          z = zipfile.ZipFile(sys.argv[1]); n = set(z.namelist())
-          for need in ["python/pythonw.exe", "python/python312._pth", "python/Lib/site-packages/sherpa_onnx/lib/onnxruntime.dll",
-                       "python/Lib/site-packages/lameenc.cp312-win_amd64.pyd", "python/Lib/site-packages/pystray/__init__.py",
-                       "app/shuku_desktop.py", "app/version.txt", "app/server.json", "启动书库.cmd"]:
+          # Windows 版：书库现场做的安装程序（第一次要做一会儿）、自动升级用的程序包
+          curl -fsS --max-time 600 -o "$RUNNER_TEMP/setup.exe" http://127.0.0.1:18080/dl/shuku-setup.exe 2>/dev/null || true
+          curl -fsS -o "$RUNNER_TEMP/app.zip" "http://127.0.0.1:18080/dl/shuku-desktop.zip?part=app" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP/setup.exe" "$RUNNER_TEMP/app.zip" <<'EOF' || { ok=""; echo "Windows 版不完整"; }
+          import os, sys, zipfile
+          b = open(sys.argv[1], "rb").read()
+          assert b[:2] == b"MZ" and b"Nullsoft" in b and len(b) > 15 << 20, "安装程序"
+          n = set(zipfile.ZipFile(sys.argv[2]).namelist())
+          for need in ["app/shuku_desktop.py", "app/shuku.ico", "app/version.txt", "app/runtime.txt", "app/server.json"]:
               assert need in n, need
-          print("桌面版：", len(n), "个文件，", sum(i.compress_size for i in z.infolist()) // 1048576, "MB")
+          print("Windows 版：安装程序 %.1f MB" % (len(b) / 1048576))
           EOF
           # 本地字典：设好密码，查一个中文词、一个英文词
           tok=$(curl -fsS -X POST http://127.0.0.1:18080/api/auth/setup -H 'Content-Type: application/json' -d '{"Password":"smoke-test-1","Device":"ci"}' 2>/dev/null \
