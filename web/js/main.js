@@ -223,6 +223,7 @@ function markFresh() { freshNav = true; clearTimeout(freshTimer); freshTimer = s
 document.addEventListener('click', e => { if (e.target.closest?.('a[href^="#"]')) markFresh() }, true)
 
 let readerMod = null
+let listenMod = null
 let lastNonReader = '#/'
 let currentView = null
 let routeGen = 0
@@ -238,6 +239,15 @@ async function route() {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent)
   closeMenu()
 
+  if (parts[0] === 'listen') {
+    readerMod?.closeReader?.()
+    listenMod ||= await import('./listen.js')
+    currentView?.destroy?.()
+    currentView = null
+    listenMod.openListen(+parts[1], { ctx, params, back: () => { history.length > 1 ? history.back() : (location.hash = lastNonReader) } })
+    return
+  }
+  listenMod?.closeListen?.()
   if (parts[0] === 'read') {
     readerMod ||= await import('./reader/reader.js')
     currentView?.destroy?.()

@@ -150,7 +150,7 @@ function engineSeg(cur, onPick, nasOk) {
 }
 
 // 播放条上的“声音”按钮：一点弹出菜单，读法（在线合成 / 本机语音）和音色直接选，不用进阅读设置
-function openVoiceMenu(e, { cur, serverOk = true, nasOk, voices, curVoice, onEngine, onVoice }) {
+function openVoiceMenu(e, { cur, serverOk = true, nasOk, voices, curVoice, onEngine, onVoice, onPlayer }) {
   const r = e.currentTarget.getBoundingClientRect()
   const mark = on => on ? '　✓' : ''
   const items = []
@@ -159,11 +159,19 @@ function openVoiceMenu(e, { cur, serverOk = true, nasOk, voices, curVoice, onEng
     { label: '微软在线合成（最自然）' + mark(cur === 'ms'), run: () => onEngine('ms') },
     ...(nasOk || cur === 'nas' ? [{ label: 'NAS 本地语音（中英，不经过外网）' + mark(cur === 'nas'), run: () => onEngine('nas') }] : []),
     { label: '本机语音（不联网也能读）' + mark(cur === 'device'), run: () => onEngine('device') })
+  if (onPlayer) items.push(null, { label: '打开听书播放器（存到设备上听，熄屏不卡）', run: onPlayer })
   if (voices.length) {
     if (items.length) items.push(null)
     for (const v of voices.slice(0, 40)) items.push({ label: v.name + mark(v.id === curVoice), run: () => onVoice(v.id) })
   }
   openMenu(items, { x: r.left, y: r.top, above: true, title: '声音 · ' + ({ auto: '自动', ms: '微软', nas: 'NAS 本地', device: '本机语音' }[cur] || '书库合成') })
+}
+
+// 从阅读器去听书播放器：从现在读到的地方开始（正在听的先停下）
+function openPlayer(nar) {
+  const l = nar.shell.loc
+  if (nar.active) nar.stop()
+  location.hash = `#/listen/${nar.shell.id}` + (l ? `?loc=${encodeURIComponent(String(l.location ?? ''))}&pct=${+(l.fraction || 0)}` : '')
 }
 
 // 请书库在后台提前合成后面的句子（网络不好时不用一句一句等）。items：{ text, voice }，和正式合成时的一样
@@ -375,6 +383,7 @@ export class Narrator {
       voices: dev ? browserVoices(code).map(v => ({ id: v.name, name: v.name })) : serverVoices(info, this.code),
       curVoice: dev ? this.prefs.deviceVoices?.[code] : this.voice,
       onEngine: v => { this.pickChoice(v); this.updateUI() },
+      onPlayer: () => openPlayer(this),
       onVoice: v => dev ? this.setDeviceVoice(v) : this.setVoice(v),
     })
   }
@@ -719,7 +728,8 @@ export class Narrator {
     }
     draw()
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
-      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
+      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读'),
+      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); openPlayer(this) } }, icon('download'), '听书播放器')))
     return parts
   }
 }
@@ -995,6 +1005,7 @@ export class NativeNarrator {
       voices: dev ? (callJSON('ttsVoices') || []) : serverVoices(info, this.code),
       curVoice: dev ? this.prefs.deviceVoice : voiceFor(this.prefs, info, this.code),
       onEngine: v => this.pickChoice(v),
+      onPlayer: () => openPlayer(this),
       onVoice: v => this.setVoice(v, dev),
     })
   }
@@ -1030,7 +1041,8 @@ export class NativeNarrator {
     }
     draw()
     parts.push(h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } },
-      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读')))
+      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); this.active ? this.toggle() : this.start() } }, icon('headphones'), this.active ? (this.playing ? '暂停朗读' : '继续朗读') : '从这里开始朗读'),
+      h('button', { class: 'btn small', style: { flex: 1, background: 'transparent', borderColor: 'var(--r-rule)', color: 'inherit' }, onclick: () => { this.shell.closeOverlays(); openPlayer(this) } }, icon('download'), '听书播放器')))
     return parts
   }
 }
