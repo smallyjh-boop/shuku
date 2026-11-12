@@ -1445,3 +1445,8 @@ html.eink .lp-line.cur { background: none; text-decoration: underline; text-unde
 html.eink .lp-play { background: var(--ink); color: var(--bg); }
 html.eink .lp-lines { scroll-behavior: auto; }
 html.eink .lp-pill, html.eink .lp-prep { border: 2px solid var(--ink); }
+
+/* 继续阅读卡片上的“听书”：直接进听书播放器 */
+.continue-listen { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--rule-strong); background: transparent; color: var(--accent); font: inherit; font-size: calc(12px * var(--ui-scale, 1)); cursor: pointer; vertical-align: middle; }
+.continue-listen svg { width: 14px; height: 14px; }
+html.eink .continue-listen { color: inherit; border-color: currentColor; }
