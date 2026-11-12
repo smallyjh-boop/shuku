@@ -59,7 +59,20 @@ RUN apt-get update \
  && rm -f /opt/tts/models/vits-melo-tts-zh_en/model.int8.onnx \
  && apt-get purge -y bzip2 && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /root/.cache
 
-FROM tts
+FROM tts AS desk
+# Windows 桌面版（听书加速器）的运行环境：Windows 版 Python（嵌入式）和 sherpa-onnx 等。书库下载桌面版时现场加上程序
+# （/app/desktop）拼成 zip（server/desktop.go），不用每一版都带一个安装包。发布时单独做成 shuku-runtime:desk-…，NAS 只下载一次
+RUN mkdir -p /opt/desktop/runtime/python /tmp/w \
+ && curl -fsSLo /tmp/py.zip https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip \
+ && /opt/tts/venv/bin/pip download --no-cache-dir --platform win_amd64 --python-version 3.12 --implementation cp --only-binary=:all: \
+    -d /tmp/w sherpa-onnx==2.0.1 lameenc==1.9.0 "numpy<2.4" pystray==0.19.5 "pillow<12" \
+ && python3 -c "import zipfile,glob; r='/opt/desktop/runtime/python/'; zipfile.ZipFile('/tmp/py.zip').extractall(r); \
+[ [z.extract(m, r+'Lib/site-packages') for m in z.namelist() if '.data/' not in m and not m.endswith('.lib') and '/include/' not in m] \
+  for z in (zipfile.ZipFile(w) for w in glob.glob('/tmp/w/*.whl') if 'xlib' not in w.lower()) ]; \
+open(r+'python312._pth','w').write('python312.zip\\n.\\nLib\\\\site-packages\\n..\\\\app\\nimport site\\n')" \
+ && rm -rf /tmp/w /tmp/py.zip
+
+FROM desk
 # 威联通上要用宿主机网络（network_mode: host）运行，书库直接监听 SHUKU_PORT；默认 27200，避开 QTS 自己的 8080
 ENV TZ=Asia/Bangkok \
     SHUKU_PORT=27200 \
@@ -74,6 +87,7 @@ COPY --from=build /out/shuku /app/shuku
 COPY --from=build /out/clients/ /app/clients/
 COPY web/ /app/web/
 COPY tts/server.py /app/tts/server.py
+COPY desktop/ /app/desktop/
 VOLUME ["/data"]
 EXPOSE 27200
 HEALTHCHECK --interval=60s --timeout=5s CMD ["/app/shuku", "-health"]

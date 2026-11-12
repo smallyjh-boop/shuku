@@ -133,5 +133,3 @@ func localSynth(ctx context.Context, text string, speed float64) ([]byte, error)
 	}
 	return b, nil
 }
-
-

@@ -175,6 +175,7 @@ export async function openBook(id, ctx) {
         mineRow(),
         h('div', { class: 'read-row' },
           h('a', { class: 'btn primary', href: '#/read/' + b.id, onclick: () => d.close() }, icon('reading'), b.percent > 0 && b.read_state !== 'done' ? '继续阅读' : '开始阅读'),
+          b.kind !== 'comic' ? h('a', { class: 'btn', href: '#/listen/' + b.id, onclick: () => d.close() }, icon('headphones'), '听书') : null,
           b.percent > 0 ? h('button', { class: 'btn', type: 'button', onclick: restart, title: '进度清零，从第一页开始' }, '从头读') : null,
           isNative ? dlBtn : null,
           offlineButton(b, ctx),

@@ -17,10 +17,13 @@ import (
 )
 
 const (
-	embedPython = "/opt/tts/venv/bin/python"
-	embedScript = "/app/tts/server.py"
-	embedModel  = "/opt/tts/models/vits-melo-tts-zh_en"
+	embedPython       = "/opt/tts/venv/bin/python"
+	embedScript       = "/app/tts/server.py"
+	embedModelDefault = "/opt/tts/models/vits-melo-tts-zh_en"
 )
+
+// 模型目录（测试时可以用 SHUKU_TTS_MODEL_DIR 指到别处）
+var embedModel = env("SHUKU_TTS_MODEL_DIR", embedModelDefault)
 
 func embeddedTTSAvailable() bool {
 	for _, p := range []string{embedPython, embedScript, filepath.Join(embedModel, "model.onnx")} {

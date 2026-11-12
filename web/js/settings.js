@@ -842,6 +842,7 @@ function devices(s) {
           h('ol', { class: 'pair-steps' },
             h('li', null, '安卓手机：用相机扫二维码，或者打开书库 App 选“输入配对码”。连接后手表会自动从手机拿到连接信息。'),
             h('li', null, '浏览器插件：在插件设置里填书库地址和上面的配对码。'),
+            h('li', null, 'Windows 电脑：打开书库桌面版的设置页，填上面的配对码。'),
             h('li', null, '配对码只能用一次，10 分钟内有效。')))))
     } catch (e) { toastError(e) }
     btn.disabled = false
@@ -860,10 +861,29 @@ function devices(s) {
     } catch {}
   }
   drawSessions()
+  // Windows 桌面版（听书加速器）：下载、哪些电脑在帮忙
+  const deskBox = h('div', { class: 'stack', style: { gap: '6px' } })
+  ;(async () => {
+    let c = {}, jobs = {}
+    try { c = await api('/api/clients') } catch {}
+    try { jobs = await api('/api/listen/jobs') } catch {}
+    if (!c.desktop && !(jobs.workers || []).length) return
+    const now = Date.now()
+    fill(deskBox,
+      h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, 'Windows 电脑（听书加速器）'),
+      h('small', { class: 'muted' }, '电脑开着、空闲时帮书库合成听书包（书库的微软语音不行时才用），也能一点打开书库看书。电脑只往外连书库，不用改防火墙；用电池时不干活。'),
+      c.desktop ? h('div', { class: 'row wrap' }, h('a', { class: 'btn', href: apiUrl(c.desktop.url), download: 'shuku-desktop.zip' }, icon('download'), `下载书库桌面版（${c.desktop.version}）`),
+        h('small', { class: 'muted' }, '解压到固定的文件夹，双击“启动书库.cmd”，再填配对码')) : null,
+      (jobs.workers || []).map(w => h('div', { class: 'dev-row' }, icon('monitor'),
+        h('div', { class: 'grow' }, h('div', null, w.name),
+          h('small', null, [now - w.seen < 60000 ? (w.busy ? '在线（电脑在用，降速）' : '在线') : '离线（最近 ' + fmtTime(Math.round(w.seen / 1000)) + '）',
+            w.rtf ? `速度：合成 1 秒语音要 ${w.rtf.toFixed(2)} 秒` : '', w.done ? `本次合成了 ${w.done} 句` : '', w.version ? '版本 ' + w.version : ''].filter(Boolean).join(' · '))))))
+  })()
   return sec('手机、手表和浏览器插件', '安卓 App 能离线读书、后台听书、用音量键翻页，自动在内网和 Tailscale 之间切换；Wear OS 手表从手机获取连接信息；浏览器插件能把任何网站上的电子书一键加入书库。',
     h('div', { class: 'stack' },
       h('div', { class: 'row wrap' }, h('button', { class: 'btn primary', onclick: e => pair(e.currentTarget) }, icon('phone'), '显示配对二维码')),
       pairBox,
+      deskBox,
       h('div', { class: 'sub-title', style: { margin: '10px 0 0' } }, '已登录的设备'),
       list))
 }

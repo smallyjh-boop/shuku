@@ -32,7 +32,9 @@ func aiCacheKey(parts ...string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func aiCachePath(key string) string { return filepath.Join(cfg.DataDir, "cache", "ai", key[:2], key+".txt") }
+func aiCachePath(key string) string {
+	return filepath.Join(cfg.DataDir, "cache", "ai", key[:2], key+".txt")
+}
 
 func aiCacheGet(key string) (string, bool) {
 	b, err := os.ReadFile(aiCachePath(key))
@@ -294,7 +296,7 @@ func handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	// 按窗口合并打分
 	type win struct {
 		ch, from, to, score int
-		words           map[string]bool
+		words               map[string]bool
 	}
 	var wins []*win
 	sort.Slice(hits, func(a, c int) bool {
@@ -438,4 +440,3 @@ func routesAIRead(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/books/{id}/ai/ask", a(handleAIAsk))
 	mux.HandleFunc("POST /api/books/{id}/ai/notes", a(handleAINotes))
 }
-

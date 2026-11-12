@@ -970,6 +970,7 @@ func handleTTS(w http.ResponseWriter, r *http.Request) {
 	if len([]rune(req.Text)) > 3000 {
 		req.Text = string([]rune(req.Text)[:3000])
 	}
+	markLive() // 有人在听：后台准备听书包的先让开
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	b, err := synthesize(ctx, req.Text, req.Voice, req.Lang, req.Speed)

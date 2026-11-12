@@ -19,6 +19,8 @@ import android.media.MediaMetadata
 import android.media.MediaPlayer
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.ConnectivityManager
+import android.os.BatteryManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -53,7 +55,7 @@ import java.util.concurrent.Future
  */
 class NarrationService : Service() {
     /** 一句话；新版网页还带着它在书里的位置（loc 和进度里的 location 一样，pct 是 0～1 的百分比） */
-    data class Seg(val id: String, val text: String, val loc: String = "", val pct: Double = -1.0, val voice: String = "")
+    data class Seg(val id: String, val text: String, val loc: String = "", val pct: Double = -1.0, val voice: String = "", val dur: Double = 0.0)
 
     private val handler = Handler(Looper.getMainLooper())
     private val pool = Executors.newFixedThreadPool(2)
@@ -111,8 +113,21 @@ class NarrationService : Service() {
     private var netFails = 0
     private var deviceBroken = false  // 手机没有可用的语音引擎（墨水屏常见）：只能等网络
     // 一句合成了 8 秒还没好：在通知栏、锁屏上说明（多半是熄屏后手机限制了联网）
-    private val slowTask = Runnable { if (playing && status == "合成中…") { status = "等待网络…"; publish() } }
+    private val slowTask = Runnable { if (playing && (status == "合成中…" || status == "下载中…")) { status = "等待网络…"; publish() } }
     private val retryTask = Runnable { if (playing) { synchronized(audioJobs) { queue.getOrNull(index)?.let { audioJobs.remove(it.id) } }; playCurrent() } }
+
+    // 听书包（听书播放器，1.0.0.32）：句子是书库的听书稿（和手表一样切），语音是书库准备好的听书包（1 倍速），
+    // 先下载存到手机上（files/listen）再放：熄屏、断网一会儿都不卡；语速由手机播放时调
+    private var pack = false
+    private var packVoices = ""          // 每种语言的音色（网页的 voicesParam，原样交给书库）
+    private var packChapters = JSONArray()
+    private var packDir: File? = null
+    private val dl = Executors.newFixedThreadPool(2)
+    private var stalls = 0               // 放到一句时还没下载好的次数：多了就多存一些
+    private var aheadSecs = 0.0          // 手机上已经存好的、接着往后能听多久（秒，1 倍速）
+    private var cleanedTo = 0            // 这之前的句子已经删了
+    private var lastPrepare = 0L
+    private var lastCap = 0L
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -164,6 +179,7 @@ class NarrationService : Service() {
             flushPosition()
         }
         try { unregisterReceiver(noisy) } catch (e: Exception) {}
+        dl.shutdownNow()
         releasePlayer()
         tts?.shutdown()
         session.release()
@@ -182,6 +198,8 @@ class NarrationService : Service() {
         when (cmd) {
             "start" -> {
                 val j = try { JSONObject(arg) } catch (e: Exception) { return }
+                if (j.optString("mode") == "pack") { startPack(j); publish(); return }
+                pack = false
                 // 上一本书在网页不在时读到的位置先存好
                 tick()
                 flushPosition()
@@ -241,9 +259,15 @@ class NarrationService : Service() {
             "stop" -> stop("")
             "speed" -> {
                 speed = arg.toDoubleOrNull() ?: speed
-                restartCurrent()
+                // 听书包是 1 倍速存的：手机放的时候调，不用重新下载
+                if (pack && !useDevice) applySpeed() else restartCurrent()
+            }
+            "jump" -> if (pack) {
+                val o = try { JSONObject(arg) } catch (e: Exception) { return }
+                packJump(o.optInt("n"), o.optInt("i"))
             }
             "voice" -> {
+                if (pack) return // 听书播放器换音色会重新 start
                 // 换的是哪种语言的声音：这种语言的句子都换成它
                 val code = voiceCode(arg)
                 if (voices.isEmpty() || voiceCode(voice) == code) voice = arg
@@ -291,6 +315,7 @@ class NarrationService : Service() {
         if (seg == null) {
             when {
                 ended -> stop(if (timerMin == -1) "本章读完了" else "全书读完了")
+                pack -> { waitingMore = true; status = "加载下一章…"; publish(); packMore() }
                 // 网页没了：从书库取后面的章节接着读
                 !webAlive() || feed -> { waitingMore = true; status = "加载下一章…"; publish(); startFeed("网页不在了") }
                 else -> { waitingMore = true; status = "加载下一章…"; publish(); askMore() }
@@ -299,7 +324,8 @@ class NarrationService : Service() {
         }
         // 从书库取的句子网页不认识 id：带上位置，网页回来时翻到这里
         val ev = JSONObject().put("type", "seg").put("id", seg.id)
-        if (feed && seg.loc.isNotEmpty()) ev.put("loc", seg.loc).put("pct", seg.pct)
+        if (pack) ev.put("n", packN(seg)).put("i", packI(seg))
+        if ((feed || pack) && seg.loc.isNotEmpty()) ev.put("loc", seg.loc).put("pct", seg.pct)
         Events.emit("tts", ev)
         tick()
         // 一直由这里记进度（最多 30 秒存一次，暂停、停止时马上存）：关屏后网页被冻结，
@@ -308,7 +334,10 @@ class NarrationService : Service() {
         askMore()
         if (useDevice) return speakDevice(seg)
         val job = audioFor(seg)
-        if (!job.isDone) { status = "合成中…"; publish(); handler.removeCallbacks(slowTask); handler.postDelayed(slowTask, 8000) }
+        if (!job.isDone) {
+            if (pack && index > 0) stalls++ // 没接上：以后多存一些
+            status = if (pack) "下载中…" else "合成中…"; publish(); handler.removeCallbacks(slowTask); handler.postDelayed(slowTask, 8000)
+        }
         prefetch()
         val tok = ++playTok
         pool.execute {
@@ -330,8 +359,9 @@ class NarrationService : Service() {
             p.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK)
             p.setDataSource(file.path)
             p.setOnCompletionListener { advance() }
-            p.setOnErrorListener { _, _, _ -> fallback("音频无法播放"); true }
+            p.setOnErrorListener { _, _, _ -> if (pack) file.delete(); fallback("音频无法播放"); true }
             p.prepare()
+            if (pack && speed != 1.0) try { p.playbackParams = p.playbackParams.setSpeed(speed.toFloat()) } catch (e: Exception) {}
             p.start()
             player = p
             playerSeg = seg.id
@@ -342,7 +372,7 @@ class NarrationService : Service() {
         }
     }
 
-    private fun audioFor(seg: Seg): Future<File> = synchronized(audioJobs) {
+    private fun audioFor(seg: Seg): Future<File> = if (pack) packAudio(seg) else synchronized(audioJobs) {
         audioJobs.getOrPut(seg.id) {
             val v = seg.voice.ifEmpty { voice }
             val s = speed
@@ -362,6 +392,7 @@ class NarrationService : Service() {
 
     // 预先合成后面三十句（三五分钟）：句子之间不停顿；有的手机熄屏后限制后台联网，手上有存货就接得上，亮屏时再补
     private fun prefetch() {
+        if (pack) { packPrefetch(); return }
         for (k in 1..PREFETCH) queue.getOrNull(index + k)?.let { audioFor(it) }
         synchronized(audioJobs) {
             val keep = (index - 2..index + PREFETCH + 1).mapNotNull { queue.getOrNull(it)?.id }.toSet()
@@ -371,6 +402,7 @@ class NarrationService : Service() {
 
     /** 快读完手上的句子时向网页要下一段。网页没了（App 被划掉、网页重建过）就不要了，读完手上的就停 */
     private fun askMore() {
+        if (pack) { packMore(); return }
         if (ended || queue.size - index > PREFETCH + 6) return
         if (feed) { feedMore(); return }
         if (needSent || !webAlive()) return
@@ -515,6 +547,11 @@ class NarrationService : Service() {
 
     private fun advance() {
         if (!playing) return
+        // 定时“读完这一章”：听书包按章号判断
+        if (pack && timerMin == -1) {
+            val next = queue.getOrNull(index + 1)
+            if (next == null || packN(next) != packN(queue[index])) { index++; stop("本章读完了"); return }
+        }
         index++
         playCurrent()
     }
@@ -561,6 +598,7 @@ class NarrationService : Service() {
         val p = player
         if (p != null && playerSeg == queue.getOrNull(index)?.id && !useDevice) {
             p.start()
+            if (pack) applySpeed()
             acquireLocks()
         } else playCurrent()
         publish()
@@ -636,7 +674,7 @@ class NarrationService : Service() {
 
     /** 网页换了或者没了（Events 通知过来，在主线程） */
     private fun checkWeb() {
-        if (stopped || webAlive()) return
+        if (stopped || pack || webAlive()) return // 听书播放器不靠网页
         if (!orphan) {
             orphan = true
             // 在这之前的时长网页已经算过了
@@ -675,7 +713,7 @@ class NarrationService : Service() {
     /** 听书时长：网页在的时候网页自己算阅读时长，这里只算网页不在的时候 */
     private fun tick() {
         val now = SystemClock.elapsedRealtime()
-        if (lastTick > 0 && (!webAlive() || feed)) listenMs += (now - lastTick).coerceIn(0, 120_000)
+        if (lastTick > 0 && (!webAlive() || feed || pack)) listenMs += (now - lastTick).coerceIn(0, 120_000)
         lastTick = if (playing) now else 0
     }
 
@@ -842,6 +880,8 @@ class NarrationService : Service() {
     // ---------- 状态：网页、锁屏、通知栏、手表 ----------
 
     private fun stateJson(): JSONObject = JSONObject().put("active", true).put("playing", playing).put("speed", speed).put("timer", timerMin)
+        .put("mode", if (pack) "pack" else "live").put("book_id", book.optInt("id"))
+        .apply { if (pack) queue.getOrNull(index)?.let { put("n", packN(it)).put("i", packI(it)) }; if (pack) put("ahead", aheadSecs.toInt()) }
         .put("engine", if (useDevice) "device" else "server")
         .put("status", status).put("title", book.optString("title")).put("author", book.optString("author"))
         .put("text", queue.getOrNull(index)?.text ?: "").put("volume", volumePercent())
@@ -864,7 +904,7 @@ class NarrationService : Service() {
     private fun publish() {
         if (stopped) return // 停止以后不要再把通知和手表状态带回来
         Events.emit("tts", stateJson().put("type", "state")) // 给网页（手机本机），每句都发
-        val shownStatus = if (status == "合成中…" || status == "加载下一章…") "" else status
+        val shownStatus = if (status == "合成中…" || status == "下载中…" || status == "加载下一章…") "" else status
         val sig = listOf(playing, book.optString("title"), book.optString("author"), System.identityHashCode(cover), timerMin, speed, shownStatus).joinToString("|")
         val now = SystemClock.elapsedRealtime()
         if (sig == lastShown) {
@@ -944,7 +984,261 @@ class NarrationService : Service() {
         if (v > progressBase) progressBase = v
     }
 
+    // ---------- 听书包 ----------
+
+    private fun packN(s: Seg) = s.id.substringBefore(':').toIntOrNull() ?: 0
+    private fun packI(s: Seg) = s.id.substringAfter(':').toIntOrNull() ?: 0
+    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+    /** 一句大概多长（秒，1 倍速）：书库给了就用书库的 */
+    private fun segSecs(s: Seg) = if (s.dur > 0) s.dur else s.text.length * 0.22 + 0.3
+
+    private fun startPack(j: JSONObject) {
+        tick()
+        flushPosition()
+        book = j.optJSONObject("book") ?: JSONObject()
+        fileId = book.optInt("file_id")
+        progressBase = -1
+        webGen = Events.generation
+        orphan = false
+        posSeg = null
+        listenMs = 0
+        lastSave = SystemClock.elapsedRealtime()
+        lang = book.optString("lang")
+        voice = ""
+        voices.clear()
+        speed = j.optDouble("speed", 1.0)
+        pack = true
+        packVoices = j.optString("voicesParam")
+        packChapters = j.optJSONArray("chapters") ?: JSONArray()
+        packDir = File(filesDir, "listen/$fileId-" + sha1(packVoices).take(10))
+        feed = false
+        feedNext = -1
+        handler.removeCallbacks(needWatch)
+        // 听书播放器放的是书库准备好的语音；连不上书库、手上的也放完了才临时改用手机语音
+        useDevice = false
+        netFails = 0
+        handler.removeCallbacks(retryTask)
+        stalls = 0
+        lastPrepare = 0
+        setTimer(j.optInt("timer", 0))
+        loadCover()
+        session.isActive = true
+        playing = true
+        lastTick = SystemClock.elapsedRealtime()
+        requestFocus()
+        val from = j.optJSONObject("from")
+        packLoad(from?.optInt("n") ?: 0, from?.optInt("i") ?: 0)
+    }
+
+    /** 第 n 章从第 from 句起的句子（书库的听书稿）。手机上存一份：断网时也能接着放已经存好的 */
+    private fun packSegs(n: Int, from: Int): List<Seg> {
+        val id = book.optInt("id")
+        val cache = File(packDir, "$n/script.json")
+        val r = try {
+            Http.getJson(app.link.url("/api/books/$id/listen/$n?voices=" + enc(packVoices)), app.config.token, 20000).also {
+                cache.parentFile?.mkdirs(); cache.writeText(it.toString())
+            }
+        } catch (e: Exception) {
+            if (cache.exists()) JSONObject(cache.readText()) else throw e
+        }
+        val arr = r.optJSONArray("sentences") ?: JSONArray()
+        val out = ArrayList<Seg>()
+        for (k in 0 until arr.length()) {
+            val o = arr.optJSONObject(k) ?: continue
+            val i = o.optInt("i")
+            if (i < from) continue
+            out += Seg("$n:$i", o.optString("text"), o.optString("loc"), o.optDouble("pct", -1.0), dur = o.optDouble("dur", 0.0))
+        }
+        return out
+    }
+
+    private fun cancelJobs() {
+        playTok++
+        synchronized(audioJobs) { audioJobs.values.forEach { it.cancel(true) }; audioJobs.clear() }
+    }
+
+    /** 从第 n 章第 i 句开始（重新取句子） */
+    private fun packLoad(n: Int, i: Int) {
+        val gen = ++feedGen
+        feedBusy = true
+        releasePlayer()
+        tts?.stop()
+        cancelJobs()
+        queue.clear()
+        index = 0
+        cleanedTo = 0
+        ended = false
+        waitingMore = false
+        status = "加载中…"
+        publish()
+        pool.execute {
+            val r = runCatching {
+                var c = n.coerceAtLeast(0)
+                var segs = packSegs(c, i)
+                // 正好在这一章末尾：从下一章开始
+                while (segs.isEmpty() && c + 1 < packChapters.length()) { c++; segs = packSegs(c, 0) }
+                c to segs
+            }
+            handler.post {
+                if (gen != feedGen || stopped) return@post
+                feedBusy = false
+                val res = r.getOrNull()
+                if (res == null) { stop("连不上书库：" + (r.exceptionOrNull()?.message ?: "")); return@post }
+                queue += res.second
+                feedNext = res.first + 1
+                status = ""
+                if (queue.isEmpty()) { stop("全书读完了"); return@post }
+                if (playing) playCurrent() else { packPrefetch(); publish() }
+            }
+        }
+    }
+
+    /** 跳到第 n 章第 i 句：已经在手上就直接放，不然重新取 */
+    private fun packJump(n: Int, i: Int) {
+        val k = queue.indexOfFirst { it.id == "$n:$i" }
+        if (k < 0) { packLoad(n, i); return }
+        index = k
+        playTok++
+        releasePlayer()
+        tts?.stop()
+        if (playing) { requestFocus(); playCurrent() } else { packPrefetch(); publish() }
+    }
+
+    private fun applySpeed() {
+        val p = player ?: return
+        if (!playing) return // 暂停时设语速会让它开始放：继续时再设
+        try { p.playbackParams = p.playbackParams.setSpeed(speed.toFloat()) } catch (e: Exception) {}
+    }
+
+    /**
+     * 手机上至少存多少秒（1 倍速）：默认 30 分钟；按流量计费的网络（手机流量、热点）只存 30 分钟；
+     * Wi-Fi 加充电时存 2 小时；放的时候接不上（网络不好）一次多存 15 分钟，最多 3 小时
+     */
+    private fun targetSecs(): Double {
+        val metered = try { getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true } catch (e: Exception) { true }
+        if (metered) return 30 * 60.0
+        val charging = try { getSystemService(BatteryManager::class.java)?.isCharging ?: false } catch (e: Exception) { false }
+        var min = 30 + stalls * 15
+        if (charging) min = maxOf(min, 120)
+        return min.coerceAtMost(180) * 60.0
+    }
+
+    /** 往后存够 targetSecs：一句一个文件，按顺序下载（两个一起） */
+    private fun packPrefetch() {
+        val target = targetSecs() * speed.coerceAtLeast(1.0)
+        val keep = HashSet<String>()
+        queue.getOrNull(index)?.let { keep += it.id }
+        var acc = 0.0
+        var k = index + 1
+        var ready = 0.0
+        var gap = false
+        while (k < queue.size && acc < target) {
+            val s = queue[k]
+            keep += s.id
+            val f = packFile(s)
+            if (!gap && f.exists()) ready += segSecs(s) else gap = true
+            packAudio(s)
+            acc += segSecs(s)
+            k++
+        }
+        // 后面的句子还没取（下一章）时 ready 也只算到这里
+        aheadSecs = ready
+        synchronized(audioJobs) { audioJobs.keys.filter { it !in keep }.forEach { audioJobs.remove(it)?.cancel(false) } }
+        cleanPlayed()
+        prepareOnServer(target)
+    }
+
+    private fun packFile(s: Seg) = File(packDir, "${packN(s)}/${packI(s)}.mp3")
+
+    private fun packAudio(seg: Seg): Future<File> = synchronized(audioJobs) {
+        audioJobs.getOrPut(seg.id) {
+            val f = packFile(seg)
+            val id = book.optInt("id")
+            val v = packVoices
+            dl.submit<File> {
+                if (f.exists() && f.length() > 0) return@submit f
+                // 书库有听书包就直接给，没有就当场合成（微软 → NAS 本地）并存进听书包
+                val r = Http.request(app.link.url("/api/books/$id/listen/${packN(seg)}/${packI(seg)}?voices=" + enc(v)), token = app.config.token, timeoutMs = 90000)
+                if (!r.ok || r.body.isEmpty()) throw IOException(r.errorMessage())
+                f.parentFile?.mkdirs()
+                val tmp = File(f.path + ".part")
+                tmp.writeBytes(r.body)
+                if (!tmp.renameTo(f)) throw IOException("存不下")
+                f
+            }
+        }
+    }
+
+    /** 放过的删掉（留最近 10 分钟，往回跳用）；手机上的听书包超过 1GB 时先删别的书 */
+    private fun cleanPlayed() {
+        var back = 0.0
+        var k = index - 1
+        while (k >= cleanedTo && back < 600) { back += segSecs(queue[k]); k-- }
+        if (back >= 600) {
+            for (m in cleanedTo..k) queue.getOrNull(m)?.let { packFile(it).delete() }
+            cleanedTo = k + 1
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCap < 5 * 60_000 && lastCap > 0) return
+        lastCap = now
+        val cur = packDir
+        pool.execute {
+            val root = File(filesDir, "listen")
+            val dirs = root.listFiles()?.filter { it.isDirectory } ?: return@execute
+            fun size(f: File): Long = f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            var total = dirs.sumOf { size(it) }
+            for (d in dirs.filter { it != cur }.sortedBy { it.lastModified() }) {
+                if (total <= PACK_LIMIT) break
+                total -= size(d)
+                d.deleteRecursively()
+            }
+        }
+    }
+
+    /** 请书库从这里往后准备（熄屏时网页被冻结，由这里告诉书库听到哪了），一分钟一次 */
+    private fun prepareOnServer(target: Double) {
+        val now = SystemClock.elapsedRealtime()
+        if (lastPrepare > 0 && now - lastPrepare < 60_000) return
+        lastPrepare = now
+        val s = queue.getOrNull(index) ?: return
+        val id = book.optInt("id")
+        val body = JSONObject().put("scope", "auto").put("minutes", (target / 60).toInt().coerceAtLeast(30)).put("voices", packVoices)
+            .put("from", JSONObject().put("n", packN(s)).put("i", packI(s)))
+        pool.execute { try { app.link.send("POST", "/api/books/$id/listen/prepare", body, 15000) } catch (e: Exception) {} }
+    }
+
+    /** 快放完手上的句子（不够 targetSecs）时取下一章 */
+    private fun packMore() {
+        if (feedBusy || ended) return
+        var acc = 0.0
+        val want = targetSecs() * speed.coerceAtLeast(1.0) + 120
+        for (k in index until queue.size) { acc += segSecs(queue[k]); if (acc > want) return }
+        if (feedNext < 0 || feedNext >= packChapters.length()) { ended = true; if (waitingMore) stop(if (timerMin == -1) "本章读完了" else "全书读完了"); return }
+        val c = feedNext
+        val gen = feedGen
+        feedBusy = true
+        pool.execute {
+            val r = runCatching { packSegs(c, 0) }
+            handler.post {
+                if (gen != feedGen || stopped) return@post
+                feedBusy = false
+                val segs = r.getOrNull()
+                if (segs == null) {
+                    // 取不到（断网）：手上的还能放；过一会儿再试
+                    if (waitingMore) { status = "等待网络…"; publish() }
+                    handler.postDelayed({ if (gen == feedGen && !stopped) packMore() }, 20_000)
+                    return@post
+                }
+                feedNext = c + 1
+                queue += segs
+                if (waitingMore && playing) { waitingMore = false; playCurrent() }
+                else { packPrefetch(); packMore() }
+            }
+        }
+    }
+
     companion object {
+        private const val PACK_LIMIT = 1L shl 30 // 手机上的听书包最多 1GB
         @Volatile var instance: NarrationService? = null
             private set
 
