@@ -983,7 +983,9 @@ func listenResume(r *http.Request, b *Book, f *File, sc *listenScript) listenPos
 	return listenPos{n, max(0, ch.Count-1)}
 }
 
-func jobID(fileID int64, vkey string, uid int64) string { return fmt.Sprintf("%d-%s-%d", fileID, vkey, uid) }
+func jobID(fileID int64, vkey string, uid int64) string {
+	return fmt.Sprintf("%d-%s-%d", fileID, vkey, uid)
+}
 
 // 各种合成方式合成 1 秒语音要几秒（给“准备要多久”的提示）
 func engineSpeeds() map[string]any {

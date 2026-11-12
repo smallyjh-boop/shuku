@@ -88,6 +88,9 @@ func handleClients(w http.ResponseWriter, r *http.Request) {
 			out[k] = v
 		}
 	}
+	if d := desktopClientInfo(); d != nil {
+		out["desktop"] = d
+	}
 	writeJSON(w, 200, out)
 }
 

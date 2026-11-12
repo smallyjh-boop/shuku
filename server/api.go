@@ -122,6 +122,7 @@ func routes() http.Handler {
 	routesP2(mux)
 	routesAIRead(mux)
 	routesListen(mux)
+	routesDesktop(mux)
 	mux.HandleFunc("/", handleStatic)
 	return withCORS(mux)
 }
