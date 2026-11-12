@@ -407,6 +407,7 @@ export class Narrator {
       this.playBtn,
       iconBtn('nextSent', '下一句', () => this.step(1)),
       this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl, (this.readyEl = h('span', { class: 'state ready', title: '书库已经提前合成好的' })),
+      iconBtn('headphones', '听书播放器（存到设备上听，熄屏不卡）', () => openPlayer(this), { class: 'icon-btn to-player' }),
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)
@@ -769,6 +770,7 @@ export class NativeNarrator {
       this.playBtn,
       iconBtn('nextSent', '下一句', () => call('tts', 'next', '')),
       this.speedBtn, this.voiceBtn, this.timerBtn, this.timerText, this.stateEl, (this.readyEl = h('span', { class: 'state ready', title: '书库已经提前合成好的' })),
+      iconBtn('headphones', '听书播放器（存到设备上听，熄屏不卡）', () => openPlayer(this), { class: 'icon-btn to-player' }),
       iconBtn('close', '停止听书', () => this.stop()))
     this.el.addEventListener('click', e => e.stopPropagation())
     this.shell.root.append(this.el)

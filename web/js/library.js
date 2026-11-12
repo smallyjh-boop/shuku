@@ -254,7 +254,9 @@ export function renderLibrary(main, opts, ctx) {
         h('div', { class: 't' }, b.title),
         h('div', { class: 'a' }, b.author || (b.kind === 'comic' ? '漫画' : '')),
         h('div', { class: 'p' }, h('div', { class: 'bar' }, h('i', { style: { width: pct(b.percent) } })), h('span', null, pct(b.percent))),
-        h('div', { class: 'a', style: { marginTop: '6px', fontSize: '12px' } }, fmtTime(b.last_read))))
+        h('div', { class: 'a', style: { marginTop: '6px', fontSize: '12px' } }, fmtTime(b.last_read),
+          b.kind !== 'comic' ? h('button', { class: 'continue-listen', type: 'button', title: '听书（播放器）',
+            onclick: e => { e.stopPropagation(); ctx.navigate('#/listen/' + b.id) } }, icon('headphones'), '听书') : null)))
   }
 
   const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadMore() }, { rootMargin: '600px' })
@@ -448,6 +450,7 @@ export function bookMenu(b, ctx, x, y, hooks = {}) {
   const changed = nb => { ctx.refreshFacets(); hooks.changed?.(nb) }
   const items = [
     { label: b.percent > 0 && b.read_state !== 'done' ? '继续阅读' : '打开', icon: 'reading', run: () => ctx.navigate('#/read/' + b.id) },
+    ...(b.kind !== 'comic' ? [{ label: '听书（播放器）', icon: 'headphones', run: () => ctx.navigate('#/listen/' + b.id) }] : []),
     { label: '详情', icon: 'book', run: () => ctx.openBook(b.id) },
     null,
     b.read_state === 'done'
