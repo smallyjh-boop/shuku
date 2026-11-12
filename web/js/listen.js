@@ -68,7 +68,8 @@ class ListenPlayer {
     this.timer = 0
     this.timerEnd = 0
     this.cleanups = []
-    this.native = isNative && typeof window.ShukuNative?.tts === 'function'
+    // App 1.0.0.32 起听书服务会下载听书包、存在手机上放（熄屏不卡）；旧版 App 还是用网页自己放
+    this.native = isNative && typeof window.ShukuNative?.tts === 'function' && (callJSON('appInfo') || {}).versionCode >= 32
     this.audio = this.native ? null : new Audio()
     this.listenSecs = 0
   }

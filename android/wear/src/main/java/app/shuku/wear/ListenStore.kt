@@ -36,6 +36,9 @@ object ListenStore {
     fun otherSpeeds(ctx: Context, bookId: Long, fileId: Long, chap: Int, n: Int, speed: Double, text: String): List<File> =
         ListenService.SPEEDS.filter { speedKey(it) != speedKey(speed) }.map { file(ctx, bookId, fileId, chap, n, it, text) }
 
+    /** 这个文件是按什么语速合成的（名字里写着）；书库听书包的都是 1 倍速，放的时候手表自己调语速 */
+    fun speedOf(f: File): Double = NAME.matchEntire(f.name)?.groupValues?.get(5)?.toIntOrNull()?.let { it / 100.0 } ?: 1.0
+
     /** 现在占了多少空间 */
     fun bytes(ctx: Context): Long {
         val u = used.get()

@@ -159,6 +159,7 @@ class ListenService : Service() {
 
     private var player: MediaPlayer? = null
     private var playerSeg: Seg? = null
+    private var playerFile: File? = null
     private val audioJobs = HashMap<Seg, Job>()
     private var farBlockedUntil = 0L // 提前合成失败了（没网、空间满了）：这之前先不提前合成
     private var farFull = false
@@ -491,12 +492,16 @@ class ListenService : Service() {
                 true
             }
             p.prepare()
+            // 书库听书包是 1 倍速的：手表放的时候调语速（以前按语速合成的文件按比例调）
+            val rate = speed / ListenStore.speedOf(file)
+            if (kotlin.math.abs(rate - 1) > 0.01) try { p.playbackParams = p.playbackParams.setSpeed(rate.toFloat()) } catch (e: Exception) {}
             // 按实际的时长校正“每秒多少字节”，算离线能听多久
             val ms = p.duration
             if (ms > 1000 && file.length() > 0) bytesPerSec = bytesPerSec * 0.8 + file.length() * 1000.0 / ms * 0.2
             p.start()
             player = p
             playerSeg = seg
+            playerFile = file
             errorsInRow = 0
             status = ""
             publish()
@@ -529,9 +534,9 @@ class ListenService : Service() {
 
     /** 离线听书包里这一句的语音（这个语速的，没有就用别的语速的） */
     private fun packFile(seg: Seg): File? {
-        val f = ListenStore.file(this, bookId, fileId, seg.chap.i, seg.n, speed, seg.text)
+        val f = ListenStore.file(this, bookId, fileId, seg.chap.i, seg.n, 1.0, seg.text)
         if (f.length() > 0) return f
-        return ListenStore.otherSpeeds(this, bookId, fileId, seg.chap.i, seg.n, speed, seg.text).firstOrNull { it.length() > 0 }
+        return ListenStore.otherSpeeds(this, bookId, fileId, seg.chap.i, seg.n, 1.0, seg.text).firstOrNull { it.length() > 0 }
     }
 
     /**
@@ -558,9 +563,12 @@ class ListenService : Service() {
 
     /** 在后台线程：手表上有就直接用，没有就请书库合成，存进离线听书包 */
     private fun synth(seg: Seg, s: Double, bid: Long, fid: Long, far: Boolean, localOnly: Boolean): Clip {
-        val f = ListenStore.file(this, bid, fid, seg.chap.i, seg.n, s, seg.text)
+        // 1.0.0.32 起：一律存 1 倍速的（书库的听书包，和手机、网页同一份听书稿、同一句），语速放的时候调
+        val f = ListenStore.file(this, bid, fid, seg.chap.i, seg.n, 1.0, seg.text)
         if (f.length() > 0) return Clip(f, f.length())
-        val others = ListenStore.otherSpeeds(this, bid, fid, seg.chap.i, seg.n, s, seg.text)
+        val exact = ListenStore.file(this, bid, fid, seg.chap.i, seg.n, s, seg.text)
+        if (exact.length() > 0) return Clip(exact, exact.length())
+        val others = ListenStore.otherSpeeds(this, bid, fid, seg.chap.i, seg.n, 1.0, seg.text)
         fun other(): Clip? = others.firstOrNull { it.length() > 0 }?.let { Clip(it, it.length()) }
         if (localOnly || !app.netUsable()) {
             other()?.let { return it }
@@ -568,7 +576,16 @@ class ListenService : Service() {
         }
         if (far && ListenStore.bytes(this) >= ListenStore.MAX_BYTES) throw PackFull()
         val r = try {
-            app.api("POST", "/api/tts", JSONObject().put("text", seg.text).put("voice", "").put("speed", s), 60000)
+            // 书库准备好的听书包（没有就当场合成并存进听书包）；旧版书库没有这个接口时照旧按语速合成
+            val pack = app.api("GET", "/api/books/$bid/listen/${seg.chap.i}/${seg.n}", null, 90000)
+            if (pack.code != 404) pack else {
+                val old = app.api("POST", "/api/tts", JSONObject().put("text", seg.text).put("voice", "").put("speed", s), 60000)
+                if (old.ok) {
+                    ListenStore.write(this, exact, old.body, emptyList())
+                    return Clip(exact, old.body.size.toLong(), fresh = true)
+                }
+                old
+            }
         } catch (e: WearApp.Unauthorized) {
             throw e
         } catch (e: IOException) {
@@ -908,6 +925,7 @@ class ListenService : Service() {
         }
         player = null
         playerSeg = null
+        playerFile = null
     }
 
     /** 书库语音用不了（连不上书库、设置成了设备语音、微软的服务连不上）：改用手表自带语音 */
@@ -1034,14 +1052,17 @@ class ListenService : Service() {
         if (kotlin.math.abs(v - speed) < 0.01) return
         speed = v
         app.config.prefs.edit().putFloat("listen_speed", speed.toFloat()).apply()
-        // 按新语速重新合成；原来准备好的先留着，没网时接着用
-        clearAudio()
-        releasePlayer()
-        farBlockedUntil = 0
-        if (playing) {
+        // 准备好的是 1 倍速的：正在放的直接改语速，不用重新合成
+        val p = player
+        val f = playerFile
+        if (p != null && f != null && !useDevice) {
+            if (playing && p.isPlaying) try { p.playbackParams = p.playbackParams.setSpeed((speed / ListenStore.speedOf(f)).toFloat()) } catch (e: Exception) {}
+            else releasePlayer() // 暂停中：继续时按新语速重新开始这一句
+        } else if (playing) {
+            releasePlayer()
             tts?.stop()
             playCurrent()
-        } else prefetch()
+        }
         publish()
     }
 
