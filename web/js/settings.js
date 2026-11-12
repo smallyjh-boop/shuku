@@ -712,7 +712,9 @@ function narration(s, ctx) {
   api('/api/tts/voices').then(r => {
     const l = r.local || {}
     localState.textContent = l.ok
-      ? `已开（${l.model || 'MeloTTS'}，在这台 NAS 上合成 1 秒语音约 ${l.rtf} 秒）。中文、英文不经过外网，网络不好也不卡；泰文等其他语言照旧用微软。选“不用”会关掉，省内存`
+      ? (l.rtf > 0 && l.rtf <= 1
+        ? `已开（${l.model || 'MeloTTS'}，在这台 NAS 上合成 1 秒语音约 ${l.rtf} 秒，够快）：中文、英文先用本地，不经过外网；泰文等其他语言照旧用微软。选“不用”会关掉，省内存`
+        : `已开（${l.model || 'MeloTTS'}，在这台 NAS 上合成 1 秒语音约 ${l.rtf || '?'} 秒，比朗读慢）：平时先用微软，微软连不上时用本地兜底。速度按实际合成随时在算，NAS 闲下来变快了会自动改成本地优先。选“不用”会关掉，省内存`)
       : localSel.value === 'off' ? '已关：听书全部用微软' : '正在准备：书库启动后要半分钟左右加载本地语音模型，稍后刷新这一页'
   }).catch(() => { localState.textContent = '' })
   const body = () => ({ engine: engine.value, voice: voiceSel.value || t.voice, local: localSel.value, openai: { base_url: base.value.trim(), api_key: key.value.trim(), model: model.value.trim(), voice: ovoice.value.trim(), voices: ovoices.value.trim() } })

@@ -123,32 +123,47 @@ export function voiceFor(prefs, info, code) {
 
 // ---------- 读法：在线合成（书库）还是本机语音，每台设备自己选 ----------
 
+// 读法有四种：auto 书库自动挑（NAS 本地语音够快就用它，不然用微软）、ms 先用微软、nas 先用 NAS 本地语音、device 这台设备自带的语音。
+// 前三种都是书库合成：选的来源放在音色名前面（nas: / ms:）交给书库，旧版 App 原样转过来也认
 const ENGINE_NOTE = {
-  server: '书库在线合成（微软自然语音等），声音更自然，要能连上书库。',
+  auto: '书库合成：NAS 本地语音够快就用它，不然用微软；微软连不上时用 NAS 兜底。',
+  ms: '微软自然语音，最自然，要 NAS 能上外网；连不上时用 NAS 本地语音兜底。',
+  nas: 'NAS 本地语音（中文、英文），不经过外网；NAS 合成得慢时第一句要多等一会儿。其他语言照旧用微软。',
   device: '用这台设备自带的语音，不经过书库，断网也能读。',
+  server: '书库在线合成，声音更自然，要能连上书库。',
 }
 
-// 阅读设置里的“读法”切换（两个按钮，和别的阅读设置一样的样式）
-function engineSeg(cur, onPick) {
+const SRC_LABEL = { auto: '自动', ms: '微软', nas: 'NAS' }
+
+export function srcVoice(prefs, voice) {
+  const src = prefs?.src
+  return src === 'nas' || src === 'ms' ? `${src}:${voice || ''}` : voice
+}
+
+// 阅读设置里的“读法”切换（和别的阅读设置一样的样式）；NAS 上没开本地语音时不显示“NAS”
+function engineSeg(cur, onPick, nasOk) {
+  const opts = [['auto', '自动'], ['ms', '微软'], ...(nasOk || cur === 'nas' ? [['nas', 'NAS']] : []), ['device', '本机']]
   return h('div', { class: 'seg', role: 'group', 'aria-label': '读法', style: { marginBottom: '6px' } },
-    [['server', '在线合成'], ['device', '本机语音']].map(([v, l]) => h('button', {
+    opts.map(([v, l]) => h('button', {
       type: 'button', class: cur === v ? 'on' : '', 'aria-pressed': cur === v ? 'true' : 'false', onclick: () => onPick(v),
     }, l)))
 }
 
 // 播放条上的“声音”按钮：一点弹出菜单，读法（在线合成 / 本机语音）和音色直接选，不用进阅读设置
-function openVoiceMenu(e, { cur, serverOk = true, voices, curVoice, onEngine, onVoice }) {
+function openVoiceMenu(e, { cur, serverOk = true, nasOk, voices, curVoice, onEngine, onVoice }) {
   const r = e.currentTarget.getBoundingClientRect()
   const mark = on => on ? '　✓' : ''
   const items = []
   if (serverOk) items.push(
-    { label: '在线合成（书库，更自然）' + mark(cur === 'server'), run: () => onEngine('server') },
+    { label: '自动（NAS 够快用 NAS，不然用微软）' + mark(cur === 'auto'), run: () => onEngine('auto') },
+    { label: '微软在线合成（最自然）' + mark(cur === 'ms'), run: () => onEngine('ms') },
+    ...(nasOk || cur === 'nas' ? [{ label: 'NAS 本地语音（中英，不经过外网）' + mark(cur === 'nas'), run: () => onEngine('nas') }] : []),
     { label: '本机语音（不联网也能读）' + mark(cur === 'device'), run: () => onEngine('device') })
   if (voices.length) {
     if (items.length) items.push(null)
     for (const v of voices.slice(0, 40)) items.push({ label: v.name + mark(v.id === curVoice), run: () => onVoice(v.id) })
   }
-  openMenu(items, { x: r.left, y: r.top, above: true, title: cur === 'device' ? '声音 · 本机语音' : '声音 · 在线合成' })
+  openMenu(items, { x: r.left, y: r.top, above: true, title: '声音 · ' + ({ auto: '自动', ms: '微软', nas: 'NAS 本地', device: '本机语音' }[cur] || '书库合成') })
 }
 
 // 请书库在后台提前合成后面的句子（网络不好时不用一句一句等）。items：{ text, voice }，和正式合成时的一样
@@ -170,7 +185,7 @@ export async function prefetchFromView(shell) {
   const segs = await eng.ttsSegments(true).catch(() => [])
   if (!segs?.length) return
   const code = bookCode(shell, segs)
-  serverPrefetch(segs.map(x => ({ text: x.text, voice: voiceFor(prefs, info, segLang(x.text, code)) })), code, prefs.speed || 1)
+  serverPrefetch(segs.map(x => ({ text: x.text, voice: srcVoice(prefs, voiceFor(prefs, info, segLang(x.text, code))) })), code, prefs.speed || 1)
 }
 
 // 书库提前合成到哪了：“已准备好约 12 分钟”（没有在准备的就是空的）
@@ -328,6 +343,19 @@ export class Narrator {
   get serverUsable() { return this.info?.engine !== 'browser' }
   get mode() { return this.forceBrowser || !this.serverUsable || this.engineChoice === 'device' ? 'browser' : 'server' }
 
+  // 读法四选一（auto / ms / nas / device）
+  get choice() { return this.engineChoice === 'device' ? 'device' : (this.prefs.src || 'auto') }
+
+  pickChoice(v) {
+    if (v === 'device') return this.setEngine('device')
+    this.prefs.src = v === 'auto' ? '' : v
+    if (this.engineChoice === 'device') return this.setEngine('server')
+    save(PREFS_KEY, this.prefs)
+    this.forceBrowser = false
+    toast({ auto: '书库自动挑声音', ms: '先用微软合成', nas: '先用 NAS 本地语音' }[v], { duration: 1500 })
+    this.restartCurrent()
+  }
+
   setEngine(v) {
     if (v === 'device' && !window.speechSynthesis) { toast('这个浏览器没有自带的语音，只能用在线合成', { error: true }); return }
     this.prefs.engine = v === 'device' ? 'device' : 'server'
@@ -343,10 +371,10 @@ export class Narrator {
     const dev = this.mode === 'browser'
     const code = segLang('', this.code)
     openVoiceMenu(e, {
-      cur: dev ? 'device' : 'server', serverOk: this.serverUsable && !!window.speechSynthesis,
+      cur: dev ? 'device' : this.choice, serverOk: this.serverUsable && !!window.speechSynthesis, nasOk: !!info.local?.ok,
       voices: dev ? browserVoices(code).map(v => ({ id: v.name, name: v.name })) : serverVoices(info, this.code),
       curVoice: dev ? this.prefs.deviceVoices?.[code] : this.voice,
-      onEngine: v => { this.setEngine(v); this.updateUI() },
+      onEngine: v => { this.pickChoice(v); this.updateUI() },
       onVoice: v => dev ? this.setDeviceVoice(v) : this.setVoice(v),
     })
   }
@@ -380,7 +408,7 @@ export class Narrator {
     this.playBtn.replaceChildren(icon(this.playing ? 'pause' : 'play'))
     this.playBtn.title = this.playing ? '暂停' : '继续'
     this.speedBtn.textContent = this.speed.toFixed(1) + '×'
-    this.voiceBtn.textContent = this.mode === 'browser' ? '本机' : '在线'
+    this.voiceBtn.textContent = this.mode === 'browser' ? '本机' : SRC_LABEL[this.prefs.src || 'auto']
     this.timerBtn.classList.toggle('on', !!this.timerMin)
     this.timerText.textContent = this.timerMin === -1 ? '本章' : this.timerEnd ? Math.max(0, Math.ceil((this.timerEnd - Date.now()) / 60000)) + '分' : ''
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = this.playing ? 'playing' : 'paused'
@@ -441,7 +469,7 @@ export class Narrator {
   // 这一节后面的句子交给书库提前合成（用书库语音时）
   prefetchAhead() {
     if (this.mode !== 'server' || !this.queue.length) return
-    serverPrefetch(this.queue.slice(this.i + 1).map(s => ({ text: s.text, voice: voiceFor(this.prefs, this.info, segLang(s.text, this.code)) })), this.code, this.speed)
+    serverPrefetch(this.queue.slice(this.i + 1).map(s => ({ text: s.text, voice: srcVoice(this.prefs, voiceFor(this.prefs, this.info, segLang(s.text, this.code))) })), this.code, this.speed)
   }
 
   // 用户自己翻页后，从新位置接着读
@@ -522,7 +550,7 @@ export class Narrator {
   fetchAudio(text) {
     if (!this.cache.has(text)) {
       // 每一句按它的文字挑声音：中英对照的书里英文句子用英文声音、中文句子用中文声音（各用这种语言选过的）
-      const voice = voiceFor(this.prefs, this.info, segLang(text, this.code))
+      const voice = srcVoice(this.prefs, voiceFor(this.prefs, this.info, segLang(text, this.code)))
       const p = api('/api/tts', { method: 'POST', raw: true, body: { text, voice, lang: this.code || '', speed: this.speed } })
         .then(r => r.blob()).then(b => URL.createObjectURL(b))
       p.catch(() => this.cache.delete(text))
@@ -666,9 +694,9 @@ export class Narrator {
       if (!this.serverUsable) {
         items.push(smallNote('书库设置成了“设备自带语音”，现在用这台设备的语音朗读。管理员可以在“设置 → 听书”里换成在线合成。'))
       } else {
-        const cur = this.engineChoice
-        items.push(engineSeg(cur, v => { this.setEngine(v); draw() }))
-        items.push(smallNote(this.forceBrowser && cur === 'server' ? '书库语音暂时用不了，现在临时用本机语音；点“在线合成”重新试。' : ENGINE_NOTE[cur]))
+        const cur = this.choice
+        items.push(engineSeg(cur, v => { this.pickChoice(v); draw() }, !!info.local?.ok))
+        items.push(smallNote(this.forceBrowser && cur !== 'device' ? '书库语音暂时用不了，现在临时用本机语音；点上面的“自动”重新试。' : ENGINE_NOTE[cur]))
       }
       if (this.mode === 'server') {
         if (info.voices?.length) items.push(voiceSelect(info, this.code, this.voice, v => this.setVoice(v)))
@@ -741,7 +769,7 @@ export class NativeNarrator {
     this.playBtn.replaceChildren(icon(this.playing ? 'pause' : 'play'))
     this.playBtn.title = this.playing ? '暂停' : '继续'
     this.speedBtn.textContent = this.speed.toFixed(1) + '×'
-    this.voiceBtn.textContent = this.engine === 'device' ? '本机' : '在线'
+    this.voiceBtn.textContent = this.engine === 'device' ? '本机' : SRC_LABEL[this.prefs.src || 'auto']
     this.timerBtn.classList.toggle('on', !!this.timerMin)
     this.timerText.textContent = this.timerMin === -1 ? '本章' : this.timerMin > 0 ? this.timerMin + '分' : ''
   }
@@ -766,7 +794,7 @@ export class NativeNarrator {
       const loc = eng?.ttsLocation?.(unit.key, s.i)
       const o = loc ? { id, text: s.text, loc: loc.location, pct: Math.round((loc.fraction || 0) * 10000) / 10000 } : { id, text: s.text }
       // 每句按文字挑声音（中英对照的书里英文句子用英文声音）；旧版 App 不认这个字段，照样用整本的声音
-      if (this.voiceInfo) o.voice = voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code))
+      if (this.voiceInfo) o.voice = srcVoice(this.prefs, voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code)))
       return o
     })
   }
@@ -792,15 +820,15 @@ export class NativeNarrator {
     this.voiceInfo = voices && voices.defaults ? voices : null // 自定义接口的声音不分语言
     // 每种语言用哪个声音：App 熄屏后自己从书库取的句子也按文字挑
     const byLang = {}
-    if (this.voiceInfo) for (const c of new Set(['zh', 'en', 'th', 'ja', 'ko', 'ru', 'fr', 'de', 'es', 'vi', this.code])) byLang[c] = voiceFor(this.prefs, voices, c)
+    if (this.voiceInfo) for (const c of new Set(['zh', 'en', 'th', 'ja', 'ko', 'ru', 'fr', 'de', 'es', 'vi', this.code])) byLang[c] = srcVoice(this.prefs, voiceFor(this.prefs, voices, c))
     call('tts', 'start', {
       book: { id: this.shell.id, file_id: info.file_id || 0, title: info.title || '', author: info.author || '', cover: info.has_cover ? new URL(apiUrl(`/api/books/${this.shell.id}/cover?w=480`), location.href).href : '' },
-      voice: voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''), voices: byLang,
+      voice: srcVoice(this.prefs, voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || '')), voices: byLang,
       deviceVoice: this.prefs.deviceVoice || '', // 手机自带语音选的音色（旧版 App 不认，用 voice） lang: this.code, speed: this.speed, segments: this.pack(unit),
       // 打开这本书时书库进度的版本：App 自己存进度时带上，别的设备读到了后面就不直接覆盖
       progressBase: this.shell.base ?? null,
     })
-    this.prefetchPacked(this.order.map(id => this.segs.get(id)), voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || ''))
+    this.prefetchPacked(this.order.map(id => this.segs.get(id)), srcVoice(this.prefs, voices ? voiceFor(this.prefs, voices, this.code) : (this.prefs.voice || '')))
     watchReady(this, true)
   }
 
@@ -808,7 +836,7 @@ export class NativeNarrator {
   prefetchPacked(list, fallbackVoice) {
     if ((callJSON('prefs') || {}).tts_engine === 'device') return
     this.prefVoice = fallbackVoice ?? this.prefVoice
-    serverPrefetch(list.filter(Boolean).map(s => ({ text: s.text, voice: this.voiceInfo ? voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code)) : (this.prefVoice || '') })), this.code, this.speed)
+    serverPrefetch(list.filter(Boolean).map(s => ({ text: s.text, voice: this.voiceInfo ? srcVoice(this.prefs, voiceFor(this.prefs, this.voiceInfo, segLang(s.text, this.code))) : (this.prefVoice || '') })), this.code, this.speed)
   }
 
   async onEvent(e) {
@@ -930,6 +958,20 @@ export class NativeNarrator {
     return (callJSON('prefs') || {}).tts_engine === 'device' ? 'device' : 'server'
   }
 
+  // 读法四选一（auto / ms / nas / device）：device 是 App 的设置，前三种是这台设备选的书库合成来源
+  get choice() { return this.engine === 'device' ? 'device' : (this.prefs.src || 'auto') }
+
+  pickChoice(v) {
+    if (v === 'device') return this.setEngine('device')
+    this.prefs.src = v === 'auto' ? '' : v
+    save(PREFS_KEY, this.prefs)
+    toast({ auto: '书库自动挑声音', ms: '先用微软合成', nas: '先用 NAS 本地语音' }[v], { duration: 1500 })
+    if ((callJSON('prefs') || {}).tts_engine === 'device') call('setPref', 'tts_engine', 'server')
+    // 正在听：从这里按新的来源重新开始读（交给 App 的句子带着来源）
+    if (this.active) { call('tts', 'stop', ''); this.cleanup(); this.start() }
+    else this.updateUI()
+  }
+
   // 换读法：记在 App 里（“设置 → 手机 App”里也是这一项），正在听的话马上换
   setEngine(v) {
     call('setPref', 'tts_engine', v)
@@ -947,11 +989,12 @@ export class NativeNarrator {
     let info = null
     if (!dev) { try { info = await voiceInfo() } catch {} }
     if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
+    if (!info) { try { info = await voiceInfo() } catch {} }
     openVoiceMenu(e, {
-      cur: dev ? 'device' : 'server',
+      cur: this.choice, nasOk: !!info?.local?.ok,
       voices: dev ? (callJSON('ttsVoices') || []) : serverVoices(info, this.code),
       curVoice: dev ? this.prefs.deviceVoice : voiceFor(this.prefs, info, this.code),
-      onEngine: v => this.setEngine(v),
+      onEngine: v => this.pickChoice(v),
       onVoice: v => this.setVoice(v, dev),
     })
   }
@@ -968,10 +1011,10 @@ export class NativeNarrator {
     if (!this.code) this.code = bookCode(this.shell, await this.shell.engine?.ttsSegments?.(true).catch(() => []))
     const draw = () => {
       const app = callJSON('prefs') || {}
-      const cur = app.tts_engine === 'device' ? 'device' : 'server'
-      const items = [engineSeg(cur, v => { this.setEngine(v); draw() })]
-      if (cur === 'server' && this.active && this.engineNow === 'device') items.push(smallNote('书库语音暂时用不了，现在临时用手机语音；网络好了点“在线合成”重新试。'))
-      else if (cur === 'server' && !info && net.route === 'offline') items.push(smallNote('现在连不上书库，听书时先用手机自带语音。'))
+      const cur = app.tts_engine === 'device' ? 'device' : (this.prefs.src || 'auto')
+      const items = [engineSeg(cur, v => { this.pickChoice(v); draw() }, !!info?.local?.ok)]
+      if (cur !== 'device' && this.active && this.engineNow === 'device') items.push(smallNote('书库语音暂时用不了，现在临时用手机语音；网络好了点“自动”重新试。'))
+      else if (cur !== 'device' && !info && net.route === 'offline') items.push(smallNote('现在连不上书库，听书时先用手机自带语音。'))
       else items.push(smallNote(ENGINE_NOTE[cur] + (cur === 'device' ? '' : '锁屏、切到别的 App 也会继续读。')))
       if (cur === 'device') {
         const voices = callJSON('ttsVoices') || []
