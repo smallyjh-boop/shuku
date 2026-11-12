@@ -92,7 +92,10 @@ jobs:
           if ($n -ne 1) { $fail += "开了 $n 个" }
           $p = Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -PassThru
           $null = $p.WaitForExit(120000)
-          Start-Sleep 10
+          # 卸载程序会把自己复制到临时目录再运行：等它删完（最多 2 分钟）
+          for ($i = 0; $i -lt 60 -and ((Test-Path "$dir\python") -or (Test-Path "$desk\书库.lnk")); $i++) { Start-Sleep 2 }
+          "卸载等了 $($i * 2) 秒"
+          if (Test-Path "$dir\python") { "还在的文件："; Get-ChildItem -Recurse "$dir" -File | Select-Object -First 15 | ForEach-Object { $_.FullName } }
           if (Test-Path "$dir\python") { $fail += '卸载后文件还在' }
           if (Test-Path "$desk\书库.lnk") { $fail += '卸载后桌面图标还在' }
           if (Get-Process pythonw -ErrorAction SilentlyContinue) { $fail += '卸载后程序还开着' }
