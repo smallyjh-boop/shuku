@@ -9,7 +9,7 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     env:
       PYTHONUTF8: '1'
     steps:
@@ -43,7 +43,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $fail = @()
-          Start-Process build\setup.exe -ArgumentList '/S' -Wait
+          # 只等安装程序本身（-Wait 会连装完打开的书库一起等）
+          $p = Start-Process build\setup.exe -ArgumentList '/S' -PassThru
+          if (!$p.WaitForExit(300000)) { $fail += '安装程序 5 分钟没装完' }
           $dir = "$env:LOCALAPPDATA\Programs\Shuku"
           $desk = [Environment]::GetFolderPath('Desktop')
           foreach ($p in @("$dir\python\pythonw.exe", "$dir\app\shuku_desktop.py", "$dir\uninstall.exe", "$desk\书库.lnk")) {
@@ -76,7 +78,8 @@ jobs:
           $n = (Get-Process pythonw -ErrorAction SilentlyContinue | Measure-Object).Count
           "pythonw 进程数：$n"
           if ($n -ne 1) { $fail += "开了 $n 个" }
-          Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -Wait
+          $p = Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -PassThru
+          $null = $p.WaitForExit(120000)
           Start-Sleep 10
           if (Test-Path "$dir\python") { $fail += '卸载后文件还在' }
           if (Test-Path "$desk\书库.lnk") { $fail += '卸载后桌面图标还在' }
