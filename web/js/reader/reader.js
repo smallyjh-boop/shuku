@@ -422,7 +422,12 @@ class Reader {
   async prefetchListen() {
     if (this.destroyed || !this.engine?.ttsSegments || this.narrator?.active) return
     this.prefKey = this.engine.ttsUnitKey?.()
-    try { (await import('./tts.js')).prefetchFromView(this) } catch {}
+    try {
+      const t = await import('./tts.js')
+      t.prefetchFromView(this)
+      // 每次打开书一次：请书库空闲时从这里往后准备听书播放器用的语音
+      if (!this.listenPrepared) { this.listenPrepared = true; t.prepareFromView(this) }
+    } catch {}
   }
 
   // ---------- 听书 ----------

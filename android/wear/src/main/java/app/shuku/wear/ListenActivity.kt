@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -314,6 +315,24 @@ class ListenActivity : Activity() {
             min > 0 -> "已准备离线 $min 分钟"
             else -> ""
         }
+    }
+
+    // 往左滑进阅读（看文字，跟着读到的地方）；往右滑是系统的返回
+    private var downX = 0f
+    private var downY = 0f
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { downX = ev.x; downY = ev.y }
+            MotionEvent.ACTION_UP -> {
+                val dx = ev.x - downX
+                val dy = ev.y - downY
+                if (dx < -Ui.dp(this, 50f) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) {
+                    openText()
+                    return true
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     /** 回到文字：从阅读页来的就回去（阅读页会跟到正在读的地方），否则打开这本书 */
