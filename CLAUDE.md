@@ -3,7 +3,7 @@
 ## 部署到用户的 NAS（威联通 TS-453D，Intel x86，Container Station）
 
 - **容器一律用 `network_mode: host`，服务直接监听自己的端口，不写 `ports:` 映射。** 威联通上 Docker 的端口转发不通：桥接网络加端口映射的容器访问不到，也上不了网。用户已经因为这个吃过好几次亏；他的其他项目（流水账房、极速 GTD、泰好说、memory-trainer）全都是宿主机网络。
-- 书库的端口是 **27200**，书库的本地语音服务 shuku-tts 是 **27210**（`SHUKU_PORT`，镜像默认值也是 27200）。新增端口前先避开 NAS 上已占用的：8080（QTS 管理页）、443、8720 / 8721 / 8730（泰好说）、8741（泰好说的更新服务 taihaoshuo-updater，只在本机回环）、8721（memory-trainer）、8780 / 8781（极速 GTD）、8790（3D 运营管理系统）、8791（运营分析系统）、18765（3D 选品工具）、27180 / 27190（流水账房个人版 / 公司版）。Tailscale serve 的 https 端口（2026-10-21 在 NAS 上 `serve status` 看到的）：443 → 27180（流水账房个人版）、10443 → 27190（流水账房公司版）、8443 → 8720（泰好说）、9443 → 27200（书库）。**新增 serve 之前先让用户跑 `serve status`，只加没用过的端口，不要覆盖别的项目的。**
+- 书库的端口是 **27200**（`SHUKU_PORT`，镜像默认值也是 27200），书库的本地语音服务 shuku-tts 是 **27210**。新增端口前先避开 NAS 上已占用的：8080（QTS 管理页）、443、8720 / 8721 / 8730（泰好说）、8741（泰好说的更新服务 taihaoshuo-updater，只在本机回环）、8721（memory-trainer）、8780 / 8781（极速 GTD）、8790（3D 运营管理系统）、8791（运营分析系统）、18765（3D 选品工具）、27180 / 27190（流水账房个人版 / 公司版）。Tailscale serve 的 https 端口（2026-10-21 在 NAS 上 `serve status` 看到的）：443 → 27180（流水账房个人版）、10443 → 27190（流水账房公司版）、8443 → 8720（泰好说）、9443 → 27200（书库）。**新增 serve 之前先让用户跑 `serve status`，只加没用过的端口，不要覆盖别的项目的。**
 - 书放在共享文件夹 `books`（小写，路径区分大小写）：`/share/books/投递`、`/share/books/图书`、`/share/books/漫画`；数据在 `/share/Container/shuku`。
 - NAS 内网地址 `192.168.31.200`，Tailscale 地址 `100.81.34.58`（MagicDNS `nasfinecycle.tailbb4459.ts.net`）。时区 `Asia/Bangkok`。
 - NAS 上的 Tailscale 命令行在 `/share/CACHEDEV1_DATA/.qpkg/Tailscale/tailscale`，版本较旧，`serve` 用老写法：`tailscale serve https:9443 / http://127.0.0.1:27200`（443 是流水账房的）。书库的 https 地址是 `https://nasfinecycle.tailbb4459.ts.net:9443`；App 和手表用 `http://100.81.34.58:27200` 也行。
