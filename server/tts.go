@@ -37,6 +37,7 @@ import (
 type TTSConfig struct {
 	Engine string `json:"engine"` // edge | openai | browser
 	Voice  string `json:"voice"`
+	Local  string `json:"local"` // NAS 本地语音（tts_local.go）：空 / auto 自动用，off 不用
 	OpenAI struct {
 		BaseURL string `json:"base_url"`
 		APIKey  string `json:"api_key"`
@@ -620,10 +621,30 @@ func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([
 			voice = dictVoice(lang)
 		}
 	}
+	// 中文、英文先用 NAS 本地语音；不行就用微软（正在听的那句最多等 25 秒）
+	if useLocalTTS(c, text, lang) {
+		lctx, cancel := context.WithTimeout(ctx, ifd(ctx.Value(prefetchCtxKey{}) != nil, 90*time.Second, 25*time.Second))
+		b, err := synthesizeWith(lctx, "local", text, "melo", speed)
+		cancel()
+		if err == nil {
+			return b, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		localTTSDown(err)
+	}
 	if c.Engine == "edge" {
 		voice = adaptVoice(text, voice, lang)
 	}
 	return synthesizeWith(ctx, c.Engine, text, voice, speed)
+}
+
+func ifd(c bool, a, b time.Duration) time.Duration {
+	if c {
+		return a
+	}
+	return b
 }
 
 // 用指定的语音服务合成（查字典的发音按语言挑微软的音色，不一定是设置里选的那个）
@@ -678,6 +699,8 @@ func synthesizeWith(ctx context.Context, engine, text, voice string, speed float
 	var b []byte
 	var err error
 	switch engine {
+	case "local":
+		b, err = localSynth(ctx, text, speed)
 	case "openai":
 		b, err = openaiSynth(ctx, c, text, voice, speed)
 	case "edge":
@@ -747,7 +770,7 @@ func prefetchWorker() {
 		if c.Engine != "edge" && c.Engine != "openai" {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), prefetchCtxKey{}, true), 120*time.Second)
 		_, err := synthesize(ctx, job.Text, job.Voice, job.Lang, job.Speed)
 		prefetch.Lock()
 		if st := prefetch.stats[job.UID]; st != nil {
@@ -902,7 +925,9 @@ func handleTTSVoices(w http.ResponseWriter, r *http.Request) {
 		}
 		def = c.OpenAI.Voice
 	}
-	writeJSON(w, 200, map[string]any{"engine": c.Engine, "voices": voices, "default": def, "defaults": defaults})
+	local := localTTSStatus()
+	writeJSON(w, 200, map[string]any{"engine": c.Engine, "voices": voices, "default": def, "defaults": defaults,
+		"local": map[string]any{"ok": local.OK, "rtf": local.RTF, "version": local.Version, "model": local.Model, "enabled": c.Engine == "edge" && c.Local != "off"}})
 }
 
 func handleTTS(w http.ResponseWriter, r *http.Request) {

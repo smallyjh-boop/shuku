@@ -703,7 +703,19 @@ function narration(s, ctx) {
     h('label', { class: 'field' }, h('span', null, '默认音色'), ovoice),
     h('label', { class: 'field full' }, h('span', null, '可选音色列表'), ovoices, h('small', null, '阅读器里可以在这些音色之间切换，用逗号分隔')))
   const voiceRow = h('label', { class: 'field' }, h('span', null, '默认音色'), voiceSel, h('small', null, '阅读时还可以随时换'))
-  const body = () => ({ engine: engine.value, voice: voiceSel.value || t.voice, openai: { base_url: base.value.trim(), api_key: key.value.trim(), model: model.value.trim(), voice: ovoice.value.trim(), voices: ovoices.value.trim() } })
+  // NAS 本地语音（shuku-tts）：书库自动发现；自动时中文、英文先用它，不行用微软
+  const localSel = h('select', { class: 'input', style: { width: 'auto' } },
+    [['auto', '自动（中文、英文先用本地，不行用微软）'], ['off', '不用']].map(([v, l]) => h('option', { value: v, selected: (t.local || 'auto') === v }, l)))
+  localSel.onchange = () => saveIt(true)
+  const localState = h('small', null, '正在检查…')
+  const localRow = h('label', { class: 'field' }, h('span', null, 'NAS 本地语音'), localSel, localState)
+  api('/api/tts/voices').then(r => {
+    const l = r.local || {}
+    localState.textContent = l.ok
+      ? `已经装好（${l.model || 'MeloTTS'}，合成 1 秒语音约 ${l.rtf} 秒）。中文、英文不经过外网，网络不好也不卡；泰文等其他语言照旧用微软`
+      : '还没装：在 NAS 上装好本地语音服务（shuku-tts）以后，书库会自动用上，不用改设置'
+  }).catch(() => { localState.textContent = '' })
+  const body = () => ({ engine: engine.value, voice: voiceSel.value || t.voice, local: localSel.value, openai: { base_url: base.value.trim(), api_key: key.value.trim(), model: model.value.trim(), voice: ovoice.value.trim(), voices: ovoices.value.trim() } })
   async function loadVoices() {
     if (engine.value !== 'edge') return
     try {
@@ -711,7 +723,7 @@ function narration(s, ctx) {
       fill(voiceSel, r.voices.map(v => h('option', { value: v.id, selected: v.id === (t.voice || r.default) }, `${v.name}（${v.lang}${v.gender ? ' · ' + v.gender : ''}）${v.desc ? '　' + v.desc : ''}`)))
     } catch {}
   }
-  const sync = () => { openaiBox.hidden = engine.value !== 'openai'; voiceRow.hidden = engine.value !== 'edge' }
+  const sync = () => { openaiBox.hidden = engine.value !== 'openai'; voiceRow.hidden = engine.value !== 'edge'; localRow.hidden = engine.value !== 'edge' }
   engine.onchange = async () => { sync(); await saveIt(true); loadVoices() }
   sync(); loadVoices()
   async function saveIt(quiet) {
@@ -742,7 +754,7 @@ function narration(s, ctx) {
     h('div', { class: 'stack' },
       h('label', { class: 'field' }, h('span', null, '语音引擎'), engine,
         h('small', null, '微软自然语音和 Edge 浏览器“大声朗读”是同一套，最自然，需要 NAS 能访问 speech.platform.bing.com。也可以接 OpenAI、硅基流动，或在 NAS 上跑 Kokoro 之类的本地语音模型。')),
-      voiceRow, openaiBox,
+      voiceRow, localRow, openaiBox,
       h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => saveIt() }, '保存'), h('button', { class: 'btn', onclick: e => listen(e.currentTarget) }, icon('play'), '试听'), status)))
 }
 

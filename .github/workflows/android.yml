@@ -456,6 +456,30 @@ jobs:
           docker push "$IMAGE:v$V"
           docker push "$IMAGE:latest"
 
+      - name: NAS 本地语音服务 shuku-tts（tts 文件夹没改就用做好的）
+        run: |
+          set -o pipefail
+          # 标签按 tts 文件夹的内容算：没改就不重做，NAS 也不用重新下载（安装：deploy/tts/install.sh）
+          T=ghcr.io/smallyjh-boop/shuku-tts
+          tag=$(cat tts/Dockerfile tts/server.py | sha256sum | cut -c1-12)
+          if docker buildx imagetools inspect "$T:$tag" > /dev/null 2>&1; then
+            echo "用已有的 $T:$tag"
+            exit 0
+          fi
+          docker buildx build --platform linux/amd64 --build-arg TTS_VERSION="$tag" -t "$T:$tag" -t "$T:latest" --load tts 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          # 试运行：启动、合成一句中英混读，拿到 MP3 才推送
+          docker run -d --name tts-check --network host -e TTS_PORT=27299 "$T:$tag"
+          ok=
+          for i in $(seq 1 90); do curl -fs http://127.0.0.1:27299/health && ok=1 && break; sleep 2; done
+          [ -n "$ok" ] || { docker logs tts-check; exit 1; }
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"input":"那是一个晴朗的早晨。It was a bright cold day.","speed":1}' \
+            http://127.0.0.1:27299/v1/audio/speech -o "$RUNNER_TEMP/tts.mp3"
+          size=$(stat -c%s "$RUNNER_TEMP/tts.mp3"); echo "试读：$size 字节"; [ "$size" -gt 5000 ]
+          docker logs tts-check | tail -n 3
+          docker rm -f tts-check > /dev/null
+          docker push "$T:$tag"
+          docker push "$T:latest"
+
       # ---------- 出错时 ----------
 
       - name: 打包出错时把出错的地方写进注释
