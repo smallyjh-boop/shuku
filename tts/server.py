@@ -58,7 +58,9 @@ def synth(text, speed, live):
     try:
         t0 = time.time()
         a = tts.generate(text, sid=0, speed=speed)
-        return a, time.time() - t0
+        dt = time.time() - t0
+        note_speed(dt, len(a.samples) / max(1, a.sample_rate))
+        return a, dt
     finally:
         with cv:
             busy = False
@@ -78,10 +80,42 @@ def to_mp3(a):
     return enc.encode(pcm.tobytes()) + enc.flush()
 
 
-# 启动时测一次速度（安装脚本、书库的设置页显示）
-_a, _dt = synth('那是一个晴朗的早晨，城市还没有完全醒来。It was a bright cold day in April.', 1.0, True)
-RTF = round(_dt / max(1e-6, len(_a.samples) / _a.sample_rate), 2)
-print(f'shuku-tts {VERSION}: MeloTTS 中英，{THREADS} 线程，端口 {PORT}，合成 1 秒语音约 {RTF} 秒', flush=True)
+# 速度（合成 1 秒语音要几秒）：按真实合成的句子随时算（最近的分量大），书库按它决定先用本地还是先用微软。
+# 刚启动时 NAS 可能正忙（书库升级后扫描、建索引），只测一次不准
+RTF = None
+_speed_lock = threading.Lock()
+
+
+def note_speed(dt, audio_secs):
+    global RTF
+    if audio_secs < 1.0:  # 太短的句子不准
+        return
+    r = dt / audio_secs
+    with _speed_lock:
+        RTF = r if RTF is None else RTF * 0.8 + r * 0.2
+
+
+# 先热身（第一次推理慢），再测一次
+synth('你好。', 1.0, True)
+RTF = None
+synth('那是一个晴朗的早晨，城市还没有完全醒来。It was a bright cold day in April.', 1.0, True)
+# 闲着的时候每 20 分钟再测一次（书库觉得慢、平时不用它时，速度也能跟着 NAS 的忙闲更新）
+_last_req = [time.time()]
+
+
+def _idle_probe():
+    while True:
+        time.sleep(1200)
+        if busy or time.time() - _last_req[0] < 120:
+            continue
+        try:
+            synth('那是一个晴朗的早晨，城市还没有完全醒来。It was a bright cold day in April.', 1.0, False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+threading.Thread(target=_idle_probe, daemon=True).start()
+print(f'shuku-tts {VERSION}: MeloTTS 中英，{THREADS} 线程，端口 {PORT}，合成 1 秒语音约 {round(RTF, 2)} 秒', flush=True)
 
 
 class H(BaseHTTPRequestHandler):
@@ -100,7 +134,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/health'):
             self.send(200, json.dumps({'ok': True, 'app': 'shuku-tts', 'version': VERSION, 'model': 'melo-zh_en', 'langs': ['zh', 'en'],
-                                       'threads': THREADS, 'rtf': RTF}).encode())
+                                       'threads': THREADS, 'rtf': round(RTF or 0, 2)}).encode())
         else:
             self.send(404, b'{"error":"not found"}')
 
@@ -122,6 +156,7 @@ class H(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             speed = 1.0
         live = self.headers.get('X-Priority', 'live') != 'prefetch'
+        _last_req[0] = time.time()
         try:
             a, _ = synth(text, speed, live)
             self.send(200, to_mp3(a), 'audio/mpeg')

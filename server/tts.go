@@ -613,6 +613,11 @@ var ttsSem = make(chan struct{}, 4) // 同时最多合成 4 段
 // lang：书的语言（没选音色时按它挑）
 func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([]byte, error) {
 	c := ttsConfig()
+	// 设备上选的声音来源带在音色名前面（旧版 App 原样转过来也认）：nas: 先用 NAS 本地语音，ms: 先用微软，没有前缀是自动
+	prefer := ""
+	if p, v, ok := strings.Cut(voice, ":"); ok && (p == "nas" || p == "ms") {
+		prefer, voice = p, v
+	}
 	if voice == "" {
 		voice = c.Voice
 		if c.Engine == "openai" {
@@ -621,9 +626,12 @@ func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([
 			voice = dictVoice(lang)
 		}
 	}
-	// 中文、英文先用 NAS 本地语音；不行就用微软（正在听的那句最多等 25 秒）
-	if useLocalTTS(c, text, lang) {
-		lctx, cancel := context.WithTimeout(ctx, ifd(ctx.Value(prefetchCtxKey{}) != nil, 90*time.Second, 25*time.Second))
+	prefetching := ctx.Value(prefetchCtxKey{}) != nil
+	local := useLocalTTS(c, text, lang)
+	// 中文、英文：选了 NAS，或者自动而本地语音够快，就先用本地，不行再用微软（正在听的那句最多等 25 秒）
+	localFirst := local && (prefer == "nas" || (prefer == "" && localTTSFast()))
+	if localFirst {
+		lctx, cancel := context.WithTimeout(ctx, ifd(prefetching, 90*time.Second, 25*time.Second))
 		b, err := synthesizeWith(lctx, "local", text, "melo", speed)
 		cancel()
 		if err == nil {
@@ -636,6 +644,19 @@ func synthesize(ctx context.Context, text, voice, lang string, speed float64) ([
 	}
 	if c.Engine == "edge" {
 		voice = adaptVoice(text, voice, lang)
+	}
+	// 选了微软，或者自动而本地语音不够快（NAS 的 CPU 慢）：先用微软；微软不行（断网、连不上）再用本地兜底
+	if local && !localFirst {
+		ectx, cancel := context.WithTimeout(ctx, ifd(prefetching, 45*time.Second, 12*time.Second))
+		b, err := synthesizeWith(ectx, c.Engine, text, voice, speed)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return b, err
+		}
+		if b, lerr := synthesizeWith(ctx, "local", text, "melo", speed); lerr == nil {
+			return b, nil
+		}
+		return nil, err
 	}
 	return synthesizeWith(ctx, c.Engine, text, voice, speed)
 }

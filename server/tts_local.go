@@ -73,7 +73,14 @@ func localTTSStatus() localTTSInfo {
 	return info
 }
 
-// 这句该不该先用本地语音：设置没关、服务在、最近没出错，而且是中文或英文
+// 本地语音够不够快：合成 1 秒语音不到 1 秒（这台 NAS 上实际测的，随时在变）。
+// 够快就中文、英文先用本地；不够快平时先用微软，微软不行再用本地兜底
+func localTTSFast() bool {
+	r := localTTSStatus().RTF
+	return r > 0 && r <= 1.0
+}
+
+// 这句能不能用本地语音：设置没关、服务在、最近没出错，而且是中文或英文
 func useLocalTTS(c TTSConfig, text, lang string) bool {
 	if c.Engine != "edge" || c.Local == "off" {
 		return false
