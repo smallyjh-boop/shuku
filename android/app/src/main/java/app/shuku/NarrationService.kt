@@ -125,6 +125,7 @@ class NarrationService : Service() {
     private val dl = Executors.newFixedThreadPool(2)
     private var stalls = 0               // 放到一句时还没下载好的次数：多了就多存一些
     private var aheadSecs = 0.0          // 手机上已经存好的、接着往后能听多久（秒，1 倍速）
+    private var aheadBytes = 0L          // 这些占多大
     private var cleanedTo = 0            // 这之前的句子已经删了
     private var lastPrepare = 0L
     private var lastCap = 0L
@@ -881,7 +882,7 @@ class NarrationService : Service() {
 
     private fun stateJson(): JSONObject = JSONObject().put("active", true).put("playing", playing).put("speed", speed).put("timer", timerMin)
         .put("mode", if (pack) "pack" else "live").put("book_id", book.optInt("id"))
-        .apply { if (pack) queue.getOrNull(index)?.let { put("n", packN(it)).put("i", packI(it)) }; if (pack) put("ahead", aheadSecs.toInt()) }
+        .apply { if (pack) queue.getOrNull(index)?.let { put("n", packN(it)).put("i", packI(it)) }; if (pack) put("ahead", aheadSecs.toInt()).put("ahead_bytes", aheadBytes) }
         .put("engine", if (useDevice) "device" else "server")
         .put("status", status).put("title", book.optString("title")).put("author", book.optString("author"))
         .put("text", queue.getOrNull(index)?.text ?: "").put("volume", volumePercent())
@@ -1111,14 +1112,14 @@ class NarrationService : Service() {
     }
 
     /**
-     * 手机上至少存多少秒（1 倍速）：默认 30 分钟；按流量计费的网络（手机流量、热点）只存 30 分钟；
+     * 手机上存多少（听的时间）：平时 1 小时；按流量计费的网络（手机流量、热点）最少的 30 分钟；
      * Wi-Fi 加充电时存 2 小时；放的时候接不上（网络不好）一次多存 15 分钟，最多 3 小时
      */
     private fun targetSecs(): Double {
         val metered = try { getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true } catch (e: Exception) { true }
         if (metered) return 30 * 60.0
         val charging = try { getSystemService(BatteryManager::class.java)?.isCharging ?: false } catch (e: Exception) { false }
-        var min = 30 + stalls * 15
+        var min = 60 + stalls * 15
         if (charging) min = maxOf(min, 120)
         return min.coerceAtMost(180) * 60.0
     }
@@ -1131,18 +1132,20 @@ class NarrationService : Service() {
         var acc = 0.0
         var k = index + 1
         var ready = 0.0
+        var readyBytes = 0L
         var gap = false
         while (k < queue.size && acc < target) {
             val s = queue[k]
             keep += s.id
             val f = packFile(s)
-            if (!gap && f.exists()) ready += segSecs(s) else gap = true
+            if (!gap && f.exists()) { ready += segSecs(s); readyBytes += f.length() } else gap = true
             packAudio(s)
             acc += segSecs(s)
             k++
         }
         // 后面的句子还没取（下一章）时 ready 也只算到这里
         aheadSecs = ready
+        aheadBytes = readyBytes
         synchronized(audioJobs) { audioJobs.keys.filter { it !in keep }.forEach { audioJobs.remove(it)?.cancel(false) } }
         cleanPlayed()
         prepareOnServer(target)
@@ -1202,7 +1205,7 @@ class NarrationService : Service() {
         lastPrepare = now
         val s = queue.getOrNull(index) ?: return
         val id = book.optInt("id")
-        val body = JSONObject().put("scope", "auto").put("minutes", (target / 60).toInt().coerceAtLeast(30)).put("voices", packVoices)
+        val body = JSONObject().put("scope", "auto").put("minutes", (target / 60).toInt().coerceAtLeast(60)).put("voices", packVoices)
             .put("from", JSONObject().put("n", packN(s)).put("i", packI(s)))
         pool.execute { try { app.link.send("POST", "/api/books/$id/listen/prepare", body, 15000) } catch (e: Exception) {} }
     }

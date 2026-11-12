@@ -40,7 +40,7 @@ jobs:
           }
           "makensis：$nsis"
           New-Item -ItemType Directory -Force build\app | Out-Null
-          Copy-Item desktop\shuku_desktop.py, desktop\shuku.ico build\app\
+          Copy-Item desktop\shuku_desktop.py, desktop\shuku_proxy.py, desktop\shuku.ico build\app\
           Copy-Item build\runtime\runtime.txt build\app\
           [IO.File]::WriteAllText("$pwd\build\app\version.txt", 'ci')
           [IO.File]::WriteAllText("$pwd\build\app\server.json", '{"name": "CI"}')
@@ -77,6 +77,7 @@ jobs:
             if (!$s.icon) { $fail += '窗口图标没换上' }
             if ($s.page_title -ne '书库') { $fail += "窗口里的页面不对：$($s.page_title)" }
             if (!$s.bridge) { $fail += '网页里没有 pywebview 接口' }
+            if (!$s.proxy) { $fail += '本机代理（localhost:27231）没开' }
           }
           Get-Process pythonw -ErrorAction SilentlyContinue | ForEach-Object { "窗口标题：" + $_.MainWindowTitle }
           try {

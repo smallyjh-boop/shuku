@@ -30,6 +30,8 @@ import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import shuku_proxy
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 WINDOWS = sys.platform == 'win32'
 UI_PORT = int(os.environ.get('SHUKU_DESKTOP_PORT', '27230'))
@@ -718,10 +720,24 @@ def library_url():
     return ''
 
 
+proxy_ok = False
+
+
+def library_page():
+    """窗口里打开的书库地址：经本机代理（localhost，离线存书、电脑上存听书语音都靠它；断网时也打开它，
+    用存好的书）；代理没开起来时直接连书库；还没配对时是本机设置页"""
+    if not cfg.get('token'):
+        return local_page()
+    if proxy_ok:
+        threading.Thread(target=library_url, daemon=True).start()  # 顺便确认一下现在用哪个地址
+        return shuku_proxy.ORIGIN + '/'
+    u = library_url()
+    return (u + '/') if u else local_page()
+
+
 def open_library():
-    """窗口里打开书库（还没配对、连不上时打开本机设置页）"""
-    u = library_url() if cfg.get('token') else ''
-    target = (u + '/') if u else local_page()
+    """窗口里打开书库"""
+    target = library_page()
     if window is None:
         webbrowser.open(target)
         return
@@ -794,7 +810,7 @@ def on_loaded():
         url = window.get_current_url() or ''
         set_state(window=url)
         tok = cfg.get('token')
-        if tok and not url.startswith(local_page()) and any(url.startswith(u) for u in candidate_urls()):
+        if tok and not url.startswith(local_page()) and (url.startswith(shuku_proxy.ORIGIN) or any(url.startswith(u) for u in candidate_urls())):
             t = json.dumps(tok)
             window.evaluate_js(f"if(!localStorage.getItem('shuku.token')){{localStorage.setItem('shuku.token',{t});location.reload()}}")
         set_state(page_title=str(window.evaluate_js('document.title') or ''))
@@ -898,7 +914,7 @@ def make_tray():
 
 
 def main():
-    global ui_server, tray, window
+    global ui_server, tray, window, proxy_ok
     load_cfg()
     restarting = os.environ.pop('SHUKU_DESKTOP_RESTART', '') == '1'
     for k in range(30 if restarting else 1):
@@ -923,6 +939,13 @@ def main():
         except Exception:
             pass
     threading.Thread(target=ui_server.serve_forever, daemon=True).start()
+    # 本机代理：窗口经它打开书库（离线看书、电脑上存听书语音）
+    try:
+        shuku_proxy.start(lambda: conn.base, library_url, HOME, log)
+        proxy_ok = True
+        set_state(proxy=True)
+    except OSError as e:
+        log('本机代理开不起来，直接连书库：', e)
     if cfg.get('autostart', True):
         try:
             set_autostart(True)
@@ -944,8 +967,7 @@ def main():
         if os.environ.get('SHUKU_DESKTOP_NO_WINDOW') == '1':
             raise RuntimeError('不开窗口')
         import webview
-        u = library_url() if cfg.get('token') else ''
-        window = webview.create_window('书库', (u + '/') if u else local_page(), js_api=Api(),
+        window = webview.create_window('书库', library_page(), js_api=Api(),
                                        width=1280, height=860, min_size=(420, 500), hidden=hidden, text_select=True)
         window.events.loaded += on_loaded
         window.events.closing += on_closing
