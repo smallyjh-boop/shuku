@@ -25,8 +25,20 @@ jobs:
       - name: 安装程序
         shell: pwsh
         run: |
-          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (!(Test-Path $nsis)) { choco install nsis -y --no-progress | Out-Null }
+          # 找 makensis：Windows 机器上一般预装了；没有就用 choco 装，再不行下载便携版
+          function Find-Nsis {
+            foreach ($p in @("${env:ProgramFiles(x86)}\NSIS\makensis.exe", "$env:ProgramFiles\NSIS\makensis.exe", "$pwd\nsis\nsis-3.10\makensis.exe")) { if (Test-Path $p) { return $p } }
+            $c = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+          }
+          $nsis = Find-Nsis
+          if (!$nsis) { choco install nsis -y --no-progress; $nsis = Find-Nsis }
+          if (!$nsis) {
+            Invoke-WebRequest -UserAgent 'Wget' -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip' -OutFile nsis.zip
+            Expand-Archive nsis.zip -DestinationPath nsis
+            $nsis = Find-Nsis
+          }
+          "makensis：$nsis"
           New-Item -ItemType Directory -Force build\app | Out-Null
           Copy-Item desktop\shuku_desktop.py, desktop\shuku.ico build\app\
           Copy-Item build\runtime\runtime.txt build\app\
