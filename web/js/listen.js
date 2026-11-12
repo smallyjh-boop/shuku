@@ -26,7 +26,7 @@ export async function openListen(id, { ctx, params, back }) {
 }
 
 // 设备选过的音色（每种语言）：书库按它合成、按它找准备好的语音
-function voicesParam() {
+export function voicesParam() {
   const p = store(PREFS_KEY, {})
   const v = Object.assign({}, p.voices || {})
   if (p.voice && !v.zh) v.zh = p.voice
@@ -94,9 +94,12 @@ class ListenPlayer {
     this.hintEl = h('div', { class: 'lp-hint' })
     this.prepBox = h('div', { class: 'lp-prep', hidden: true })
     this.stateEl = h('div', { class: 'lp-state' })
+    // 播放 / 阅读两种样子：左右滑动换（阅读：整章文字连着排、跟着读到的句子走，下面只留播放条）
+    this.tabPlay = h('button', { type: 'button', class: 'lp-tab', onclick: () => this.setMode('play') }, '播放')
+    this.tabRead = h('button', { type: 'button', class: 'lp-tab', onclick: () => this.setMode('read') }, '阅读')
     const top = h('div', { class: 'lp-top' },
       iconBtn('back', '返回', () => this.back()),
-      this.titleEl,
+      h('div', { class: 'lp-tabs', role: 'tablist' }, this.tabPlay, this.tabRead),
       iconBtn('list', '目录', e => this.pickChapter(e)),
       iconBtn('reading', '回到阅读', () => this.toReader()))
     const controls = h('div', { class: 'lp-controls' },
@@ -114,6 +117,17 @@ class ListenPlayer {
       h('div', { class: 'lp-foot' }, this.progEl, this.stateEl, controls, opts, this.readyEl, this.prepBox))
     document.body.append(this.root)
     document.body.style.overflow = 'hidden'
+    this.setMode(this.prefs.listenMode === 'read' ? 'read' : 'play', true)
+    // 左右滑：往左滑到阅读，往右滑回播放
+    let sx = 0, sy = 0, st = 0
+    this.root.addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now() }, { passive: true })
+    this.root.addEventListener('touchend', e => {
+      const t = e.changedTouches[0]
+      const dx = t.clientX - sx, dy = t.clientY - sy
+      if (Date.now() - st > 800 || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return
+      if (e.target.closest?.('.lp-prep, .menu, input')) return
+      this.setMode(dx < 0 ? 'read' : 'play')
+    }, { passive: true })
     const key = e => {
       if (e.target.closest?.('input, textarea, select')) return
       if (e.key === ' ') { e.preventDefault(); this.toggle() }
@@ -123,6 +137,17 @@ class ListenPlayer {
     }
     document.addEventListener('keydown', key)
     this.cleanups.push(() => document.removeEventListener('keydown', key))
+  }
+
+  setMode(m, quiet) {
+    this.mode = m
+    this.root.classList.toggle('reading', m === 'read')
+    this.tabPlay.classList.toggle('on', m !== 'read')
+    this.tabRead.classList.toggle('on', m === 'read')
+    this.tabPlay.setAttribute('aria-selected', String(m !== 'read'))
+    this.tabRead.setAttribute('aria-selected', String(m === 'read'))
+    if (!quiet) { this.prefs.listenMode = m; save(PREFS_KEY, this.prefs) }
+    requestAnimationFrame(() => this.highlight())
   }
 
   // ---------- 打开 ----------
@@ -140,7 +165,6 @@ class ListenPlayer {
     if (this.destroyed) return
     const info = this.info
     document.title = '听书 · ' + info.title
-    this.titleEl.textContent = '听书'
     this.root.querySelector('.lp-title').textContent = info.title
     this.root.querySelector('.lp-author').textContent = info.author || ''
     if (info.has_cover) fill(this.cover, h('img', { src: apiUrl(`/api/books/${this.id}/cover?w=240`), alt: '' }))
@@ -154,6 +178,8 @@ class ListenPlayer {
     this.tick = setInterval(() => this.heartbeat(), 60000)
     this.cleanups.push(() => clearInterval(this.tick))
     this.heartbeat()
+    // 从阅读器点“听书”过来的：直接开始放
+    if (this.params?.get('play') === '1' && !this.playing) setTimeout(() => { if (!this.destroyed && !this.playing) this.play() }, 300)
   }
 
   async sentences(n) {
