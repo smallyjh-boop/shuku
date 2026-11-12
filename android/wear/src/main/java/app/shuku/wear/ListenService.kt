@@ -101,6 +101,9 @@ class ListenService : Service() {
         val online: Boolean = true,
         val posAt: Long = 0, // 读到这一句的时间（阅读页据此跟着翻）
         val chapterCount: Int = 0, // 这本书一共几章（还没打开时是 0）
+        val chapElapsed: Int = 0, // 这一章已经听了多久（秒，按现在的语速）
+        val chapTotal: Int = 0,   // 这一章共多长
+        val offlineBytes: Long = 0, // 手表上存好的语音占多大
     )
 
     /** 正在听的书（给 Tile、表盘复杂功能看，哪个线程都能读） */
@@ -164,6 +167,8 @@ class ListenService : Service() {
     private var farBlockedUntil = 0L // 提前合成失败了（没网、空间满了）：这之前先不提前合成
     private var farFull = false
     private var offlineSec = 0
+    private var offlineBytes = 0L
+    private var lastPrepare = 0L
     private var preparing = false
     private var bytesPerSec = 6000.0 // 语音每秒多少字节（书库的微软语音是 48kbps），播放时按实际校正
     private var tts: TextToSpeech? = null
@@ -688,7 +693,9 @@ class ListenService : Service() {
             bytes += (readyClip(queue[k]) ?: break).bytes
             k++
         }
-        val sec = (bytes / bytesPerSec).toInt()
+        // 存的是 1 倍速的语音：能听多久按现在的语速算
+        val sec = (bytes / bytesPerSec / speed).toInt()
+        offlineBytes = bytes
         val prep = audioJobs.values.any { it.far && !it.future.isDone }
         // 暂停时用户要准备离线听书：下载期间拿着唤醒锁（不然熄屏后就停了），下载完就放掉
         if (prep && more && !playing && !stopped) acquirePackLock() else releasePackLock()
@@ -793,6 +800,20 @@ class ListenService : Service() {
     }
 
     private fun maxAhead() = if (more) 20 else 8
+
+    /**
+     * 每分钟告诉书库听到哪了：书库空闲时从这里往后准备 1 小时的听书语音（和手机、网页一样），
+     * 手表要的时候直接有，不用当场合成。手表用书库默认的音色
+     */
+    private fun prepareOnServer(seg: Seg) {
+        val now = SystemClock.elapsedRealtime()
+        if (useDevice || deviceOnly || !app.netUsable() || (lastPrepare > 0 && now - lastPrepare < 60_000)) return
+        lastPrepare = now
+        val bid = bookId
+        val body = JSONObject().put("scope", "auto").put("minutes", if (more) PACK_MINUTES else AUTO_MINUTES).put("voices", "")
+            .put("from", JSONObject().put("n", seg.chap.i).put("i", seg.n))
+        app.io.execute { try { app.api("POST", "/api/books/$bid/listen/prepare", body, 15000) } catch (e: Exception) {} }
+    }
 
     /** 听到第 chap 章：告诉 BookFiles 留着哪几章；再往前一章之前合成的语音删掉 */
     private fun updateKeep(chap: Int) {
@@ -1131,6 +1152,7 @@ class ListenService : Service() {
      */
     private fun onSegment(seg: Seg) {
         posAt = System.currentTimeMillis()
+        prepareOnServer(seg)
         updateKeep(seg.chap.i)
         if (seg.chap.i != savedChap || SystemClock.elapsedRealtime() - lastSave > 30_000) saveProgress()
     }
@@ -1242,6 +1264,9 @@ class ListenService : Service() {
             chapterIndex = seg?.chap?.i ?: max(0, startChap), frac = seg?.let { it.start.toDouble() / max(1, it.chap.len) } ?: startFrac,
             fileId = fileId, deviceVoice = useDevice, offlineSec = offlineSec, preparing = preparing, more = more,
             online = app.netUsable(), posAt = posAt, chapterCount = chapters.length(),
+            chapElapsed = seg?.let { (it.start * 60.0 / CHARS_PER_MIN / speed).toInt() } ?: 0,
+            chapTotal = seg?.let { (it.chap.len * 60.0 / CHARS_PER_MIN / speed).toInt() } ?: 0,
+            offlineBytes = offlineBytes,
         )
     }
 
@@ -1336,10 +1361,11 @@ class ListenService : Service() {
 
         private const val NEAR = 3 // 马上要读的几句先合成好，句子之间不停顿
         private const val MIN_AHEAD = 4 // 至少预先取好后面几章的正文（文字很小）
-        private const val AUTO_MINUTES = 4 // 播放时自动往后准备几分钟的语音
-        private const val AUTO_SENTENCES = 40
-        private const val PACK_MINUTES = 30 // 用户点了“多准备一些（离线听）”
-        private const val PACK_SENTENCES = 300
+        // 手表上存多少（听的时间，和手机、Windows 一样）：平时往后存 1 小时（最少 30 分钟），点了“离线听”存 3 小时
+        private const val AUTO_MINUTES = 60
+        private const val AUTO_SENTENCES = 900
+        private const val PACK_MINUTES = 180
+        private const val PACK_SENTENCES = 2700
         private const val CHARS_PER_MIN = 260 // 1 倍速大约每分钟读多少字
         private const val IDLE_MS = 10 * 60_000L // 暂停（或者等着连耳机）这么久没再听就关掉
 

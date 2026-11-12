@@ -14,6 +14,16 @@ const PREFS_KEY = 'shuku.tts' // 和阅读器里的听书共用：语速、每�
 const SPEEDS = [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5]
 const TIMERS = [[0, '不定时'], [15, '15 分钟'], [30, '30 分钟'], [60, '60 分钟'], [-1, '读完本章']]
 const KBPS = 48 // 微软的语音大约 48kbps：1 分钟约 0.36MB
+// 书库 Windows 版的窗口（经本机的 localhost:27231 打开书库）：听书时把后面的语音存到电脑上（最少 30 分钟，平时 1 小时）
+const DESK = location.port === '27231'
+const LOCAL_MIN = 60 // 设备上平时存多少分钟（手机、手表、Windows 一样）
+// 一句多长（秒，1 倍速）：书库给了真实长度就用，没有按字数估计（和书库、手表一样每分钟约 260 字）
+const segSecs = s => s.dur > 0 ? s.dur : (s.text || '').length * 60 / 260 + 0.3
+const clock = sec => {
+  sec = Math.max(0, Math.round(sec))
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, x = sec % 60
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0')
+}
 
 let current = null
 
@@ -44,14 +54,15 @@ const fmtDur = s => {
 const fmtMB = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + 'GB' : Math.max(1, Math.round(b / (1 << 20))) + 'MB'
 
 // 准备一段要多久：按书库现在能用的合成方式的速度（合成 1 秒语音要几秒）
-export function prepareHint(secs, engines) {
+// secs：要准备的语音长度（1 倍速）；speed：播放语速（能听多久按它算）
+export function prepareHint(secs, engines, speed = 1) {
   const e = engines || {}
   let how, rtf
   if (e.ms_ok) { how = '微软'; rtf = e.ms > 0 ? e.ms : 0.15 }
   else if (e.pc) { how = '电脑加速'; rtf = e.pc }
   else if (e.nas) { how = 'NAS 本地'; rtf = e.nas }
-  else return `准备 ${fmtDur(secs)}：现在没有能用的合成方式（微软连不上，电脑、NAS 本地语音都没开）`
-  return `准备 ${fmtDur(secs)}：约需 ${fmtDur(secs * rtf)}（${how}）· 占 ${fmtMB(secs * KBPS * 125)} · 可听 ${fmtDur(secs)}`
+  else return `还要准备 ${fmtDur(secs / speed)}：现在没有能用的合成方式（微软连不上，电脑、NAS 本地语音都没开）`
+  return `还要准备 ${fmtDur(secs / speed)}，约需 ${fmtDur(secs * rtf)}（${how}）· 占 ${fmtMB(secs * KBPS * 125)}`
 }
 
 class ListenPlayer {
@@ -186,7 +197,8 @@ class ListenPlayer {
     if (!this.chapters.has(n)) {
       const r = await api(`/api/books/${this.id}/listen/${n}${this.q()}`)
       this.chapters.set(n, r.sentences || [])
-      if (this.chapters.size > 6) this.chapters.delete(this.chapters.keys().next().value)
+      // 最多留 20 章的句子；正在听的这章不删
+      if (this.chapters.size > 20) { const old = [...this.chapters.keys()].find(k => k !== this.pos.n && k !== n); if (old != null) this.chapters.delete(old) }
     }
     return this.chapters.get(n)
   }
@@ -228,7 +240,16 @@ class ListenPlayer {
     const list = this.chapters.get(this.pos.n) || []
     const s = list[this.pos.i]
     const pct = s ? Math.round((s.pct || 0) * 1000) / 10 : 0
-    this.progEl.textContent = `第 ${this.pos.n + 1} / ${info.chapters.length} 章 · ${ch.count ? (this.pos.i + 1) + ' / ' + ch.count + ' 句' : ''} · 全书 ${pct}%`
+    // 播放时间（按现在的语速）：本章已听 / 本章共多长，全书还剩多久
+    const sp = this.speed
+    let el = 0, tot = 0
+    list.forEach((x, k) => { const d = segSecs(x); tot += d; if (k < this.pos.i) el += d })
+    let rest = tot - el
+    for (let k = this.pos.n + 1; k < info.chapters.length; k++) rest += info.chapters[k].secs || 0
+    this.progEl.textContent = list.length
+      ? `第 ${this.pos.n + 1} / ${info.chapters.length} 章 · 本章 ${clock(el / sp)} / ${clock(tot / sp)} · 全书还剩约 ${fmtDur(rest / sp)}（${pct}%）`
+      : `第 ${this.pos.n + 1} / ${info.chapters.length} 章`
+    if (this.lastStatus) this.drawReady(this.lastStatus, this.lastEngines)
     if ('mediaSession' in navigator && !this.native) navigator.mediaSession.playbackState = this.playing ? 'playing' : 'paused'
   }
 
@@ -237,16 +258,21 @@ class ListenPlayer {
   // 准备情况：从读到的地方往后准备好了多少、书库在用什么合成
   drawReady(st, engines) {
     if (!st) return
+    this.lastStatus = st
+    this.lastEngines = engines
+    const sp = this.speed
     const how = { ms: '微软', pc: '电脑加速', nas: 'NAS 本地' }[this.job?.engine] || ''
     const parts = []
-    if (this.nativeAhead != null) parts.push(`手机里已存 ${fmtDur(this.nativeAhead)}`)
-    parts.push(st.ready_secs > 0 ? `书库已备好 ${fmtDur(st.ready_secs)}` : '书库还没开始准备')
+    // 储存时间：设备上存好的（能离线听多久、占多大）、NAS 上准备好的
+    if (this.nativeAhead != null) parts.push(`手机已存 ${fmtDur(this.nativeAhead / sp)}` + (this.nativeBytes ? `（${fmtMB(this.nativeBytes)}）` : ''))
+    else if (DESK && this.deskHave) { const [a, b] = this.deskAhead(); parts.push(`电脑已存 ${fmtDur(a / sp)}` + (b ? `（${fmtMB(b)}）` : '')) }
+    parts.push(st.ready_secs > 0 ? `NAS 已备好 ${fmtDur(st.ready_secs / sp)}` : 'NAS 还没开始准备')
     if (this.job && !this.job.finished && st.missing > 0) parts.push(`正在准备${how ? '（' + how + '）' : ''}`)
     else if (this.job?.finished) parts.push('准备完了')
     if (this.job?.last_error) parts.push(this.job.last_error)
     this.readyEl.textContent = parts.join(' · ')
-    const left = Math.max(0, (st.target_secs || 30 * 60) - (st.ready_secs || 0))
-    this.hintEl.textContent = left > 30 ? prepareHint(left, engines) : ''
+    const left = Math.max(0, (st.target_secs || LOCAL_MIN * 60) - (st.ready_secs || 0))
+    this.hintEl.textContent = left > 30 ? prepareHint(left, engines, sp) : ''
   }
 
   // ---------- 提前准备（手动选范围） ----------
@@ -271,7 +297,7 @@ class ListenPlayer {
       this.job = r.job
       this.drawReady(r.status, r.engines)
       const want = body.scope === 'all' ? '整本' : body.scope === 'half' ? '半本' : fmtDur(body.minutes * 60)
-      toast(`书库开始准备${want}。${prepareHint(Math.max(0, r.status.target_secs - r.status.ready_secs), r.engines)}`, { duration: 6000 })
+      toast(`书库开始准备${want}。${prepareHint(Math.max(0, r.status.target_secs - r.status.ready_secs), r.engines, this.speed)}`, { duration: 6000 })
     } catch (e) { toastError(e) }
   }
 
@@ -297,8 +323,9 @@ class ListenPlayer {
 
   // 要书库准备多久：至少 30 分钟；最近卡过（等语音）就多准备
   wantMinutes() {
+    // 平时往后准备 1 小时；播放时接不上过（网络不好）多准备
     const stalls = this.stalls || 0
-    return stalls >= 3 ? 120 : stalls >= 1 ? 60 : 30
+    return stalls >= 3 ? 180 : stalls >= 1 ? 120 : LOCAL_MIN
   }
 
   // ---------- 控制 ----------
@@ -418,6 +445,55 @@ class ListenPlayer {
     }
     // 后面几句先让浏览器取一下（书库没准备好的会现合成，下次就快了）
     for (let k = 1; k <= 3; k++) this.warm(n, i + k)
+    if (DESK) this.deskFill()
+  }
+
+  // ---------- Windows 版：把后面的语音存到电脑上（经本机代理取的会存在电脑上），平时 1 小时 ----------
+  async deskFill() {
+    if (this.filling || this.destroyed) return
+    this.filling = true
+    this.deskHave ||= new Map()
+    try {
+      let { n, i } = this.pos
+      let secs = 0
+      const want = LOCAL_MIN * 60 * Math.max(1, this.speed)
+      while (!this.destroyed && secs < want) {
+        const list = await this.sentences(n).catch(() => null)
+        if (!list) break
+        if (i >= list.length) { n++; i = 0; if (n >= this.info.chapters.length) break; continue }
+        const key = n + ':' + i
+        let got = this.deskHave.get(key)
+        if (!got) {
+          try {
+            const r = await fetch(this.audioUrl(n, i))
+            if (!r.ok) throw new Error(r.status)
+            const b = await r.arrayBuffer()
+            got = { secs: +r.headers.get('X-Duration') || segSecs(list[i]), bytes: b.byteLength }
+            this.deskHave.set(key, got)
+          } catch { break }
+        }
+        secs += got.secs
+        i++
+        // 往回跳、跳到很远：从新的位置重新算
+        if (this.pos.n > n || (this.pos.n === n && this.pos.i > i)) { n = this.pos.n; i = this.pos.i; secs = 0 }
+        if (this.lastStatus && !(i % 20)) this.drawReady(this.lastStatus, this.lastEngines)
+      }
+    } finally { this.filling = false }
+    if (this.lastStatus) this.drawReady(this.lastStatus, this.lastEngines)
+  }
+
+  // 电脑上从当前这句往后连着存好了多少（秒，1 倍速）、多大
+  deskAhead() {
+    let { n, i } = this.pos, secs = 0, bytes = 0
+    for (;;) {
+      const list = this.chapters.get(n)
+      if (!list) break
+      if (i >= list.length) { n++; i = 0; continue }
+      const got = this.deskHave.get(n + ':' + i)
+      if (!got) break
+      secs += got.secs; bytes += got.bytes; i++
+    }
+    return [secs, bytes]
   }
 
   async warm(n, i) {
@@ -507,6 +583,7 @@ class ListenPlayer {
       if (e.timer !== undefined) this.timer = e.timer
       if (e.speed) { this.prefs.speed = e.speed; save(PREFS_KEY, this.prefs) }
       if (e.ahead != null) this.nativeAhead = e.ahead
+      if (e.ahead_bytes != null) this.nativeBytes = e.ahead_bytes
       this.setState(e.status || '')
       this.updateUI()
     } else if (e.type === 'stopped') {

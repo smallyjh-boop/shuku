@@ -306,15 +306,28 @@ class ListenActivity : Activity() {
         }) { ListenService.jump(this, it) }
     }
 
-    /** 离开手机、没网时还能听多久（平时自动准备几分钟；点了“多准备一些”准备约半小时） */
+    /**
+     * 播放时间和储存时间（和手机、网页一样的说法，按现在的语速）：本章已听 / 共多长；
+     * 手表上已存多少（平时往后存 1 小时，点了“离线听”存 3 小时），没网时还能听多久
+     */
     private fun offlineLine(s: ListenService.State): String {
+        val time = if (s.chapTotal > 0) "本章 ${clock(s.chapElapsed)} / ${clock(s.chapTotal)}" else ""
         val min = s.offlineSec / 60
-        return when {
-            !s.online -> if (min > 0) "没联网，准备好的还能听约 $min 分钟" else "没联网"
-            s.more && s.preparing -> if (min > 0) "正在准备离线听（约半小时），已准备 $min 分钟" else "正在准备离线听（约半小时）…"
-            min > 0 -> "已准备离线 $min 分钟"
+        val mb = if (s.offlineBytes > 0) "（${Math.max(1, s.offlineBytes / (1 shl 20))}MB）" else ""
+        val store = when {
+            !s.online -> if (min > 0) "没联网，手表已存的还能听约 $min 分钟" else "没联网"
+            s.preparing && min < 30 -> if (min > 0) "正在存到手表，已存 $min 分钟$mb" else "正在存到手表…"
+            min > 0 -> "手表已存 $min 分钟$mb"
             else -> ""
         }
+        return listOf(time, store).filter { it.isNotEmpty() }.joinToString("\n")
+    }
+
+    private fun clock(sec: Int): String {
+        val h = sec / 3600
+        val m = sec / 60 % 60
+        val x = sec % 60
+        return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, x) else String.format(Locale.US, "%d:%02d", m, x)
     }
 
     // 往左滑进阅读（看文字，跟着读到的地方）；往右滑是系统的返回

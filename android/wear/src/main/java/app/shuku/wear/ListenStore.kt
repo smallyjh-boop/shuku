@@ -14,8 +14,8 @@ import kotlin.math.roundToInt
  * 这里的方法都会读写文件，在后台线程调用。
  */
 object ListenStore {
-    /** 离线听书包最多占多少空间（书库的微软语音 48kbps，60MB 大约能放两个半小时） */
-    const val MAX_BYTES = 60L * 1024 * 1024
+    /** 手表上的听书语音最多占多少空间（书库的微软语音 48kbps，1 小时约 22MB；250MB 够平时的 1 小时和“离线听”的 3 小时） */
+    const val MAX_BYTES = 250L * 1024 * 1024
 
     private val NAME = Regex("""(\d+)_(\d+)_(\d+)_([0-9a-f]+)_(\d+)\.mp3""")
     private val used = AtomicLong(-1) // 已经占了多少；-1 表示还没统计

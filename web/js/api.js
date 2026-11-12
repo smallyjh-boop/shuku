@@ -59,8 +59,11 @@ async function resolveRoute(force) {
     // https 页面不能请求 http 地址（浏览器会拦截），这种情况只用当前地址；App 里允许
     const usable = u => u && (isNative || !(https && u.startsWith('http:')))
     const tasks = []
-    if (usable(lan)) tasks.push(['lan', lan, ping(lan === origin ? '' : lan, 1200)])
-    if (usable(remote)) tasks.push(['remote', remote, ping(remote === origin ? '' : remote, 4000)])
+    // 书库 Windows 版的窗口经本机代理（localhost:27231）打开：内网、Tailscale 由代理去换，网页一直用本机地址
+    // （离线存书、电脑上存听书语音都靠经过它）
+    const desk = location.port === '27231' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+    if (usable(lan) && !desk) tasks.push(['lan', lan, ping(lan === origin ? '' : lan, 1200)])
+    if (usable(remote) && !desk) tasks.push(['remote', remote, ping(remote === origin ? '' : remote, 4000)])
     const self = ping('', 4000)
     let pick = null
     for (const [route, url, p] of tasks) {
