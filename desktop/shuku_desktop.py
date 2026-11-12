@@ -232,7 +232,8 @@ def set_autostart(on):
     exe = sys.executable
     if exe.lower().endswith('python.exe'):
         exe = exe[:-10] + 'pythonw.exe'
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+    # Run 键有的电脑上没有：没有就建
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
         if on:
             winreg.SetValueEx(k, 'ShukuDesktop', 0, winreg.REG_SZ, f'"{exe}" "{os.path.abspath(__file__)}" --hidden')
         else:
@@ -679,6 +680,17 @@ class UI(BaseHTTPRequestHandler):
         self.send(404, {'error': 'not found'})
 
 
+class UIServer(ThreadingHTTPServer):
+    # Windows 上默认允许两个程序占同一个端口：改成独占，第二次打开时才知道已经开着一个
+    allow_reuse_address = not WINDOWS
+    daemon_threads = True
+
+    def server_bind(self):
+        if WINDOWS and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 ui_server = None
 tray = None
 window = None
@@ -756,7 +768,7 @@ def quit_app():
         pass
     if window is None:
         os._exit(0)
-    threading.Timer(5, lambda: os._exit(0)).start()  # 窗口没关干净也要退出
+    threading.Timer(3, lambda: os._exit(0)).start()  # 窗口没关干净也要退出
 
 
 # ---------- 窗口里的书库网页能调用的（window.pywebview.api，书库“设置”里显示这台电脑的加速开关） ----------
@@ -891,7 +903,7 @@ def main():
     restarting = os.environ.pop('SHUKU_DESKTOP_RESTART', '') == '1'
     for k in range(30 if restarting else 1):
         try:
-            ui_server = ThreadingHTTPServer(('127.0.0.1', UI_PORT), UI)
+            ui_server = UIServer(('127.0.0.1', UI_PORT), UI)
             break
         except OSError:
             if k + 1 < (30 if restarting else 1):

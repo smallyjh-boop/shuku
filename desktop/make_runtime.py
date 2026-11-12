@@ -32,6 +32,10 @@ SKIP = ('python_xlib', 'xlib')  # pystray 在 Linux 上才用
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')  # Windows 控制台默认不是 UTF-8
+    except Exception:
+        pass
     out = os.path.abspath(sys.argv[1])
     pip = [sys.executable, '-m', 'pip']
     if '--pip' in sys.argv:

@@ -9,7 +9,9 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v5
 
@@ -23,13 +25,25 @@ jobs:
       - name: 安装程序
         shell: pwsh
         run: |
-          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (!(Test-Path $nsis)) { choco install nsis -y --no-progress | Out-Null }
+          # 找 makensis：Windows 机器上一般预装了；没有就用 choco 装，再不行下载便携版
+          function Find-Nsis {
+            foreach ($p in @("${env:ProgramFiles(x86)}\NSIS\makensis.exe", "$env:ProgramFiles\NSIS\makensis.exe", "$pwd\nsis\nsis-3.10\makensis.exe")) { if (Test-Path $p) { return $p } }
+            $c = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+          }
+          $nsis = Find-Nsis
+          if (!$nsis) { choco install nsis -y --no-progress; $nsis = Find-Nsis }
+          if (!$nsis) {
+            Invoke-WebRequest -UserAgent 'Wget' -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip' -OutFile nsis.zip
+            Expand-Archive nsis.zip -DestinationPath nsis
+            $nsis = Find-Nsis
+          }
+          "makensis：$nsis"
           New-Item -ItemType Directory -Force build\app | Out-Null
           Copy-Item desktop\shuku_desktop.py, desktop\shuku.ico build\app\
           Copy-Item build\runtime\runtime.txt build\app\
-          Set-Content -NoNewline build\app\version.txt 'ci'
-          Set-Content -NoNewline build\app\server.json '{"name": "CI"}'
+          [IO.File]::WriteAllText("$pwd\build\app\version.txt", 'ci')
+          [IO.File]::WriteAllText("$pwd\build\app\server.json", '{"name": "CI"}')
           & $nsis -INPUTCHARSET UTF8 -V2 "-DRUNTIME=$pwd\build\runtime" "-DAPPSRC=$pwd\build\app" "-DOUTFILE=$pwd\build\setup.exe" -DVERSION=ci desktop\installer.nsi
           if ($LASTEXITCODE -ne 0) { exit 1 }
           "安装程序：{0:N1} MB" -f ((Get-Item build\setup.exe).Length / 1MB)
@@ -41,7 +55,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $fail = @()
-          Start-Process build\setup.exe -ArgumentList '/S' -Wait
+          # 只等安装程序本身（-Wait 会连装完打开的书库一起等）
+          $p = Start-Process build\setup.exe -ArgumentList '/S' -PassThru
+          if (!$p.WaitForExit(300000)) { $fail += '安装程序 5 分钟没装完' }
           $dir = "$env:LOCALAPPDATA\Programs\Shuku"
           $desk = [Environment]::GetFolderPath('Desktop')
           foreach ($p in @("$dir\python\pythonw.exe", "$dir\app\shuku_desktop.py", "$dir\uninstall.exe", "$desk\书库.lnk")) {
@@ -74,8 +90,12 @@ jobs:
           $n = (Get-Process pythonw -ErrorAction SilentlyContinue | Measure-Object).Count
           "pythonw 进程数：$n"
           if ($n -ne 1) { $fail += "开了 $n 个" }
-          Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -Wait
-          Start-Sleep 10
+          $p = Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -PassThru
+          $null = $p.WaitForExit(120000)
+          # 卸载程序会把自己复制到临时目录再运行：等它删完（最多 2 分钟）
+          for ($i = 0; $i -lt 60 -and ((Test-Path "$dir\python") -or (Test-Path "$desk\书库.lnk")); $i++) { Start-Sleep 2 }
+          "卸载等了 $($i * 2) 秒"
+          if (Test-Path "$dir\python") { "还在的文件："; Get-ChildItem -Recurse "$dir" -File | Select-Object -First 15 | ForEach-Object { $_.FullName } }
           if (Test-Path "$dir\python") { $fail += '卸载后文件还在' }
           if (Test-Path "$desk\书库.lnk") { $fail += '卸载后桌面图标还在' }
           if (Get-Process pythonw -ErrorAction SilentlyContinue) { $fail += '卸载后程序还开着' }
