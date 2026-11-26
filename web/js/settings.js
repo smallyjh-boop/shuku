@@ -29,10 +29,16 @@ export async function renderSettings(main, ctx) {
       ['tts', narration(s, ctx)], ['fulltext', fulltextSec(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)], ['about', about(s)]]
     : [['app', isNative && appSection(ctx)], ['look', appearance(ctx)], ['account', account(s, ctx)], ['devices', devices(s)],
       ['tts', narrationMember(s)], ['opds', opdsSec(s, ctx)], ['update', updateSec(s, ctx)]]
-  const secs = (await Promise.all(list.map(async ([id, el]) => [id, await el]))).filter(([, el]) => el)
-  for (const [id, el] of secs) el.id = 'set-' + id
-  fill(wrap, secs.map(([, el]) => el))
-  fill(toc, secs.map(([id, el]) => h('button', { type: 'button', class: 'chip', onclick: () => document.getElementById('set-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, el.querySelector('h2')?.textContent || id)))
+  // 每一节好了就先显示（以前要等最慢的一节，比如数缓存大小，整页才出来）；目录跟着补
+  const drawToc = () => fill(toc, [...wrap.querySelectorAll(':scope > [id^="set-"]')].map(el => h('button', { type: 'button', class: 'chip',
+    onclick: () => el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, el.querySelector('h2')?.textContent || el.id)))
+  fill(wrap, list.filter(([, el]) => el).map(([id, el]) => {
+    if (!(el instanceof Promise)) { el.id = 'set-' + id; return el }
+    const slot = h('div', { class: 'set-slot muted' })
+    el.then(sec => { if (sec) { sec.id = 'set-' + id; slot.replaceWith(sec) } else slot.remove(); drawToc() }, () => slot.remove())
+    return slot
+  }))
+  drawToc()
 }
 
 const sec = (title, desc, ...children) => h('section', { class: 'set-sec' }, h('h2', null, title), desc ? h('p', null, desc) : null, ...children)

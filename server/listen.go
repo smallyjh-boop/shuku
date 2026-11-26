@@ -249,7 +249,7 @@ func getListenScript(f *File) (*listenScript, error) {
 	scriptCache.Lock()
 	scriptCache.m[key] = sc
 	scriptCache.order = append(scriptCache.order, key)
-	if len(scriptCache.order) > 6 {
+	if len(scriptCache.order) > 24 {
 		delete(scriptCache.m, scriptCache.order[0])
 		scriptCache.order = scriptCache.order[1:]
 	}
@@ -523,6 +523,9 @@ type listenJob struct {
 	Engine   string       `json:"engine,omitempty"` // 现在在用哪个合成：ms / pc / nas
 	LastErr  string       `json:"last_error,omitempty"`
 	Finished bool         `json:"finished"`
+	// 检查过已经准备齐了（auto 任务不会“做完”，设备一直报新位置）：记下当时的 Updated，
+	// 位置没再变就不用每一轮都去数一遍文件（1.0.0.37：以前每 2 秒把所有任务都查一遍，书多了 NAS 一直很忙）
+	Checked int64 `json:"checked,omitempty"`
 }
 
 var listenJobs = struct {
@@ -731,7 +734,7 @@ func listenStep(ctx context.Context) bool {
 	listenJobs.Lock()
 	jobs := make([]*listenJob, 0, len(listenJobs.m))
 	for _, j := range listenJobs.m {
-		if !j.Paused && !j.Finished {
+		if !j.Paused && !j.Finished && !(j.Checked != 0 && j.Checked == j.Updated) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -753,8 +756,10 @@ func listenStep(ctx context.Context) bool {
 			continue
 		}
 		dir := packDir(j.FileID, j.Voices.key())
-		os.MkdirAll(dir, 0o755)
-		os.WriteFile(filepath.Join(dir, "voices.json"), mustJSON(j.Voices), 0o644)
+		if _, err := os.Stat(filepath.Join(dir, "voices.json")); err != nil {
+			os.MkdirAll(dir, 0o755)
+			os.WriteFile(filepath.Join(dir, "voices.json"), mustJSON(j.Voices), 0o644)
+		}
 		// 找范围里第一句还没准备的（交给电脑还没回来的跳过）
 		var todo *struct {
 			n, i int
@@ -778,8 +783,9 @@ func listenStep(ctx context.Context) bool {
 			listenJobs.Lock()
 			if j.Scope != "auto" && !j.Finished {
 				j.Finished = true
-				saveListenJobsLocked()
 			}
+			j.Checked = j.Updated // 设备报了新位置（Updated 变了）再查
+			saveListenJobsLocked()
 			listenJobs.Unlock()
 			continue
 		}
@@ -867,17 +873,43 @@ func listenLimit() int64 {
 }
 
 func listenTrimLoop(ctx context.Context) {
+	wait := 30 * time.Second // 启动后先清一次（升级前攒下的旧任务）
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Minute):
+		case <-time.After(wait):
 		}
 		trimListen()
+		wait = 10 * time.Minute
 	}
 }
 
 func trimListen() {
+	// 自动的任务（听书、打开书时设备报的）3 天没再报：不用了（准备好的包留着，按空间上限删）；
+	// 每人最多留最近的 20 个
+	listenJobs.Lock()
+	old := time.Now().Add(-72 * time.Hour).Unix()
+	perUser := map[int64][]*listenJob{}
+	for id, j := range listenJobs.m {
+		if j.Scope == "auto" && j.Updated < old {
+			delete(listenJobs.m, id)
+			continue
+		}
+		if j.Scope == "auto" {
+			perUser[j.UserID] = append(perUser[j.UserID], j)
+		}
+	}
+	for _, list := range perUser {
+		if len(list) <= 20 {
+			continue
+		}
+		sort.Slice(list, func(a, b int) bool { return list[a].Updated > list[b].Updated })
+		for _, j := range list[20:] {
+			delete(listenJobs.m, j.ID)
+		}
+	}
+	listenJobs.Unlock()
 	// 读完的书：这本的任务和包删掉
 	listenJobs.Lock()
 	for id, j := range listenJobs.m {

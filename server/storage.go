@@ -260,15 +260,45 @@ func diskFree(p string) (free, total int64) {
 	return int64(st.Bavail) * int64(st.Bsize), int64(st.Blocks) * int64(st.Bsize)
 }
 
+// 各个缓存目录多大：数一遍要把成千上万个小文件都看一遍（NAS 的硬盘上要好几秒），5 分钟内用上次数的；清理后作废
+var cacheSizes struct {
+	sync.Mutex
+	at time.Time
+	m  map[string]int64
+}
+
+func cachedDirSize(key, p string) int64 {
+	cacheSizes.Lock()
+	if time.Since(cacheSizes.at) > 5*time.Minute || cacheSizes.m == nil {
+		cacheSizes.m, cacheSizes.at = map[string]int64{}, time.Now()
+	}
+	n, ok := cacheSizes.m[key]
+	cacheSizes.Unlock()
+	if ok {
+		return n
+	}
+	n = dirSize(p)
+	cacheSizes.Lock()
+	cacheSizes.m[key] = n
+	cacheSizes.Unlock()
+	return n
+}
+
+func forgetCacheSizes() {
+	cacheSizes.Lock()
+	cacheSizes.m = nil
+	cacheSizes.Unlock()
+}
+
 func handleStorage(w http.ResponseWriter, r *http.Request) {
 	caches := []map[string]any{}
 	var cacheTotal int64
 	for _, k := range cacheKinds {
-		n := dirSize(filepath.Join(cacheRoot(), k.dir))
+		n := cachedDirSize(k.dir, filepath.Join(cacheRoot(), k.dir))
 		cacheTotal += n
 		caches = append(caches, map[string]any{"key": k.dir, "name": k.name, "size": n})
 	}
-	tts := dirSize(filepath.Join(cacheRoot(), "tts"))
+	tts := cachedDirSize("tts", filepath.Join(cacheRoot(), "tts"))
 	fileSize := func(p string) int64 {
 		var n int64
 		for _, suf := range []string{"", "-wal"} {
@@ -315,6 +345,7 @@ func handleStorage(w http.ResponseWriter, r *http.Request) {
 
 // 清理缓存：{kind: "arc" | "pages" | ... | "all"}，或 {limit_mb: 新上限}
 func handleStorageClean(w http.ResponseWriter, r *http.Request) {
+	defer forgetCacheSizes()
 	var req struct {
 		Kind    string `json:"kind"`
 		LimitMB int64  `json:"limit_mb"`
